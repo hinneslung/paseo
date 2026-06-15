@@ -1,6 +1,7 @@
 import { Platform } from "react-native";
 import { getElectronHost } from "@/desktop/electron/host";
 import type { BrowserKeyboardPolicy } from "@/desktop/browser/shortcuts";
+import { isVscodeRuntime } from "@/desktop/vscode/host";
 import type { SessionInboundMessage, SessionOutboundMessage } from "@getpaseo/protocol/messages";
 
 type BrowserAutomationExecuteRequest = Extract<
@@ -76,6 +77,13 @@ export interface DesktopEditorOpenTargetInput {
   filePath?: string;
   line?: number;
   column?: number;
+}
+
+export interface VscodeRuntimeConfig {
+  endpoint: string | null;
+  hasPassword: boolean;
+  bridgeProtocol: number;
+  workspaceFolders: string[];
 }
 
 export interface DesktopEditorBridge {
@@ -189,6 +197,7 @@ export interface DesktopHostBridge {
 declare global {
   interface Window {
     paseoDesktop?: DesktopHostBridge;
+    paseoVscode?: VscodeRuntimeConfig;
   }
 }
 
@@ -200,7 +209,7 @@ export function getDesktopHost(): DesktopHostBridge | null {
 }
 
 export function isElectronRuntime(): boolean {
-  return getDesktopHost() !== null;
+  return getElectronHost() !== null && !isVscodeRuntime();
 }
 
 export function isElectronRuntimeMac(): boolean {

@@ -1,0 +1,4 @@
+media/app-dist
+dist
+*.vsix
+.vscode-test/

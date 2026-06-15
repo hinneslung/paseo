@@ -1,0 +1,79 @@
+{
+  "name": "paseo-vscode",
+  "displayName": "Paseo",
+  "version": "0.1.96",
+  "private": true,
+  "description": "Paseo inside VS Code.",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/getpaseo/paseo.git",
+    "directory": "packages/vscode"
+  },
+  "publisher": "getpaseo",
+  "main": "dist/extension.js",
+  "scripts": {
+    "copy:app-dist": "node scripts/copy-app-dist.mjs",
+    "build:esbuild": "node esbuild.mjs",
+    "build": "npm run copy:app-dist && npm run build:esbuild && vsce package --no-dependencies -o paseo.vsix",
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "test": "npm run copy:app-dist && npm run build:esbuild && vitest run src/webview/html-rewrite.test.ts --bail=1 && node src/test/run-vscode-smoke.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "24.6.0",
+    "@types/vscode": "^1.96.0",
+    "@types/ws": "^8.18.1",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.2",
+    "esbuild": "^0.25.12",
+    "typescript": "5.9.3",
+    "vitest": "^4.1.6",
+    "ws": "^8.20.0"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "paseo",
+          "title": "Paseo",
+          "icon": "media/paseo-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "paseo": [
+        {
+          "id": "paseo.webview",
+          "name": "Paseo"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "paseo.open",
+        "title": "Paseo: Open"
+      }
+    ],
+    "configuration": {
+      "title": "Paseo",
+      "properties": {
+        "paseo.endpoint": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional daemon endpoint override for future VS Code daemon transport support. Example: `127.0.0.1:6768`."
+        }
+      }
+    }
+  },
+  "activationEvents": [
+    "onCommand:paseo.open",
+    "onView:paseo.webview"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "engines": {
+    "vscode": "^1.96.0"
+  }
+}
