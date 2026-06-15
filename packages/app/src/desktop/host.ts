@@ -1,5 +1,6 @@
 import { Platform } from "react-native";
 import { getElectronHost } from "@/desktop/electron/host";
+import { isVscodeRuntime } from "@/desktop/vscode/host";
 
 export type DesktopNotificationPermission = "granted" | "denied" | "default";
 
@@ -62,6 +63,13 @@ export interface DesktopEditorOpenTargetInput {
   path: string;
   cwd?: string;
   mode?: "open" | "reveal";
+}
+
+export interface VscodeRuntimeConfig {
+  endpoint: string | null;
+  hasPassword: boolean;
+  bridgeProtocol: number;
+  workspaceFolders: string[];
 }
 
 export interface DesktopEditorBridge {
@@ -144,6 +152,7 @@ export interface DesktopHostBridge {
 declare global {
   interface Window {
     paseoDesktop?: DesktopHostBridge;
+    paseoVscode?: VscodeRuntimeConfig;
   }
 }
 
@@ -155,7 +164,7 @@ export function getDesktopHost(): DesktopHostBridge | null {
 }
 
 export function isElectronRuntime(): boolean {
-  return getDesktopHost() !== null;
+  return getElectronHost() !== null && !isVscodeRuntime();
 }
 
 export function isElectronRuntimeMac(): boolean {
