@@ -9,7 +9,11 @@ export interface DroppedPathItem {
   kind: "desktop-path";
   path: string;
 }
-export type DroppedItem = DroppedFileItem | DroppedPathItem;
+export interface DroppedFileUriItem {
+  kind: "file-uri";
+  path: string;
+}
+export type DroppedItem = DroppedFileItem | DroppedPathItem | DroppedFileUriItem;
 
 /**
  * What a consumer (e.g. a composer) registers to receive files dropped onto the

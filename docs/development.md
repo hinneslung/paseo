@@ -217,6 +217,19 @@ PASEO_PROFILE_IDLE_WAIT_MS=3000             # idle baseline before switching
 PASEO_PROFILE_DUMP_COMMITS=1                # include per-commit profiler samples
 ```
 
+### VS Code extension webview debugging
+
+`packages/vscode/scripts/cdp-debug.mjs` launches a real VS Code instance with
+the development extension and connects Playwright over CDP. Use it for webview
+debugging that cannot be proven by unit tests, such as bridge commands and
+composer interactions.
+
+VS Code webviews rewrite initial HTML asset URLs, but Metro async chunks can
+still try to load from the raw `vscode-webview://` origin and fail with 403s.
+When a VS Code path depends on app code at runtime, prefer keeping that code in
+the main web bundle over introducing a dynamic `import()`, then verify with the
+CDP harness console output.
+
 ### Desktop macOS compositor watchdog
 
 macOS display sleep can leave Chromium's GPU-process display link — the vsync

@@ -3,11 +3,25 @@ import { clearPassword, getPassword, promptForDaemonPassword } from "../auth/sec
 import { type FetchLike, type ResolvedDaemonEndpoint } from "../daemon/discovery";
 import { createEventEnvelope, type HostToWebviewEnvelope } from "../webview/messaging";
 import {
+  copyAttachmentFileToManagedStorage,
+  deleteManagedAttachmentFile,
+  garbageCollectManagedAttachmentFiles,
+  readManagedFileBase64,
+  writeAttachmentBase64,
+  writeAttachmentBytes,
+} from "./attachment-commands";
+import {
   DaemonTransport,
   DaemonTransportAuthError,
   type TcpTransportTarget,
   type TransportEventPayload,
 } from "./daemon-transport";
+import {
+  formatDialogOpenResult,
+  getVscodeOpenDialogFilters,
+  parseDialogOpenInput,
+  parseDialogOpenSelectionOverride,
+} from "./dialog-commands";
 import {
   parseEditorOpenTargetInput,
   parseOpenUrlInput,
@@ -110,14 +124,31 @@ export class BridgeRouter {
       case "close_local_daemon_transport":
         this.transport.closeLocalTransportSession(parseSessionId(args));
         return null;
+      case "copy_attachment_file":
+        return await copyAttachmentFileToManagedStorage(this.context.globalStorageUri.fsPath, args);
+      case "delete_attachment_file":
+        return await deleteManagedAttachmentFile(this.context.globalStorageUri.fsPath, args);
+      case "dialog.open":
+        return await this.openDialog(args);
       case "editor.listTargets":
         return VSCODE_EDITOR_TARGETS;
+      case "garbage_collect_attachment_files":
+        return await garbageCollectManagedAttachmentFiles(
+          this.context.globalStorageUri.fsPath,
+          args,
+        );
       case "editor.openTarget":
         await this.openEditorTarget(args);
         return null;
       case "opener.openUrl":
         await this.openUrl(args);
         return null;
+      case "read_file_base64":
+        return await readManagedFileBase64(this.context.globalStorageUri.fsPath, args);
+      case "write_attachment_base64":
+        return await writeAttachmentBase64(this.context.globalStorageUri.fsPath, args);
+      case "write_attachment_bytes":
+        return await writeAttachmentBytes(this.context.globalStorageUri.fsPath, args);
       default:
         throw new Error(`VS Code bridge command not implemented: ${command}`);
     }
@@ -189,6 +220,31 @@ export class BridgeRouter {
     }
   }
 
+  private async openDialog(args: unknown): Promise<string | string[] | null> {
+    const input = parseDialogOpenInput(args);
+    const testPaths = parseDialogOpenSelectionOverride(
+      process.env.PASEO_VSCODE_TEST_DIALOG_OPEN_PATHS,
+    );
+    if (testPaths) {
+      return formatDialogOpenResult(testPaths, input.multiple);
+    }
+
+    const defaultUri = input.defaultPath ? vscode.Uri.file(input.defaultPath) : undefined;
+    const filters = getVscodeOpenDialogFilters(input.filters);
+    const uris = await vscode.window.showOpenDialog({
+      title: input.title,
+      defaultUri,
+      canSelectFiles: !input.directory,
+      canSelectFolders: input.directory,
+      canSelectMany: input.multiple,
+      filters,
+    });
+    return formatDialogOpenResult(
+      uris?.map((uri) => uri.fsPath),
+      input.multiple,
+    );
+  }
+
   private async openUrl(args: unknown): Promise<void> {
     const input = parseOpenUrlInput(args);
     try {
@@ -206,11 +262,21 @@ async function openTextEditorTarget(target: EditorOpenTargetInput): Promise<void
     return;
   }
   const uri = vscode.Uri.file(target.filePath);
-  const doc = await vscode.workspace.openTextDocument(uri);
-  const editor = await vscode.window.showTextDocument(doc);
   if (target.line === undefined) {
+    await vscode.commands.executeCommand("vscode.open", uri);
     return;
   }
+
+  // A line was requested, so open as a text editor and reveal it. Fall back to the default
+  // editor if the file turns out not to be text.
+  let doc: vscode.TextDocument;
+  try {
+    doc = await vscode.workspace.openTextDocument(uri);
+  } catch {
+    await vscode.commands.executeCommand("vscode.open", uri);
+    return;
+  }
+  const editor = await vscode.window.showTextDocument(doc);
 
   const startLine = clampLineIndex(target.line, doc.lineCount);
   const endLine =
