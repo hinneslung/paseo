@@ -5,30 +5,13 @@ import { buildWebviewHtml, type VscodeRuntimeConfig } from "./html-rewrite";
 interface BuildWebviewDocumentInput {
   extensionUri: vscode.Uri;
   webview: vscode.Webview;
+  runtimeConfig: VscodeRuntimeConfig;
 }
 
 const textDecoder = new TextDecoder();
 
 function createNonce(): string {
   return randomBytes(16).toString("hex");
-}
-
-function getConfiguredEndpoint(): string | null {
-  const setting = vscode.workspace.getConfiguration("paseo").get<string>("endpoint")?.trim();
-  if (setting) {
-    return setting;
-  }
-  const envEndpoint = process.env.PASEO_VSCODE_ENDPOINT?.trim();
-  return envEndpoint || null;
-}
-
-function getRuntimeConfig(): VscodeRuntimeConfig {
-  return {
-    endpoint: getConfiguredEndpoint(),
-    hasPassword: false,
-    bridgeProtocol: 1,
-    workspaceFolders: vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [],
-  };
 }
 
 function buildAssetUri(appDistRoot: vscode.Uri, assetPath: string): vscode.Uri {
@@ -53,6 +36,6 @@ export async function buildWebviewDocument(input: BuildWebviewDocumentInput): Pr
     cspSource: input.webview.cspSource,
     nonce: createNonce(),
     bootstrapUri: bootstrapUri.toString(),
-    runtimeConfig: getRuntimeConfig(),
+    runtimeConfig: input.runtimeConfig,
   });
 }
