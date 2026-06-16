@@ -71,4 +71,39 @@ describe("normalizeStoredHostProfile", () => {
       daemonPublicKeyB64: "pubkey",
     });
   });
+
+  it("loads direct TCP bridge connections without loopback rewriting", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_vscode",
+      connections: [
+        {
+          id: "bridge:localhost:6767",
+          type: "directTcpBridge",
+          endpoint: "127.0.0.1:6767",
+          password: "not-used-in-webview",
+        },
+      ],
+    });
+
+    expect(profile?.connections[0]).toEqual({
+      id: "bridge:127.0.0.1:6767",
+      type: "directTcpBridge",
+      endpoint: "127.0.0.1:6767",
+    });
+  });
+
+  it("drops invalid direct TCP bridge connections", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_vscode",
+      connections: [
+        {
+          id: "bridge:missing-port",
+          type: "directTcpBridge",
+          endpoint: "missing-port",
+        },
+      ],
+    });
+
+    expect(profile).toBeNull();
+  });
 });
