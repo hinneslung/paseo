@@ -66,6 +66,25 @@ async function renderWebview(
     localResourceRoots: getLocalResourceRoots(context),
   };
   const resolvedEndpoint = await resolveDaemonEndpoint();
+  // Resolve the daemon password BEFORE loading the webview app. The app's bootstrap
+  // connection probe has a short (~2.5s) timeout; if the bridge prompted lazily during that
+  // probe the interactive input box would outlive the timeout and the probe would fail. So we
+  // prompt up-front (storing the secret). EXCEPTION: when PASEO_VSCODE_TEST_PASSWORD is set
+  // (CDP/E2E harness only — never production) we skip the prompt AND the secrets write
+  // entirely; the bridge reads that env var directly. Touching SecretStorage here can hang in
+  // a headless host with no keyring, which would block the render.
+  if (
+    resolvedEndpoint.requiresPassword &&
+    !process.env.PASEO_VSCODE_TEST_PASSWORD?.trim() &&
+    (await getPassword(context, resolvedEndpoint.endpoint)) === null
+  ) {
+    try {
+      await promptForDaemonPassword({ context, endpoint: resolvedEndpoint.endpoint });
+    } catch {
+      // User dismissed or entered a wrong password; render the app anyway (it will show a
+      // not-connected state). They can retry via the "Paseo: Set Daemon Password" command.
+    }
+  }
   const runtimeConfig = await buildRuntimeConfig(context, resolvedEndpoint);
   const sendToWebview = webview.postMessage.bind(webview);
   const router = new BridgeRouter({
