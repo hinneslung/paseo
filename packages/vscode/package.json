@@ -17,7 +17,7 @@
     "build:esbuild": "node esbuild.mjs",
     "build": "npm run copy:app-dist && npm run build:esbuild && vsce package --no-dependencies -o paseo.vsix",
     "typecheck": "tsgo --noEmit -p tsconfig.json",
-    "test": "npm run copy:app-dist && npm run build:esbuild && vitest run src/webview/html-rewrite.test.ts --bail=1 && node src/test/run-vscode-smoke.mjs"
+    "test": "npm run copy:app-dist && npm run build:esbuild && vitest run src/**/*.test.ts --bail=1 && node src/test/run-vscode-smoke.mjs"
   },
   "dependencies": {},
   "devDependencies": {
@@ -53,6 +53,14 @@
       {
         "command": "paseo.open",
         "title": "Paseo: Open"
+      },
+      {
+        "command": "paseo.setPassword",
+        "title": "Paseo: Set Daemon Password"
+      },
+      {
+        "command": "paseo.clearPassword",
+        "title": "Paseo: Clear Daemon Password"
       }
     ],
     "configuration": {
@@ -67,7 +75,9 @@
     }
   },
   "activationEvents": [
+    "onCommand:paseo.clearPassword",
     "onCommand:paseo.open",
+    "onCommand:paseo.setPassword",
     "onView:paseo.webview"
   ],
   "extensionKind": [
