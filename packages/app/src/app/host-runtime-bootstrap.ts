@@ -6,6 +6,7 @@ import {
   buildHostRootRoute,
   buildHostWorkspaceRoute,
 } from "@/utils/host-routes";
+import type { VscodeWorkspaceMatchState } from "@/desktop/vscode/initial-target";
 
 export interface HostRuntimeBootstrapStore {
   boot: () => void;
@@ -138,6 +139,8 @@ export interface ResolveIndexStartupRouteInput extends ResolveStartupRouteBaseIn
   workspaceSelection: ActiveWorkspaceSelection | null;
   isWorkspaceSelectionLoaded: boolean;
   hasGivenUpWaitingForHost: boolean;
+  isVscodeRuntime?: boolean;
+  vscodeWorkspaceMatchState?: VscodeWorkspaceMatchState;
 }
 
 export interface ResolveHostStartupRouteInput extends ResolveStartupRouteBaseInput {
@@ -169,6 +172,28 @@ function resolveReadyIndexStartupRoute(input: ResolveIndexStartupRouteInput): St
 
   if (!input.isWorkspaceSelectionLoaded) {
     return { kind: "splash" };
+  }
+
+  if (input.isVscodeRuntime && input.vscodeWorkspaceMatchState?.status === "loading") {
+    return { kind: "splash" };
+  }
+
+  const vscodeWorkspaceMatchState = input.vscodeWorkspaceMatchState;
+  if (
+    input.isVscodeRuntime &&
+    vscodeWorkspaceMatchState?.status === "ready" &&
+    vscodeWorkspaceMatchState.match
+  ) {
+    if ("workspaceId" in vscodeWorkspaceMatchState.match) {
+      return {
+        kind: "redirect",
+        href: buildHostWorkspaceRoute(
+          vscodeWorkspaceMatchState.match.serverId,
+          vscodeWorkspaceMatchState.match.workspaceId,
+        ),
+      };
+    }
+    return { kind: "redirect", href: buildHostRootRoute(vscodeWorkspaceMatchState.match.serverId) };
   }
 
   const workspaceSelection = input.workspaceSelection;
