@@ -100,7 +100,11 @@ describe("daemon transport", () => {
     const { transport, events, sockets } = createTransport();
 
     const sessionPromise = transport.openLocalTransportSession({
-      target: { transportType: "tcp", endpoint: "192.168.1.194:6768" },
+      target: {
+        transportType: "tcp",
+        endpoint: "192.168.1.194:6768",
+        protocols: ["paseo.extra"],
+      },
       password: "test-password",
     });
     const socket = sockets[0];
@@ -109,7 +113,7 @@ describe("daemon transport", () => {
 
     expect(socket.input).toEqual({
       url: "ws://192.168.1.194:6768/ws",
-      protocols: ["paseo.bearer.test-password"],
+      protocols: ["paseo.extra", "paseo.bearer.test-password"],
       headers: { Authorization: "Bearer test-password" },
     });
     expect(events).toEqual([{ sessionId, kind: "open" }]);

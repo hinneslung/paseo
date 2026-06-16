@@ -21,6 +21,12 @@ export interface DirectPipeHostConnection {
   path: string;
 }
 
+export interface DirectTcpBridgeHostConnection {
+  id: string;
+  type: "directTcpBridge";
+  endpoint: string;
+}
+
 export interface RelayHostConnection {
   id: string;
   type: "relay";
@@ -31,6 +37,7 @@ export interface RelayHostConnection {
 
 export type HostConnection =
   | DirectTcpHostConnection
+  | DirectTcpBridgeHostConnection
   | DirectSocketHostConnection
   | DirectPipeHostConnection
   | RelayHostConnection;
@@ -67,6 +74,9 @@ function hostConnectionEquals(left: HostConnection, right: HostConnection): bool
       (left.useTls ?? false) === (right.useTls ?? false) &&
       left.password === right.password
     );
+  }
+  if (left.type === "directTcpBridge" && right.type === "directTcpBridge") {
+    return left.endpoint === right.endpoint;
   }
   if (left.type === "directSocket" && right.type === "directSocket") {
     return left.path === right.path;
@@ -243,6 +253,64 @@ function toObjectRecord(value: unknown): Record<string, unknown> | undefined {
   return isPlainRecord(value) ? value : undefined;
 }
 
+function normalizeStoredDirectTcpConnection(
+  record: Record<string, unknown>,
+): DirectTcpHostConnection | null {
+  try {
+    const endpoint = normalizeLoopbackToLocalhost(
+      normalizeHostPort(typeof record.endpoint === "string" ? record.endpoint : ""),
+    );
+    return DirectTcpHostConnectionSchema.parse({
+      id: `direct:${endpoint}`,
+      type: "directTcp",
+      endpoint,
+      useTls: record.useTls,
+      ...(typeof record.password === "string" ? { password: record.password } : {}),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function normalizeStoredDirectTcpBridgeConnection(
+  record: Record<string, unknown>,
+): DirectTcpBridgeHostConnection | null {
+  try {
+    const endpoint = normalizeHostPort(typeof record.endpoint === "string" ? record.endpoint : "");
+    return {
+      id: `bridge:${endpoint}`,
+      type: "directTcpBridge",
+      endpoint,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeStoredRelayConnection(
+  record: Record<string, unknown>,
+): RelayHostConnection | null {
+  try {
+    const relayEndpoint = normalizeHostPort(
+      typeof record.relayEndpoint === "string" ? record.relayEndpoint : "",
+    );
+    const daemonPublicKeyB64 = (
+      typeof record.daemonPublicKeyB64 === "string" ? record.daemonPublicKeyB64 : ""
+    ).trim();
+    if (!daemonPublicKeyB64) return null;
+    const useTls = typeof record.useTls === "boolean" ? record.useTls : undefined;
+    return {
+      id: useTls === true ? `relay:wss:${relayEndpoint}` : `relay:${relayEndpoint}`,
+      type: "relay",
+      relayEndpoint,
+      ...(useTls !== undefined ? { useTls } : {}),
+      daemonPublicKeyB64,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function normalizeStoredConnection(connection: unknown): HostConnection | null {
   const record = toObjectRecord(connection);
   if (!record) {
@@ -250,20 +318,10 @@ function normalizeStoredConnection(connection: unknown): HostConnection | null {
   }
   const type = record.type;
   if (type === "directTcp") {
-    try {
-      const endpoint = normalizeLoopbackToLocalhost(
-        normalizeHostPort(typeof record.endpoint === "string" ? record.endpoint : ""),
-      );
-      return DirectTcpHostConnectionSchema.parse({
-        id: `direct:${endpoint}`,
-        type: "directTcp",
-        endpoint,
-        useTls: record.useTls,
-        ...(typeof record.password === "string" ? { password: record.password } : {}),
-      });
-    } catch {
-      return null;
-    }
+    return normalizeStoredDirectTcpConnection(record);
+  }
+  if (type === "directTcpBridge") {
+    return normalizeStoredDirectTcpBridgeConnection(record);
   }
   if (type === "directSocket") {
     const path = (typeof record.path === "string" ? record.path : "").trim();
@@ -274,25 +332,7 @@ function normalizeStoredConnection(connection: unknown): HostConnection | null {
     return path ? { id: `pipe:${path}`, type: "directPipe", path } : null;
   }
   if (type === "relay") {
-    try {
-      const relayEndpoint = normalizeHostPort(
-        typeof record.relayEndpoint === "string" ? record.relayEndpoint : "",
-      );
-      const daemonPublicKeyB64 = (
-        typeof record.daemonPublicKeyB64 === "string" ? record.daemonPublicKeyB64 : ""
-      ).trim();
-      if (!daemonPublicKeyB64) return null;
-      const useTls = typeof record.useTls === "boolean" ? record.useTls : undefined;
-      return {
-        id: useTls === true ? `relay:wss:${relayEndpoint}` : `relay:${relayEndpoint}`,
-        type: "relay",
-        relayEndpoint,
-        ...(useTls !== undefined ? { useTls } : {}),
-        daemonPublicKeyB64,
-      };
-    } catch {
-      return null;
-    }
+    return normalizeStoredRelayConnection(record);
   }
 
   return null;
