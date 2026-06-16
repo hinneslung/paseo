@@ -28,7 +28,8 @@ describe("buildWebviewHtml", () => {
       },
     });
 
-    expect(html).toContain('<base href="vscode-webview://paseo/">');
+    // No <base href> is injected: it would make Expo Router write cross-origin history URLs.
+    expect(html).not.toContain("<base href");
     expect(html).toContain('href="vscode-webview://paseo/favicon.png"');
     expect(html).toContain('href="vscode-webview://paseo/apple-touch-icon.png"');
     expect(html).toContain('href="vscode-webview://paseo/_expo/static/css/main.css"');

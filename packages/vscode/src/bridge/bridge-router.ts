@@ -114,6 +114,12 @@ export class BridgeRouter {
     if (stored) {
       return stored;
     }
+    // Test/automation seam (never set in production): authenticate from the env var directly,
+    // without touching SecretStorage or prompting. Keeps the E2E/CDP harness non-interactive.
+    const testPassword = process.env.PASEO_VSCODE_TEST_PASSWORD?.trim();
+    if (testPassword) {
+      return testPassword;
+    }
     if (!this.resolvedEndpoint.requiresPassword) {
       return null;
     }
