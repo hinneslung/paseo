@@ -7,6 +7,7 @@ import {
   type SkillsSaveResult,
   type SkillsSnapshot,
 } from "@/desktop/daemon/skills-snapshot";
+import { isVscodeRuntime } from "@/desktop/vscode/host";
 
 export type DesktopDaemonState = "starting" | "running" | "stopped" | "errored";
 export type DesktopDaemonStopReason =
@@ -40,11 +41,27 @@ export interface DesktopAppLogs {
   contents: string;
 }
 
-export interface LocalTransportTarget {
+export interface DesktopPairingOffer {
+  relayEnabled: boolean;
+  url: string | null;
+  qr: string | null;
+}
+
+export interface LocalSocketTransportTarget {
   [key: string]: unknown;
   transportType: "socket" | "pipe";
   transportPath: string;
+  protocols?: string[];
 }
+
+export interface LocalTcpTransportTarget {
+  [key: string]: unknown;
+  transportType: "tcp";
+  endpoint: string;
+  protocols?: string[];
+}
+
+export type LocalTransportTarget = LocalSocketTransportTarget | LocalTcpTransportTarget;
 
 interface LocalTransportEventPayload {
   sessionId: string;
@@ -115,6 +132,10 @@ function parseDesktopDaemonLogs(raw: unknown): DesktopDaemonLogs {
 
 export function shouldUseDesktopDaemon(): boolean {
   return isElectronRuntime();
+}
+
+export function shouldUseVscodeDaemon(): boolean {
+  return isVscodeRuntime();
 }
 
 export async function getDesktopDaemonStatus(): Promise<DesktopDaemonStatus> {

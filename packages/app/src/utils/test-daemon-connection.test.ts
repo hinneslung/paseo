@@ -44,8 +44,12 @@ class FakeDaemonProbe {
     },
     resolveAppVersion: () => null,
     createLocalTransportFactory: () => null,
-    buildLocalTransportUrl: ({ transportType, transportPath }) =>
-      `paseo+local://${transportType}?path=${encodeURIComponent(transportPath)}`,
+    buildLocalTransportUrl: (target) => {
+      if (target.transportType === "tcp") {
+        return `paseo+local://tcp?endpoint=${encodeURIComponent(target.endpoint)}`;
+      }
+      return `paseo+local://${target.transportType}?path=${encodeURIComponent(target.transportPath)}`;
+    },
     createClient: (config) => {
       const client = new FakeDaemonClient(this, config);
       this.createdClients.push(client);
@@ -138,6 +142,25 @@ describe("test-daemon-connection connectToDaemon", () => {
     await result.client.close();
 
     expect(probe.createdConfigs()[0]?.url).toBe("paseo+local://socket?path=%2Ftmp%2Fpaseo.sock");
+  });
+
+  it("encodes direct TCP bridge targets without passing a password", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const result = await connectToDaemon(
+      {
+        id: "bridge:127.0.0.1:6767",
+        type: "directTcpBridge",
+        endpoint: "127.0.0.1:6767",
+      },
+      undefined,
+      probe.deps,
+    );
+    await result.client.close();
+
+    expect(probe.createdConfigs()[0]).toMatchObject({
+      url: "paseo+local://tcp?endpoint=127.0.0.1%3A6767",
+    });
+    expect(probe.createdConfigs()[0]).not.toHaveProperty("password");
   });
 
   it("passes direct TCP connection passwords into the client config", async () => {

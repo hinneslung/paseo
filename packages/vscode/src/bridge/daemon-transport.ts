@@ -3,6 +3,7 @@ import { WebSocket, type RawData } from "ws";
 export interface TcpTransportTarget {
   transportType: "tcp";
   endpoint: string;
+  protocols?: string[];
 }
 
 export interface TransportEventPayload {
@@ -128,11 +129,18 @@ export class DaemonTransport {
   }): Promise<string> {
     const sessionId = `vscode-session-${++this.nextSessionId}`;
     const url = buildWebSocketUrl(input.target);
-    const protocols = input.password ? [`paseo.bearer.${input.password}`] : undefined;
+    const protocols = [
+      ...(input.target.protocols ?? []),
+      ...(input.password ? [`paseo.bearer.${input.password}`] : []),
+    ];
     const headers = input.password ? { Authorization: `Bearer ${input.password}` } : undefined;
 
     return new Promise((resolve, reject) => {
-      const ws = this.webSocketFactory({ url, protocols, headers });
+      const ws = this.webSocketFactory({
+        url,
+        ...(protocols.length > 0 ? { protocols } : {}),
+        ...(headers ? { headers } : {}),
+      });
       const session: Session = {
         id: sessionId,
         ws,

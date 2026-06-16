@@ -494,6 +494,24 @@ class BrowserClientLifecycle {
   }
 }
 
+async function withGlobalWindow<T>(value: unknown, run: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    writable: true,
+    value,
+  });
+  try {
+    return await run();
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(globalThis, "window", descriptor);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+}
+
 describe("HostRuntimeController", () => {
   it("replaces the active relay client when re-pairing changes the daemon public key", async () => {
     const oldRelay: HostConnection = {
@@ -641,6 +659,31 @@ describe("HostRuntimeController", () => {
     await controller.stop();
 
     expect(lifecycle.active).toEqual([]);
+  });
+
+  it("exposes direct TCP bridge connections as the active connection", async () => {
+    const bridge: HostConnection = {
+      id: "bridge:127.0.0.1:6767",
+      type: "directTcpBridge",
+      endpoint: "127.0.0.1:6767",
+    };
+    const clients: FakeDaemonClient[] = [];
+    const controller = new HostRuntimeController({
+      host: makeHost({
+        connections: [bridge],
+        preferredConnectionId: bridge.id,
+      }),
+      deps: makeDeps({ [bridge.id]: 12 }, clients),
+    });
+
+    await controller.start({ autoProbe: false });
+
+    expect(controller.getSnapshot().activeConnection).toEqual({
+      type: "directTcpBridge",
+      endpoint: "127.0.0.1:6767",
+      display: "127.0.0.1:6767",
+    });
+    expect(controller.getSnapshot().connectionStatus).toBe("online");
   });
 
   it("adopts the first successful probe on startup", async () => {
@@ -3205,6 +3248,67 @@ describe("HostRuntimeStore", () => {
     expect(store.getHosts()[0]?.label).toBe("mbp");
 
     store.syncHosts([]);
+  });
+
+  it("bootstraps a passwordless VS Code bridge connection from runtime config", async () => {
+    await withGlobalWindow(
+      {
+        paseoVscode: {
+          endpoint: "127.0.0.1:6767",
+          hasPassword: true,
+          bridgeProtocol: 1,
+          workspaceFolders: [],
+        },
+        paseoDesktop: {},
+      },
+      async () => {
+        const seenConnections: HostConnection[] = [];
+        const store = new HostRuntimeStore({
+          deps: {
+            createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+            connectToDaemon: async ({ connection }) => {
+              seenConnections.push(connection);
+              return {
+                client: makeConnectedProbeClient(5) as unknown as DaemonClient,
+                serverId: "srv_vscode",
+                hostname: "vscode-host",
+              };
+            },
+            getClientId: async () => "cid_test_runtime",
+          },
+        });
+
+        await (
+          store as unknown as {
+            bootstrapVscodeDaemon: () => Promise<void>;
+          }
+        ).bootstrapVscodeDaemon();
+
+        expect(seenConnections).toEqual([
+          {
+            id: "bridge:127.0.0.1:6767",
+            type: "directTcpBridge",
+            endpoint: "127.0.0.1:6767",
+          },
+        ]);
+        expect(store.getHosts()).toMatchObject([
+          {
+            serverId: "srv_vscode",
+            label: "vscode-host",
+            connections: [
+              {
+                id: "bridge:127.0.0.1:6767",
+                type: "directTcpBridge",
+                endpoint: "127.0.0.1:6767",
+              },
+            ],
+          },
+        ]);
+        expect(store.getHosts()[0]?.connections[0]).not.toHaveProperty("password");
+
+        store.syncHosts([]);
+      },
+    );
   });
 
   it("uses the advertised hostname when adding a relay host from a pairing offer", async () => {

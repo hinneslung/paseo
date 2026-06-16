@@ -27,6 +27,12 @@ export interface DirectPipeHostConnection {
   path: string;
 }
 
+export interface DirectTcpBridgeHostConnection {
+  id: string;
+  type: "directTcpBridge";
+  endpoint: string;
+}
+
 export interface RelayHostConnection {
   id: string;
   type: "relay";
@@ -37,6 +43,7 @@ export interface RelayHostConnection {
 
 export type HostConnection =
   | DirectTcpHostConnection
+  | DirectTcpBridgeHostConnection
   | DirectSocketHostConnection
   | DirectPipeHostConnection
   | RelayHostConnection;
@@ -116,6 +123,9 @@ function hostConnectionEquals(left: HostConnection, right: HostConnection): bool
       (left.useTls ?? false) === (right.useTls ?? false) &&
       left.password === right.password
     );
+  }
+  if (left.type === "directTcpBridge" && right.type === "directTcpBridge") {
+    return left.endpoint === right.endpoint;
   }
   if (left.type === "directSocket" && right.type === "directSocket") {
     return left.path === right.path;
@@ -304,6 +314,12 @@ const StoredHostConnectionSchema = z.discriminatedUnion("type", [
   }),
   z.strictObject({
     id: z.string().optional(),
+    type: z.literal("directTcpBridge"),
+    endpoint: z.string(),
+    password: z.string().optional(),
+  }),
+  z.strictObject({
+    id: z.string().optional(),
     type: z.literal("directSocket"),
     path: z.string(),
   }),
@@ -344,6 +360,18 @@ function normalizeStoredConnection(connection: StoredHostConnection): HostConnec
         useTls: connection.useTls,
         ...(connection.password !== undefined ? { password: connection.password } : {}),
       });
+    } catch {
+      return null;
+    }
+  }
+  if (connection.type === "directTcpBridge") {
+    try {
+      const endpoint = normalizeHostPort(connection.endpoint);
+      return {
+        id: `bridge:${endpoint}`,
+        type: "directTcpBridge",
+        endpoint,
+      };
     } catch {
       return null;
     }
