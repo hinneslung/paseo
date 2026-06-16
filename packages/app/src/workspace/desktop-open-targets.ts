@@ -15,6 +15,8 @@ export interface OpenDesktopTargetInput {
   path: string;
   cwd?: string;
   mode?: DesktopOpenMode;
+  lineStart?: number;
+  lineEnd?: number;
 }
 
 interface AvailableDesktopEditorBridge {
