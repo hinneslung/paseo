@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { applyFileMentionReplacement, findActiveFileMention } from "./file-mention-autocomplete";
+import {
+  appendFileMentionPaths,
+  applyFileMentionReplacement,
+  findActiveFileMention,
+} from "./file-mention-autocomplete";
 
 describe("findActiveFileMention", () => {
   it("detects mentions at the start of input", () => {
@@ -65,5 +69,34 @@ describe("applyFileMentionReplacement", () => {
       relativePath: 'src/"quoted".ts',
     });
     expect(next).toBe('"src/\\"quoted\\".ts"');
+  });
+});
+
+describe("appendFileMentionPaths", () => {
+  it("appends multiple quoted paths separated by spaces", () => {
+    expect(
+      appendFileMentionPaths({
+        text: "review",
+        relativePaths: ["packages/app/src/foo.tsx", "packages/app/src/bar.ts"],
+      }),
+    ).toBe('review "packages/app/src/foo.tsx" "packages/app/src/bar.ts"');
+  });
+
+  it("preserves existing trailing whitespace before appended paths", () => {
+    expect(
+      appendFileMentionPaths({
+        text: "review ",
+        relativePaths: ["packages/app/src/foo.tsx"],
+      }),
+    ).toBe('review "packages/app/src/foo.tsx"');
+  });
+
+  it("uses the same double-quote escaping as autocomplete replacement", () => {
+    expect(
+      appendFileMentionPaths({
+        text: "",
+        relativePaths: ['src/"quoted".ts'],
+      }),
+    ).toBe('"src/\\"quoted\\".ts"');
   });
 });

@@ -1,5 +1,5 @@
 import { useUnistyles } from "react-native-unistyles";
-import { isWeb } from "@/constants/platform";
+import { getIsVscode, isWeb } from "@/constants/platform";
 
 export const FOOTER_HEIGHT = 75;
 
@@ -36,13 +36,25 @@ export {
   getIsElectronMac as getIsElectronRuntimeMac,
 } from "./platform";
 
+interface CompactFormFactorInput {
+  breakpoint: string | undefined;
+  isVscode: boolean;
+}
+
+export function resolveIsCompactFormFactor(input: CompactFormFactorInput): boolean {
+  if (input.isVscode) {
+    return false;
+  }
+  return input.breakpoint === "xs" || input.breakpoint === "sm";
+}
+
 /**
  * Reactive hook — re-renders the component when the breakpoint changes.
  * Always use this instead of reading UnistylesRuntime.breakpoint directly.
  */
 export function useIsCompactFormFactor(): boolean {
   const { rt } = useUnistyles();
-  return rt.breakpoint === "xs" || rt.breakpoint === "sm";
+  return resolveIsCompactFormFactor({ breakpoint: rt.breakpoint, isVscode: getIsVscode() });
 }
 
 // SplitContainer relies on dnd-kit and DOM-backed accessibility helpers.

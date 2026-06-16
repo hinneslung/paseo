@@ -9,8 +9,29 @@ import {
   isRasterImageFile,
   isRasterImagePath,
 } from "@/attachments/file-types";
-import { isWeb } from "@/constants/platform";
-import type { DroppedItem, DroppedPathItem, FileDropSink } from "./types";
+import { getIsVscode, isWeb } from "@/constants/platform";
+import { parseDroppedFilePaths } from "@/workspace/file-drop-mentions";
+import type { DroppedFileUriItem, DroppedItem, DroppedPathItem, FileDropSink } from "./types";
+
+function canUseFileUriDrop(): boolean {
+  return getDesktopHost() !== null;
+}
+
+function dataTransferHasFileUri(dataTransfer: DataTransfer | null): boolean {
+  if (!canUseFileUriDrop()) {
+    return false;
+  }
+  return Boolean(dataTransfer?.types.includes("text/uri-list"));
+}
+
+function getDroppedFileUriItems(dataTransfer: DataTransfer | null): DroppedFileUriItem[] {
+  if (!dataTransfer || !canUseFileUriDrop()) {
+    return [];
+  }
+  return parseDroppedFilePaths({
+    uriList: dataTransfer.getData("text/uri-list"),
+  }).map((path) => ({ kind: "file-uri", path }));
+}
 
 type DesktopDragDropPayload =
   | { type: "enter"; paths: string[] }
@@ -99,6 +120,10 @@ export function useDropListeners({
       if (desktopHost === null) {
         return false;
       }
+      // VS Code does not provide Electron's native file-drop event; use DOM DataTransfer.
+      if (getIsVscode()) {
+        return false;
+      }
 
       const desktopWindow = desktopHost.window?.getCurrentWindow?.();
       if (!desktopWindow || typeof desktopWindow.onDragDropEvent !== "function") {
@@ -185,7 +210,7 @@ export function useDropListeners({
         if (disabledRef.current) return;
 
         dragCounter.current++;
-        if (e.dataTransfer?.types.includes("Files")) {
+        if (e.dataTransfer?.types.includes("Files") || dataTransferHasFileUri(e.dataTransfer)) {
           isDragging.value = true;
         }
       }
@@ -224,6 +249,12 @@ export function useDropListeners({
 
         const sink = getSink();
         if (!sink) return;
+
+        const fileUriItems = getDroppedFileUriItems(e.dataTransfer);
+        if (fileUriItems.length > 0 && sink.onGenericFiles) {
+          sink.onGenericFiles(fileUriItems);
+          return;
+        }
 
         const files = Array.from(e.dataTransfer?.files ?? []);
         const genericItems: DroppedItem[] = files.map((file) => ({

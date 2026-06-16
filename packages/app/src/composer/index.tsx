@@ -116,12 +116,36 @@ import { useCheckoutStatusQuery } from "@/git/use-status-query";
 import { useComposerGithubAutoAttach } from "./github/auto-attach";
 import { resolveClientSlashCommand, type ClientSlashCommand } from "@/client-slash-commands";
 import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
+import { appendFileMentionPaths } from "@/utils/file-mention-autocomplete";
+import { resolveDroppedFileMentionPath } from "@/workspace/file-drop-mentions";
 
 type QueuedMessage = QueuedComposerMessage;
 
 type AttachmentListUpdater =
   | UserComposerAttachment[]
   | ((prev: UserComposerAttachment[]) => UserComposerAttachment[]);
+
+function splitDroppedItemsForMentions(input: { items: DroppedItem[]; cwd: string }): {
+  mentionPaths: string[];
+  uploadItems: DroppedItem[];
+} {
+  const mentionPaths: string[] = [];
+  const uploadItems: DroppedItem[] = [];
+  for (const item of input.items) {
+    if (item.kind !== "file-uri") {
+      uploadItems.push(item);
+      continue;
+    }
+
+    const relativePath = resolveDroppedFileMentionPath({ path: item.path, cwd: input.cwd });
+    if (relativePath) {
+      mentionPaths.push(relativePath);
+    } else {
+      uploadItems.push({ kind: "desktop-path", path: item.path });
+    }
+  }
+  return { mentionPaths, uploadItems };
+}
 
 const EMPTY_ATTACHMENT_SCOPE_KEYS: readonly string[] = [];
 
@@ -1182,6 +1206,19 @@ export function Composer({
     onFocusInput?.(focusInput);
   }, [focusInput, onFocusInput]);
 
+  const addFileMentions = useCallback(
+    (relativePaths: string[]) => {
+      const nextInput = appendFileMentionPaths({ text: userInput, relativePaths });
+      if (nextInput === userInput) {
+        return;
+      }
+      setUserInput(nextInput);
+      setCursorIndex(nextInput.length);
+      messageInputRef.current?.focus();
+    },
+    [setUserInput, userInput],
+  );
+
   const submitMessage = useCallback(
     async (text: string, submitAttachments: ComposerAttachment[]) => {
       onMessageSent?.();
@@ -1414,7 +1451,11 @@ export function Composer({
   const handleGenericFilesDropped = useCallback(
     async (items: DroppedItem[]) => {
       try {
-        const files = await droppedItemsToPickedFiles(items);
+        const { mentionPaths, uploadItems } = splitDroppedItemsForMentions({ items, cwd });
+        if (mentionPaths.length > 0) {
+          addFileMentions(mentionPaths);
+        }
+        const files = await droppedItemsToPickedFiles(uploadItems);
         if (files.length === 0) return;
         if (!client || !isConnected) {
           toastErrorRef.current(t("composer.errors.daemonClientDisconnected"));
@@ -1428,7 +1469,7 @@ export function Composer({
         );
       }
     },
-    [client, isConnected, t, uploadPickedFiles],
+    [addFileMentions, client, cwd, isConnected, t, uploadPickedFiles],
   );
 
   const handleRemoveAttachment = useCallback(
