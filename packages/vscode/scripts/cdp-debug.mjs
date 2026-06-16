@@ -174,7 +174,9 @@ async function main() {
   const exe = await downloadAndUnzipVSCode("1.124.2");
   log("vscode exe:", exe);
   const userDataDir = mkdtempSync(path.join(tmpdir(), "paseo-cdp-user-"));
-  const workspaceDir = mkdtempSync(path.join(tmpdir(), "paseo-cdp-ws-"));
+  // Open a real folder (PASEO_CDP_WORKSPACE) to exercise folder auto-scope, else a temp dir.
+  const externalWorkspace = process.env.PASEO_CDP_WORKSPACE;
+  const workspaceDir = externalWorkspace || mkdtempSync(path.join(tmpdir(), "paseo-cdp-ws-"));
   const proc = launchVsCode(exe, userDataDir, workspaceDir);
   const cleanup = () => {
     try {
@@ -183,7 +185,7 @@ async function main() {
       // already gone
     }
     rmSync(userDataDir, { recursive: true, force: true });
-    rmSync(workspaceDir, { recursive: true, force: true });
+    if (!externalWorkspace) rmSync(workspaceDir, { recursive: true, force: true });
   };
 
   try {
