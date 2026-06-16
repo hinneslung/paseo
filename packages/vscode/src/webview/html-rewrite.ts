@@ -105,10 +105,6 @@ function removeExistingCsp(html: string): string {
   return html.replace(/<meta\s+[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>\s*/i, "");
 }
 
-function ensureTrailingSlash(value: string): string {
-  return value.endsWith("/") ? value : `${value}/`;
-}
-
 function serializeRuntimeConfig(config: VscodeRuntimeConfig): string {
   return JSON.stringify(config).replace(/</g, "\\u003c");
 }
@@ -146,10 +142,14 @@ function injectBeforeAppScripts(html: string, scripts: string): string {
 export function buildWebviewHtml(input: BuildWebviewHtmlInput): string {
   const assetHtml = rewriteAssetAttributes(input.indexHtml, input.toWebviewUri);
   const html = removeExistingCsp(assetHtml);
-  const baseUri = ensureTrailingSlash(input.toWebviewUri(""));
   const csp = buildCsp(input.cspSource, input.nonce);
+  // NOTE: we deliberately do NOT inject a <base href> pointing at the asWebviewUri
+  // resource origin. Doing so makes Expo Router resolve browser-history URLs against
+  // that cross-origin base and call history.replaceState() with a URL whose origin
+  // differs from the webview document origin (vscode-webview://...), which throws and
+  // halts the React mount. Asset <script>/<link> tags are already rewritten to absolute
+  // resource URLs, so no base is needed for them.
   const headTags = [
-    `<base href="${escapeAttribute(baseUri)}">`,
     `<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(csp)}">`,
   ].join("\n");
   const withHeadTags = injectHeadTags(html, headTags);
