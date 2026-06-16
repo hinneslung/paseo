@@ -256,6 +256,48 @@ describe("resolveStartupRoute", () => {
     ).toEqual({ kind: "redirect", href: "/h/server-1" });
   });
 
+  it("redirects VS Code startup to the matched workspace before the saved workspace", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hosts: [{ serverId: "server-vscode" }, { serverId: "server-saved" }],
+        workspaceSelection: { serverId: "server-saved", workspaceId: "workspace-saved" },
+        isVscodeRuntime: true,
+        vscodeWorkspaceMatchState: {
+          status: "ready",
+          match: { serverId: "server-vscode", workspaceId: "workspace-vscode" },
+        },
+      }),
+    ).toEqual({ kind: "redirect", href: "/h/server-vscode/workspace/workspace-vscode" });
+  });
+
+  it("keeps VS Code startup on the splash while folder matching data is loading", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hosts: [{ serverId: "server-vscode" }],
+        anyOnlineHostServerId: "server-vscode",
+        isVscodeRuntime: true,
+        vscodeWorkspaceMatchState: { status: "loading" },
+      }),
+    ).toEqual({ kind: "splash" });
+  });
+
+  it("ignores a VS Code workspace match when not running in VS Code", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hosts: [{ serverId: "server-vscode" }, { serverId: "server-saved" }],
+        workspaceSelection: { serverId: "server-saved", workspaceId: "workspace-saved" },
+        isVscodeRuntime: false,
+        vscodeWorkspaceMatchState: {
+          status: "ready",
+          match: { serverId: "server-vscode", workspaceId: "workspace-vscode" },
+        },
+      }),
+    ).toEqual({ kind: "redirect", href: "/h/server-saved/workspace/workspace-saved" });
+  });
+
   it("falls back to a saved host when the restored workspace host is no longer saved", () => {
     expect(
       resolveStartupRoute({
