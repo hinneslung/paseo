@@ -1,5 +1,6 @@
 import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
 import { invokeDesktopCommand } from "@/desktop/electron/invoke";
+import { isVscodeRuntime } from "@/desktop/vscode/host";
 
 export type DesktopDaemonState = "starting" | "running" | "stopped" | "errored";
 export type DesktopDaemonStopReason =
@@ -39,11 +40,21 @@ export interface DesktopPairingOffer {
   qr: string | null;
 }
 
-export interface LocalTransportTarget {
+export interface LocalSocketTransportTarget {
   [key: string]: unknown;
   transportType: "socket" | "pipe";
   transportPath: string;
+  protocols?: string[];
 }
+
+export interface LocalTcpTransportTarget {
+  [key: string]: unknown;
+  transportType: "tcp";
+  endpoint: string;
+  protocols?: string[];
+}
+
+export type LocalTransportTarget = LocalSocketTransportTarget | LocalTcpTransportTarget;
 
 interface LocalTransportEventPayload {
   sessionId: string;
@@ -125,6 +136,10 @@ function parseDesktopPairingOffer(raw: unknown): DesktopPairingOffer {
 
 export function shouldUseDesktopDaemon(): boolean {
   return isElectronRuntime();
+}
+
+export function shouldUseVscodeDaemon(): boolean {
+  return isVscodeRuntime();
 }
 
 export async function getDesktopDaemonStatus(): Promise<DesktopDaemonStatus> {

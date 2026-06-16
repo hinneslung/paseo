@@ -30,7 +30,11 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
 
 export function buildLocalDaemonTransportUrl(target: LocalTransportTarget): string {
   const url = new URL(`${LOCAL_TRANSPORT_SCHEME}//${target.transportType}`);
-  url.searchParams.set("path", target.transportPath);
+  if (target.transportType === "tcp") {
+    url.searchParams.set("endpoint", target.endpoint);
+  } else {
+    url.searchParams.set("path", target.transportPath);
+  }
   return url.toString();
 }
 
@@ -40,21 +44,37 @@ function parseLocalDaemonTransportUrl(url: string): LocalTransportTarget {
     throw new Error(`Unsupported local transport URL: ${url}`);
   }
   const transportType = parsed.hostname;
-  const transportPath = parsed.searchParams.get("path")?.trim() ?? "";
-  if ((transportType !== "socket" && transportType !== "pipe") || !transportPath) {
-    throw new Error(`Invalid local transport target: ${url}`);
+  if (transportType === "tcp") {
+    const endpoint = parsed.searchParams.get("endpoint")?.trim() ?? "";
+    if (!endpoint) {
+      throw new Error(`Invalid local transport target: ${url}`);
+    }
+    return { transportType, endpoint };
   }
-  return {
-    transportType,
-    transportPath,
-  };
+  if (transportType === "socket" || transportType === "pipe") {
+    const transportPath = parsed.searchParams.get("path")?.trim() ?? "";
+    if (transportPath) {
+      return { transportType, transportPath };
+    }
+  }
+  throw new Error(`Invalid local transport target: ${url}`);
+}
+
+function withProtocols(
+  target: LocalTransportTarget,
+  protocols: string[] | undefined,
+): LocalTransportTarget {
+  if (!protocols || protocols.length === 0) {
+    return target;
+  }
+  return { ...target, protocols };
 }
 
 export function createDesktopLocalDaemonTransportFactory(
   rpc: LocalDaemonTransportRpc = defaultLocalDaemonTransportRpc,
 ): DaemonTransportFactory | null {
-  return ({ url }) => {
-    const target = parseLocalDaemonTransportUrl(url);
+  return ({ url, protocols }) => {
+    const target = withProtocols(parseLocalDaemonTransportUrl(url), protocols);
     let sessionId: string | null = null;
     let unlisten: (() => void) | null = null;
     let disposed = false;

@@ -12,6 +12,7 @@ import {
   buildLocalDaemonTransportUrl,
   createDesktopLocalDaemonTransportFactory,
 } from "@/desktop/daemon/desktop-daemon-transport";
+import type { LocalTransportTarget } from "@/desktop/daemon/desktop-daemon";
 
 export interface DaemonProbeClient {
   readonly lastError: string | null;
@@ -20,16 +21,11 @@ export interface DaemonProbeClient {
   getLastServerInfoMessage(): { serverId: string; hostname: string | null } | null;
 }
 
-interface LocalTransportUrlInput {
-  transportType: "socket" | "pipe";
-  transportPath: string;
-}
-
 export interface DaemonConnectionDependencies<TClient extends DaemonProbeClient> {
   getClientId(): Promise<string>;
   resolveAppVersion(): string | null;
   createLocalTransportFactory(): DaemonClientConfig["transportFactory"] | null;
-  buildLocalTransportUrl(input: LocalTransportUrlInput): string;
+  buildLocalTransportUrl(input: LocalTransportTarget): string;
   createClient(config: DaemonClientConfig): TClient;
 }
 
@@ -112,7 +108,9 @@ export async function buildClientConfig(
     suppressSendErrors: true,
     reconnect: { enabled: false },
     ...(options?.capabilities ? { capabilities: options.capabilities } : {}),
-    ...((connection.type === "directSocket" || connection.type === "directPipe") &&
+    ...((connection.type === "directSocket" ||
+      connection.type === "directPipe" ||
+      connection.type === "directTcpBridge") &&
     localTransportFactory
       ? { transportFactory: localTransportFactory }
       : {}),
@@ -124,6 +122,16 @@ export async function buildClientConfig(
       url: deps.buildLocalTransportUrl({
         transportType: connection.type === "directSocket" ? "socket" : "pipe",
         transportPath: connection.path,
+      }),
+    };
+  }
+
+  if (connection.type === "directTcpBridge") {
+    return {
+      ...base,
+      url: deps.buildLocalTransportUrl({
+        transportType: "tcp",
+        endpoint: connection.endpoint,
       }),
     };
   }

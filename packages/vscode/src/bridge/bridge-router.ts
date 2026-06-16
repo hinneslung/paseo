@@ -32,7 +32,14 @@ function parseTransportTarget(args: unknown, fallbackEndpoint: string): TcpTrans
     typeof args.endpoint === "string" && args.endpoint.trim()
       ? args.endpoint.trim()
       : fallbackEndpoint;
-  return { transportType: "tcp", endpoint };
+  const protocols = Array.isArray(args.protocols)
+    ? args.protocols.filter((protocol): protocol is string => typeof protocol === "string")
+    : [];
+  return {
+    transportType: "tcp",
+    endpoint,
+    ...(protocols.length > 0 ? { protocols } : {}),
+  };
 }
 
 function parseSessionId(args: unknown): string {

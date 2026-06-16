@@ -24,8 +24,9 @@ import {
 } from "@/utils/daemon-endpoints";
 import { resolveAppVersion } from "@/utils/app-version";
 import { ConnectionOfferSchema, type ConnectionOffer } from "@getpaseo/protocol/connection-offer";
-import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
+import { shouldUseDesktopDaemon, shouldUseVscodeDaemon } from "@/desktop/daemon/desktop-daemon";
 import { isWeb } from "@/constants/platform";
+import { getVscodeRuntimeConfig } from "@/desktop/vscode/host";
 import { connectToDaemon } from "@/utils/test-daemon-connection";
 import { getOrCreateClientId } from "@/utils/client-id";
 import {
@@ -60,6 +61,7 @@ export type HostRegistryStatus = "loading" | "ready";
 
 export type ActiveConnection =
   | { type: "directTcp"; endpoint: string; display: string }
+  | { type: "directTcpBridge"; endpoint: string; display: string }
   | { type: "directSocket"; endpoint: string; display: "socket" }
   | { type: "directPipe"; endpoint: string; display: "pipe" }
   | { type: "relay"; endpoint: string; display: "relay" };
@@ -278,6 +280,13 @@ function toActiveConnection(connection: HostConnection): ActiveConnection {
   if (connection.type === "directTcp") {
     return {
       type: "directTcp",
+      endpoint: connection.endpoint,
+      display: connection.endpoint,
+    };
+  }
+  if (connection.type === "directTcpBridge") {
+    return {
+      type: "directTcpBridge",
       endpoint: connection.endpoint,
       display: connection.endpoint,
     };
@@ -550,14 +559,23 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
         runtimeGeneration,
         ...(browserAutomationCapabilities ? { capabilities: browserAutomationCapabilities } : {}),
       };
-      if (connection.type === "directSocket" || connection.type === "directPipe") {
+      if (
+        connection.type === "directSocket" ||
+        connection.type === "directPipe" ||
+        connection.type === "directTcpBridge"
+      ) {
+        const target =
+          connection.type === "directTcpBridge"
+            ? { transportType: "tcp" as const, endpoint: connection.endpoint }
+            : {
+                transportType:
+                  connection.type === "directSocket" ? ("socket" as const) : ("pipe" as const),
+                transportPath: connection.path,
+              };
         return new DaemonClient({
           ...base,
           ...(localTransportFactory ? { transportFactory: localTransportFactory } : {}),
-          url: buildLocalDaemonTransportUrl({
-            transportType: connection.type === "directSocket" ? "socket" : "pipe",
-            transportPath: connection.path,
-          }),
+          url: buildLocalDaemonTransportUrl(target),
         });
       }
       if (connection.type === "directTcp") {
@@ -1467,6 +1485,11 @@ export class HostRuntimeStore {
       return;
     }
 
+    if (shouldUseVscodeDaemon()) {
+      await this.bootstrapVscodeDaemon();
+      return;
+    }
+
     const initialHint = this.deps.readInitialConnectionHint
       ? this.deps.readInitialConnectionHint()
       : readInitialDaemonConnectionHint();
@@ -1537,6 +1560,42 @@ export class HostRuntimeStore {
     } catch (error) {
       console.warn("[HostRuntime] bootstrap probe failed", {
         endpoint: LOCALHOST_FALLBACK_ENDPOINT,
+        error,
+      });
+    }
+  }
+
+  private async bootstrapVscodeDaemon(): Promise<void> {
+    const endpoint = getVscodeRuntimeConfig()?.endpoint?.trim();
+    if (!endpoint) {
+      return;
+    }
+
+    let normalizedEndpoint: string;
+    try {
+      normalizedEndpoint = normalizeHostPort(endpoint);
+    } catch (error) {
+      console.warn("[HostRuntime] VS Code daemon endpoint is invalid", { endpoint, error });
+      return;
+    }
+
+    const connection: HostConnection = {
+      id: `bridge:${normalizedEndpoint}`,
+      type: "directTcpBridge",
+      endpoint: normalizedEndpoint,
+    };
+    if (registryHasConnection(this.hosts, connection)) {
+      return;
+    }
+
+    try {
+      await this.probeAndUpsertConnection({
+        connection,
+        timeoutMs: DEFAULT_LOCALHOST_BOOTSTRAP_TIMEOUT_MS,
+      });
+    } catch (error) {
+      console.warn("[HostRuntime] VS Code bootstrap probe failed", {
+        endpoint: normalizedEndpoint,
         error,
       });
     }

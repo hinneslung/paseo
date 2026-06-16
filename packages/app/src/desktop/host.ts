@@ -1,6 +1,6 @@
 import { Platform } from "react-native";
 import { getElectronHost } from "@/desktop/electron/host";
-import { isVscodeRuntime } from "@/desktop/vscode/host";
+import { getVscodeHost, isVscodeRuntime } from "@/desktop/vscode/host";
 import type { SessionInboundMessage, SessionOutboundMessage } from "@getpaseo/protocol/messages";
 
 type BrowserAutomationExecuteRequest = Extract<
@@ -195,7 +195,7 @@ export function getDesktopHost(): DesktopHostBridge | null {
   if (Platform.OS !== "web") {
     return null;
   }
-  return getElectronHost();
+  return getVscodeHost() ?? getElectronHost();
 }
 
 export function isElectronRuntime(): boolean {
