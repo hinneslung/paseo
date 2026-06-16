@@ -45,7 +45,8 @@
       "paseo": [
         {
           "id": "paseo.webview",
-          "name": "Paseo"
+          "name": "Paseo",
+          "type": "webview"
         }
       ]
     },

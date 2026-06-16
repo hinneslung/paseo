@@ -155,11 +155,10 @@ export async function run(): Promise<void> {
   const html = api.getLastWebviewHtmlForTest();
   assert.ok(html, "paseo.open creates webview HTML");
 
-  const baseMatch = html.match(/<base href="([^"]+)">/);
-  assert.ok(baseMatch, "webview HTML contains a base href");
-  const baseHref = baseMatch[1];
-  assert.match(baseHref, /^[a-z][a-z0-9+.-]*:/i, "base href is a resolved VS Code URI");
-  assert.match(baseHref, /\/media\/app-dist\/$/, "base href points at the copied app dist");
+  // No <base href>: it would make Expo Router write cross-origin history URLs and crash the
+  // React mount. Asset URLs are rewritten to absolute resource URIs instead (covered in detail
+  // by the html-rewrite unit test, which controls the toWebviewUri mapping).
+  assert.ok(!/<base href=/.test(html), "webview HTML does not inject a <base href>");
 
   const cspMatch = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)">/);
   assert.ok(cspMatch, "webview HTML contains a CSP meta tag");

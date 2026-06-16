@@ -128,6 +128,23 @@ function noop(): void {}
 
 const vscodeApi = acquireVsCodeApi();
 const sendToVsCode = vscodeApi.postMessage.bind(vscodeApi);
+
+// Expo Router picks the initial route from location.pathname. In a VS Code webview the
+// document is served at `vscode-webview://<authority>/index.html?<vscode params>`, which
+// Expo Router treats as an unknown route and renders +not-found. Rewrite the path to "/"
+// (same-origin, preserving the query/hash the webview API relies on) so the index route
+// matches. acquireVsCodeApi() has already captured the original URL above.
+try {
+  if (window.location.pathname.endsWith("/index.html")) {
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/${window.location.search}${window.location.hash}`,
+    );
+  }
+} catch {
+  // replaceState can throw in restricted contexts; routing falls back to default.
+}
 const pendingInvokes = new Map<string, PendingInvoke>();
 const eventHandlers = new Map<string, Set<EventHandler>>();
 let nextInvokeId = 0;
