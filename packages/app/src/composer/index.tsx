@@ -110,6 +110,7 @@ import { useGithubSearchQuery } from "@/git/use-github-search-query";
 import { useCheckoutStatusQuery } from "@/git/use-status-query";
 import { useComposerGithubAutoAttach } from "./github/auto-attach";
 import { resolveClientSlashCommand, type ClientSlashCommand } from "@/client-slash-commands";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 type QueuedMessage = QueuedComposerMessage;
 
@@ -462,6 +463,7 @@ interface DispatchComposerKeyboardActionArgs {
   isAgentRunning: boolean;
   isCancellingAgent: boolean;
   isConnected: boolean;
+  showVoice: boolean;
   handleCancelAgent: () => void;
   focusMessageInputForKeyboardAction: () => void;
 }
@@ -474,10 +476,14 @@ function dispatchComposerKeyboardAction(args: DispatchComposerKeyboardActionArgs
     isAgentRunning,
     isCancellingAgent,
     isConnected,
+    showVoice,
     handleCancelAgent,
     focusMessageInputForKeyboardAction,
   } = args;
   if (!isPaneFocused) return false;
+
+  if (!showVoice && action.id.startsWith("message-input.dictation")) return false;
+  if (!showVoice && action.id.startsWith("message-input.voice")) return false;
 
   if (action.id === "agent.interrupt") {
     if (messageInputRef.current?.runKeyboardAction("dictation-cancel")) return true;
@@ -886,6 +892,7 @@ interface ComposerRightControlsSlotProps extends ComposerVoiceModeButtonProps {
   hasSendableContent: boolean;
   isProcessing: boolean;
   isCompact: boolean;
+  showVoice: boolean;
   cancelButton: ReactElement;
 }
 
@@ -896,12 +903,13 @@ function ComposerRightControlsSlot({
   hasSendableContent,
   isProcessing,
   isCompact,
+  showVoice,
   cancelButton,
   ...voiceProps
 }: ComposerRightControlsSlotProps) {
   const hideVoiceForCompactInput = isCompact && hasSendableContent;
   const showVoiceModeButton =
-    !isVoiceModeForAgent && hasAgent && !isAgentRunning && !hideVoiceForCompactInput;
+    showVoice && !isVoiceModeForAgent && hasAgent && !isAgentRunning && !hideVoiceForCompactInput;
   const shouldShowCancelButton = isAgentRunning && !hasSendableContent && !isProcessing;
   if (!showVoiceModeButton && !shouldShowCancelButton) return null;
   return (
@@ -993,6 +1001,7 @@ export function Composer({
 }: ComposerProps) {
   const { t } = useTranslation();
   const buttonIconSize = resolveComposerButtonIconSize();
+  const showVoice = getWorkspaceSurfaceConfig().showVoice;
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
   const agentDirectoryStatus = useHostRuntimeAgentDirectoryStatus(serverId);
@@ -1456,6 +1465,7 @@ export function Composer({
         isAgentRunning,
         isCancellingAgent,
         isConnected,
+        showVoice,
         handleCancelAgent,
         focusMessageInputForKeyboardAction,
       }),
@@ -1466,6 +1476,7 @@ export function Composer({
       isCancellingAgent,
       isConnected,
       isPaneFocused,
+      showVoice,
     ],
   );
 
@@ -1613,6 +1624,7 @@ export function Composer({
         hasSendableContent={hasSendableContent}
         isProcessing={isProcessing}
         isCompact={isCompactLayout}
+        showVoice={showVoice}
         buttonIconSize={buttonIconSize}
         handleToggleRealtimeVoice={handleToggleRealtimeVoice}
         isConnected={isConnected}
@@ -1636,6 +1648,7 @@ export function Composer({
       isVoiceModeForAgent,
       isVoiceSwitching,
       realtimeVoiceButtonStyle,
+      showVoice,
       t,
       voiceToggleKeys,
     ],
@@ -1911,6 +1924,7 @@ export function Composer({
                 onAddImages={addImages}
                 client={client}
                 isReadyForDictation={isDictationReady}
+                showVoice={showVoice}
                 placeholder={messagePlaceholder}
                 autoFocus={messageInputAutoFocus}
                 autoFocusKey={`${serverId}:${agentId}`}
