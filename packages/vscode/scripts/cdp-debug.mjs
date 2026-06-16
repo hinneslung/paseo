@@ -75,6 +75,19 @@ function attachConsole(browser, prefix) {
   }
 }
 
+async function clickLastMatching(frame, selectors, label) {
+  for (const selector of selectors) {
+    const locator = frame.locator(selector).last();
+    if ((await locator.count().catch(() => 0)) === 0) {
+      continue;
+    }
+    await locator.click({ timeout: 5000 });
+    log(`${label} clicked via selector:`, selector);
+    return;
+  }
+  throw new Error(`Could not find ${label}.`);
+}
+
 function dumpFrame(frame) {
   return frame.evaluate(() => {
     const root = document.querySelector("#root") || document.body;
@@ -237,23 +250,51 @@ async function main() {
       ),
     );
 
+    if (process.env.PASEO_CDP_RESIZE_PROBE) {
+      for (const size of [
+        { width: 420, height: 900 },
+        { width: 1400, height: 900 },
+      ]) {
+        await workbench.setViewportSize(size);
+        await sleep(1500);
+        const resizedFrame = (await findAppFrame(browser)) ?? found;
+        const resizedDump = await dumpFrame(resizedFrame);
+        log(
+          "resize probe:",
+          JSON.stringify({
+            size,
+            bodyTextHead: resizedDump.bodyTextHead,
+            rootChildCount: resizedDump.rootChildCount,
+          }),
+        );
+      }
+    }
+
     // Optional: exercise the editor.openTarget bridge command end-to-end (drives the same
     // path a chat file-link uses) and report whether VS Code actually opened the file.
     const editorProbePath = process.env.PASEO_CDP_EDITOR_PROBE;
     if (editorProbePath) {
-      const invokeResult = await found.evaluate(async (p) => {
-        try {
-          await window.paseoDesktop.editor.openTarget({
-            editorId: "vscode-self",
-            path: p,
-            mode: "open",
-            lineStart: 5,
-          });
-          return "invoked";
-        } catch (e) {
-          return `error: ${e?.message ?? e}`;
-        }
-      }, editorProbePath);
+      // Omit lineStart by default so the probe exercises the real "open a file" / binary path
+      // (a chat link to a .png has no line); set PASEO_CDP_EDITOR_PROBE_LINE to test line nav.
+      const probeLine = process.env.PASEO_CDP_EDITOR_PROBE_LINE
+        ? Number(process.env.PASEO_CDP_EDITOR_PROBE_LINE)
+        : null;
+      const invokeResult = await found.evaluate(
+        async ({ p, line }) => {
+          try {
+            await window.paseoDesktop.editor.openTarget({
+              editorId: "vscode-self",
+              path: p,
+              mode: "open",
+              ...(line ? { lineStart: line } : {}),
+            });
+            return "invoked";
+          } catch (e) {
+            return `error: ${e?.message ?? e}`;
+          }
+        },
+        { p: editorProbePath, line: probeLine },
+      );
       log("editor.openTarget invoke result:", invokeResult);
       await sleep(2000);
       const editorState = await workbench.evaluate(() => {
@@ -264,6 +305,53 @@ async function main() {
         return { tabs, hasEditor };
       });
       log("workbench editor state after openTarget:", JSON.stringify(editorState));
+    }
+
+    const dialogProbePath = process.env.PASEO_CDP_DIALOG_PROBE;
+    if (dialogProbePath) {
+      const dialogProbe = await found.evaluate(async (sourcePath) => {
+        const selection = await window.paseoDesktop.dialog.open({
+          title: "Attach images",
+          directory: false,
+          multiple: true,
+          filters: [{ name: "Images", extensions: ["png", "jpg"] }],
+        });
+        const copied = await window.paseoDesktop.invoke("copy_attachment_file", {
+          attachmentId: "cdp_image_probe",
+          sourcePath,
+          extension: ".png",
+        });
+        const base64 = await window.paseoDesktop.invoke("read_file_base64", { path: copied.path });
+        await window.paseoDesktop.invoke("delete_attachment_file", { path: copied.path });
+        return { selection, copied, base64Length: base64.length };
+      }, dialogProbePath);
+      log("dialog/attachment probe:", JSON.stringify(dialogProbe));
+    }
+
+    if (process.env.PASEO_CDP_PICK_IMAGE_PROBE) {
+      await clickLastMatching(
+        found,
+        ['[data-testid="message-input-attach-button"]', '[aria-label="Add attachment"]'],
+        "composer attach button",
+      );
+      await sleep(700);
+      await clickLastMatching(
+        found,
+        [
+          '[data-testid="message-input-attachment-menu-item-image"]',
+          '[role="menuitem"]:has-text("Add image")',
+          'text="Add image"',
+        ],
+        "add image menu item",
+      );
+      await found
+        .locator('[data-testid="composer-image-attachment-pill"]')
+        .first()
+        .waitFor({ state: "visible", timeout: 10_000 });
+      const imagePillCount = await found
+        .locator('[data-testid="composer-image-attachment-pill"]')
+        .count();
+      log("image picker UI probe: image pill count", imagePillCount);
     }
   } finally {
     cleanup();

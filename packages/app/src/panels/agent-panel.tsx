@@ -84,6 +84,7 @@ import type { StreamItem } from "@/types/stream";
 import { getInitDeferred, getInitKey } from "@/utils/agent-initialization";
 import { derivePendingPermissionKey, normalizeAgentSnapshot } from "@/utils/agent-snapshots";
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
+import { resolveDroppedFileMentionPath } from "@/workspace/file-drop-mentions";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { deriveSidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { buildDraftAgentSetup, type ClientSlashCommand } from "@/client-slash-commands";
@@ -113,6 +114,28 @@ function resolveChatAgentFromSession(
   if (!agentId) return null;
   const session = state.sessions[serverId];
   return session?.agents?.get(agentId) ?? session?.agentDetails?.get(agentId) ?? null;
+}
+
+function splitDroppedItemsForMentions(input: { items: DroppedItem[]; cwd: string }): {
+  mentionPaths: string[];
+  uploadItems: DroppedItem[];
+} {
+  const mentionPaths: string[] = [];
+  const uploadItems: DroppedItem[] = [];
+  for (const item of input.items) {
+    if (item.kind !== "file-uri") {
+      uploadItems.push(item);
+      continue;
+    }
+
+    const relativePath = resolveDroppedFileMentionPath({ path: item.path, cwd: input.cwd });
+    if (relativePath) {
+      mentionPaths.push(relativePath);
+      continue;
+    }
+    uploadItems.push({ kind: "desktop-path", path: item.path });
+  }
+  return { mentionPaths, uploadItems };
 }
 
 const EMPTY_CHAT_AGENT_STATE: ChatAgentSelectedState = {
@@ -700,6 +723,8 @@ function ChatAgentContent({
   const streamViewRef = useRef<AgentStreamViewHandle>(null);
   const addImagesRef = useRef<((images: ImageAttachment[]) => void) | null>(null);
   const addFilesRef = useRef<((files: UserComposerAttachment[]) => void) | null>(null);
+  const addFileMentionsRef = useRef<((relativePaths: string[]) => void) | null>(null);
+  const dropCwdRef = useRef("");
   const clearOnAgentBlurRef = useRef<() => void>(() => {});
   const wasPaneFocusedRef = useRef(isPaneFocused);
   const reconnectToastArmedRef = useRef(false);
@@ -723,10 +748,24 @@ function ChatAgentContent({
     [],
   );
 
+  const handleAddFileMentionsCallback = useCallback(
+    (addFileMentions: (relativePaths: string[]) => void) => {
+      addFileMentionsRef.current = addFileMentions;
+    },
+    [],
+  );
+
   const handleGenericFilesDropped = useCallback(
     async (items: DroppedItem[]) => {
+      const { mentionPaths, uploadItems } = splitDroppedItemsForMentions({
+        items,
+        cwd: dropCwdRef.current,
+      });
+      if (mentionPaths.length > 0) {
+        addFileMentionsRef.current?.(mentionPaths);
+      }
       if (!client || !isConnected) return;
-      const nonImageItems = items.filter((item) => {
+      const nonImageItems = uploadItems.filter((item) => {
         if (item.kind === "web-file") return !isRasterImageFile(item.file);
         return !isRasterImagePath(item.path);
       });
@@ -759,6 +798,9 @@ function ChatAgentContent({
   const agentState = useSessionStore(
     useShallow((state) => selectChatAgentState(state, serverId, agentId)),
   );
+  useEffect(() => {
+    dropCwdRef.current = agentState.cwd ?? "";
+  }, [agentState.cwd]);
   const projectPlacement = useStoreWithEqualityFn(
     useSessionStore,
     (state) => {
@@ -1111,6 +1153,7 @@ function ChatAgentContent({
       handleGenericFilesDropped={handleGenericFilesDropped}
       handleAddImagesCallback={handleAddImagesCallback}
       handleAddFilesCallback={handleAddFilesCallback}
+      handleAddFileMentionsCallback={handleAddFileMentionsCallback}
       handleComposerHeightChange={handleComposerHeightChange}
       handleMessageSent={handleMessageSent}
       showHistorySyncOverlay={showHistorySyncOverlay}
@@ -1140,6 +1183,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   handleGenericFilesDropped,
   handleAddImagesCallback,
   handleAddFilesCallback,
+  handleAddFileMentionsCallback,
   handleComposerHeightChange,
   handleMessageSent,
   showHistorySyncOverlay,
@@ -1165,6 +1209,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   handleGenericFilesDropped: (items: DroppedItem[]) => void;
   handleAddImagesCallback: (addImages: (images: ImageAttachment[]) => void) => void;
   handleAddFilesCallback: (addFiles: (files: UserComposerAttachment[]) => void) => void;
+  handleAddFileMentionsCallback: (addFileMentions: (relativePaths: string[]) => void) => void;
   handleComposerHeightChange: (height: number) => void;
   handleMessageSent: () => void;
   showHistorySyncOverlay: boolean;
@@ -1225,6 +1270,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
         onAttentionPromptSend={onAttentionPromptSend}
         onAddImages={handleAddImagesCallback}
         onAddFiles={handleAddFilesCallback}
+        onAddFileMentions={handleAddFileMentionsCallback}
         onComposerHeightChange={handleComposerHeightChange}
         onMessageSent={handleMessageSent}
       />
@@ -1349,6 +1395,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   onAttentionPromptSend,
   onAddImages,
   onAddFiles,
+  onAddFileMentions,
   onComposerHeightChange,
   onMessageSent,
 }: {
@@ -1364,6 +1411,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   onAttentionPromptSend: () => void;
   onAddImages: (addImages: (images: ImageAttachment[]) => void) => void;
   onAddFiles: (addFiles: (files: UserComposerAttachment[]) => void) => void;
+  onAddFileMentions: (addFileMentions: (relativePaths: string[]) => void) => void;
   onComposerHeightChange: (height: number) => void;
   onMessageSent: () => void;
 }) {
@@ -1389,6 +1437,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
       onAttentionPromptSend={onAttentionPromptSend}
       onAddImages={onAddImages}
       onAddFiles={onAddFiles}
+      onAddFileMentions={onAddFileMentions}
       onComposerHeightChange={onComposerHeightChange}
       onMessageSent={onMessageSent}
     />
@@ -1406,6 +1455,7 @@ function ActiveAgentComposer({
   onAttentionPromptSend,
   onAddImages,
   onAddFiles,
+  onAddFileMentions,
   onComposerHeightChange,
   onMessageSent,
 }: {
@@ -1419,6 +1469,7 @@ function ActiveAgentComposer({
   onAttentionPromptSend: () => void;
   onAddImages: (addImages: (images: ImageAttachment[]) => void) => void;
   onAddFiles: (addFiles: (files: UserComposerAttachment[]) => void) => void;
+  onAddFileMentions: (addFileMentions: (relativePaths: string[]) => void) => void;
   onComposerHeightChange: (height: number) => void;
   onMessageSent: () => void;
 }) {
@@ -1561,6 +1612,7 @@ function ActiveAgentComposer({
         onAttentionPromptSend={onAttentionPromptSend}
         onAddImages={onAddImages}
         onAddFiles={onAddFiles}
+        onAddFileMentions={onAddFileMentions}
         onComposerHeightChange={onComposerHeightChange}
         onMessageSent={onMessageSent}
         onClientSlashCommand={handleClientSlashCommand}
