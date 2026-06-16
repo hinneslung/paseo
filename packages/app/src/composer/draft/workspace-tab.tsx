@@ -48,6 +48,7 @@ import {
 } from "@/constants/layout";
 import { isWeb } from "@/constants/platform";
 import type { WorkspaceDraftTabSetup } from "@/stores/workspace-tabs-store";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 const EMPTY_PENDING_PERMISSIONS = new Map();
 const EMPTY_ONLINE_SERVER_IDS: string[] = [];
@@ -432,7 +433,7 @@ export function WorkspaceDraftAgentTab({
   const setExplorerTabForCheckout = usePanelStore((state) => state.setExplorerTabForCheckout);
   const handleOpenWorkspaceAttachment = useCallback(
     (attachment: WorkspaceComposerAttachment) => {
-      if (attachment.kind !== "review") {
+      if (!getWorkspaceSurfaceConfig().showFileExplorer || attachment.kind !== "review") {
         return;
       }
       const checkout = {

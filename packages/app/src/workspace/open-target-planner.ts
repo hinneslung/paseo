@@ -58,6 +58,7 @@ function resolveActiveFileForOpenTargets(
 
 function planDesktopOpenTargets(input: {
   workspaceDirectory: string;
+  activeFile?: WorkspaceFileLocation | null;
   resolvedFile: ResolvedWorkspaceFilePaths | null;
   desktopTargets: readonly DesktopOpenTarget[];
   canUseDesktopBridge: boolean;
@@ -87,6 +88,10 @@ function planDesktopOpenTargets(input: {
           editorId: target.id,
           path: input.resolvedFile.absolutePath,
           cwd: input.workspaceDirectory,
+          ...(input.activeFile?.lineStart !== undefined
+            ? { lineStart: input.activeFile.lineStart }
+            : {}),
+          ...(input.activeFile?.lineEnd !== undefined ? { lineEnd: input.activeFile.lineEnd } : {}),
         },
       };
     }

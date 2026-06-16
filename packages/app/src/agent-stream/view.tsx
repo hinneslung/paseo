@@ -102,6 +102,7 @@ import type { WorkspaceComposerAttachment } from "@/attachments/types";
 import type { WorkspaceDraftTabSetup, WorkspaceTabTarget } from "@/stores/workspace-tabs-store";
 import { toErrorMessage } from "@/utils/error-messages";
 import { useWorkspaceDraftSubmissionStore } from "@/stores/workspace-draft-submission-store";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 function renderLiveAuxiliaryNode(input: {
   pendingPermissions: ReactNode;
@@ -356,6 +357,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
     const [expandedToolCallGroupIds, setExpandedToolCallGroupIds] = useState<Set<string>>(
       new Set(),
     );
+    const showFileExplorer = getWorkspaceSurfaceConfig().showFileExplorer;
     const openFileExplorerForCheckout = usePanelStore((state) => state.openFileExplorerForCheckout);
     const setExplorerTabForCheckout = usePanelStore((state) => state.setExplorerTabForCheckout);
 
@@ -447,6 +449,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
               target: createWorkspaceFileTabTarget(location),
             });
           }
+          return;
+        }
+
+        if (!showFileExplorer) {
           return;
         }
 

@@ -6,6 +6,7 @@ import { registerPanel } from "@/panels/panel-registry";
 import { setupPanelRegistration } from "@/panels/setup-panel";
 import { terminalPanelRegistration } from "@/panels/terminal-panel";
 import { providerSubagentPanelRegistration } from "@/panels/provider-subagent-panel";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 let panelsRegistered = false;
 
@@ -18,7 +19,9 @@ export function ensurePanelsRegistered(): void {
   registerPanel(providerSubagentPanelRegistration);
   registerPanel(setupPanelRegistration);
   registerPanel(terminalPanelRegistration);
-  registerPanel(browserPanelRegistration);
+  if (getWorkspaceSurfaceConfig().showBrowser) {
+    registerPanel(browserPanelRegistration);
+  }
   registerPanel(filePanelRegistration);
   panelsRegistered = true;
 }

@@ -747,6 +747,7 @@ export const en = {
         openIn: "Open workspace in {{target}}",
         openFileIn: "Open {{fileName}} in {{target}}",
         failedOpen: "Failed to open workspace",
+        failedOpenFile: "Failed to open file",
       },
       pr: {
         actions: {

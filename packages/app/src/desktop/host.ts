@@ -74,6 +74,8 @@ export interface DesktopEditorOpenTargetInput {
   path: string;
   cwd?: string;
   mode?: "open" | "reveal";
+  lineStart?: number;
+  lineEnd?: number;
 }
 
 export interface VscodeRuntimeConfig {
