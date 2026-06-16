@@ -111,6 +111,7 @@ import { useCheckoutStatusQuery } from "@/git/use-status-query";
 import { useComposerGithubAutoAttach } from "./github/auto-attach";
 import { resolveClientSlashCommand, type ClientSlashCommand } from "@/client-slash-commands";
 import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
+import { appendFileMentionPaths } from "@/utils/file-mention-autocomplete";
 
 type QueuedMessage = QueuedComposerMessage;
 
@@ -772,6 +773,8 @@ interface ComposerProps {
   onAddImages?: (addImages: (images: ImageAttachment[]) => void) => void;
   /** Callback to expose the addFiles function to parent components */
   onAddFiles?: (addFiles: (files: UserComposerAttachment[]) => void) => void;
+  /** Callback to expose file mention insertion for VS Code/file-drop integrations. */
+  onAddFileMentions?: (addFileMentions: (relativePaths: string[]) => void) => void;
   /** Callback to expose a focus function to parent components (desktop only). */
   onFocusInput?: (focus: () => void) => void;
   /** Optional draft context for listing commands before an agent exists. */
@@ -987,6 +990,7 @@ export function Composer({
   autoFocus = false,
   onAddImages,
   onAddFiles,
+  onAddFileMentions,
   onFocusInput,
   commandDraftConfig,
   onMessageSent,
@@ -1191,6 +1195,23 @@ export function Composer({
   useEffect(() => {
     onFocusInput?.(focusInput);
   }, [focusInput, onFocusInput]);
+
+  const addFileMentions = useCallback(
+    (relativePaths: string[]) => {
+      const nextInput = appendFileMentionPaths({ text: userInput, relativePaths });
+      if (nextInput === userInput) {
+        return;
+      }
+      setUserInput(nextInput);
+      setCursorIndex(nextInput.length);
+      messageInputRef.current?.focus();
+    },
+    [setUserInput, userInput],
+  );
+
+  useEffect(() => {
+    onAddFileMentions?.(addFileMentions);
+  }, [addFileMentions, onAddFileMentions]);
 
   const submitMessage = useCallback(
     async (text: string, submitAttachments: ComposerAttachment[]) => {
