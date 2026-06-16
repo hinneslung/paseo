@@ -234,6 +234,35 @@ async function main() {
         2,
       ),
     );
+
+    // Optional: exercise the editor.openTarget bridge command end-to-end (drives the same
+    // path a chat file-link uses) and report whether VS Code actually opened the file.
+    const editorProbePath = process.env.PASEO_CDP_EDITOR_PROBE;
+    if (editorProbePath) {
+      const invokeResult = await found.evaluate(async (p) => {
+        try {
+          await window.paseoDesktop.editor.openTarget({
+            editorId: "vscode-self",
+            path: p,
+            mode: "open",
+            lineStart: 5,
+          });
+          return "invoked";
+        } catch (e) {
+          return `error: ${e?.message ?? e}`;
+        }
+      }, editorProbePath);
+      log("editor.openTarget invoke result:", invokeResult);
+      await sleep(2000);
+      const editorState = await workbench.evaluate(() => {
+        const tabs = Array.from(document.querySelectorAll(".tabs-container .tab")).map(
+          (t) => t.getAttribute("aria-label") || t.textContent,
+        );
+        const hasEditor = !!document.querySelector(".editor-instance .monaco-editor");
+        return { tabs, hasEditor };
+      });
+      log("workbench editor state after openTarget:", JSON.stringify(editorState));
+    }
   } finally {
     cleanup();
   }
