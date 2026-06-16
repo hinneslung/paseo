@@ -93,6 +93,7 @@ function planDesktopOpenTargets(input: {
         workspacePath: input.workspaceDirectory,
         filePath: input.resolvedFile.absolutePath,
         ...(input.activeFile?.lineStart ? { line: input.activeFile.lineStart } : {}),
+        ...(input.activeFile?.lineEnd ? { lineEnd: input.activeFile.lineEnd } : {}),
       },
     };
   });

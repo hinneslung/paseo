@@ -144,6 +144,7 @@ const composerImageAttachmentPersister: Pick<
   persistFromDataUrl: persistAttachmentFromDataUrl,
   persistFromFileUri: persistAttachmentFromFileUri,
 };
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 type QueuedMessage = QueuedComposerMessage;
 
@@ -507,6 +508,7 @@ interface DispatchComposerKeyboardActionArgs {
   isAgentRunning: boolean;
   isCancellingAgent: boolean;
   isConnected: boolean;
+  showVoice: boolean;
   handleCancelAgent: () => void;
   focusMessageInputForKeyboardAction: () => void;
 }
@@ -519,10 +521,14 @@ function dispatchComposerKeyboardAction(args: DispatchComposerKeyboardActionArgs
     isAgentRunning,
     isCancellingAgent,
     isConnected,
+    showVoice,
     handleCancelAgent,
     focusMessageInputForKeyboardAction,
   } = args;
   if (!isPaneFocused) return false;
+
+  if (!showVoice && action.id.startsWith("message-input.dictation")) return false;
+  if (!showVoice && action.id.startsWith("message-input.voice")) return false;
 
   if (action.id === "agent.interrupt") {
     if (messageInputRef.current?.runKeyboardAction("dictation-cancel")) return true;
@@ -1082,6 +1088,7 @@ export function Composer({
   const mode = resolveComposerInputMode(inputMode);
   const { t } = useTranslation();
   const buttonIconSize = resolveComposerButtonIconSize();
+  const showVoice = getWorkspaceSurfaceConfig().showVoice;
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
   const agentDirectoryStatus = useHostRuntimeAgentDirectoryStatus(serverId);
@@ -1629,6 +1636,7 @@ export function Composer({
         isAgentRunning,
         isCancellingAgent,
         isConnected,
+        showVoice,
         handleCancelAgent,
         focusMessageInputForKeyboardAction,
       }),
@@ -1639,6 +1647,7 @@ export function Composer({
       isCancellingAgent,
       isConnected,
       isPaneFocused,
+      showVoice,
     ],
   );
 
@@ -1779,7 +1788,7 @@ export function Composer({
         isAgentRunning={isAgentRunning}
         hasSendableContent={hasSendableContent}
         isCompact={isCompactLayout}
-        showVoice={mode.showVoice}
+        showVoice={showVoice && mode.showVoice}
         buttonIconSize={buttonIconSize}
         handleToggleRealtimeVoice={handleToggleRealtimeVoice}
         isConnected={isConnected}
@@ -1801,6 +1810,7 @@ export function Composer({
       isVoiceSwitching,
       mode.showVoice,
       realtimeVoiceButtonStyle,
+      showVoice,
       t,
       voiceToggleKeys,
     ],
@@ -2144,6 +2154,7 @@ export function Composer({
                 onAddImages={addImages}
                 client={client}
                 isReadyForDictation={isDictationReady}
+                showVoice={showVoice}
                 placeholder={messagePlaceholder}
                 autoFocus={messageInputAutoFocus}
                 autoFocusKey={`${serverId}:${agentId}:${autoFocusKey ?? ""}`}

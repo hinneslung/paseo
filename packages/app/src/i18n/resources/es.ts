@@ -922,6 +922,7 @@ export const es: TranslationResources = {
         openIn: "Abrir espacio de trabajo en{{target}}",
         openFileIn: "Open {{fileName}} in {{target}}",
         failedOpen: "No se pudo abrir el espacio de trabajo",
+        failedOpenFile: "No se pudo abrir el archivo",
       },
       pr: {
         actions: {

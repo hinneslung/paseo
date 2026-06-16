@@ -883,6 +883,7 @@ export const zhCN: TranslationResources = {
         openIn: "在 {{target}} 中打开 workspace",
         openFileIn: "在 {{target}} 中打开 {{fileName}}",
         failedOpen: "打开 workspace 失败",
+        failedOpenFile: "无法打开文件",
       },
       pr: {
         actions: {

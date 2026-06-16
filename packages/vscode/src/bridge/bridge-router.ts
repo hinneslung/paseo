@@ -8,6 +8,12 @@ import {
   type TcpTransportTarget,
   type TransportEventPayload,
 } from "./daemon-transport";
+import {
+  parseEditorOpenTargetInput,
+  parseOpenUrlInput,
+  VSCODE_EDITOR_TARGETS,
+  type EditorOpenTargetInput,
+} from "./editor-commands";
 
 export interface BridgeRouterInput {
   context: vscode.ExtensionContext;
@@ -67,6 +73,14 @@ function parseSendInput(args: unknown): {
   };
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function clampLineIndex(lineNumber: number, documentLineCount: number): number {
+  return Math.max(0, Math.min(Math.floor(lineNumber) - 1, Math.max(0, documentLineCount - 1)));
+}
+
 export class BridgeRouter {
   private readonly context: vscode.ExtensionContext;
   private readonly resolvedEndpoint: ResolvedDaemonEndpoint;
@@ -95,6 +109,14 @@ export class BridgeRouter {
         return null;
       case "close_local_daemon_transport":
         this.transport.closeLocalTransportSession(parseSessionId(args));
+        return null;
+      case "editor.listTargets":
+        return VSCODE_EDITOR_TARGETS;
+      case "editor.openTarget":
+        await this.openEditorTarget(args);
+        return null;
+      case "opener.openUrl":
+        await this.openUrl(args);
         return null;
       default:
         throw new Error(`VS Code bridge command not implemented: ${command}`);
@@ -144,4 +166,58 @@ export class BridgeRouter {
       return this.transport.openLocalTransportSession({ target, password: nextPassword });
     }
   }
+
+  private async openEditorTarget(args: unknown): Promise<void> {
+    const target = parseEditorOpenTargetInput(args);
+    try {
+      if (!target.filePath) {
+        const targetUri = vscode.Uri.file(target.workspacePath);
+        const isOpenWorkspace = vscode.workspace.workspaceFolders?.some(
+          (folder) => folder.uri.fsPath === targetUri.fsPath,
+        );
+        if (!isOpenWorkspace) {
+          await vscode.commands.executeCommand("vscode.openFolder", targetUri, false);
+        }
+        return;
+      }
+      await openTextEditorTarget(target);
+    } catch (error) {
+      const targetPath = target.filePath ?? target.workspacePath;
+      throw new Error(`Failed to open ${targetPath} in VS Code: ${getErrorMessage(error)}`, {
+        cause: error,
+      });
+    }
+  }
+
+  private async openUrl(args: unknown): Promise<void> {
+    const input = parseOpenUrlInput(args);
+    try {
+      await vscode.env.openExternal(vscode.Uri.parse(input.url));
+    } catch (error) {
+      throw new Error(`Failed to open external URL in VS Code: ${getErrorMessage(error)}`, {
+        cause: error,
+      });
+    }
+  }
+}
+
+async function openTextEditorTarget(target: EditorOpenTargetInput): Promise<void> {
+  if (!target.filePath) {
+    return;
+  }
+  const uri = vscode.Uri.file(target.filePath);
+  const doc = await vscode.workspace.openTextDocument(uri);
+  const editor = await vscode.window.showTextDocument(doc);
+  if (target.line === undefined) {
+    return;
+  }
+
+  const startLine = clampLineIndex(target.line, doc.lineCount);
+  const endLine =
+    target.lineEnd === undefined ? startLine : clampLineIndex(target.lineEnd, doc.lineCount);
+  const start = new vscode.Position(startLine, Math.max(0, (target.column ?? 1) - 1));
+  const end = new vscode.Position(endLine, doc.lineAt(endLine).range.end.character);
+  const range = new vscode.Range(start, end);
+  editor.selection = new vscode.Selection(start, target.lineEnd === undefined ? start : end);
+  editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
 }

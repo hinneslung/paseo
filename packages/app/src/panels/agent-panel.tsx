@@ -103,6 +103,7 @@ import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { deriveSidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { buildDraftAgentSetup, type ClientSlashCommand } from "@/client-slash-commands";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 interface ChatAgentStateShape {
   serverId: string | null;
@@ -1540,7 +1541,7 @@ function ActiveAgentComposer({
   const setExplorerTabForCheckout = usePanelStore((state) => state.setExplorerTabForCheckout);
   const handleOpenWorkspaceAttachment = useCallback(
     (attachment: WorkspaceComposerAttachment) => {
-      if (attachment.kind !== "review") {
+      if (!getWorkspaceSurfaceConfig().showFileExplorer || attachment.kind !== "review") {
         return;
       }
       const checkout = {

@@ -14,6 +14,7 @@ import { buildTerminalsQueryKey } from "@/screens/workspace/terminals/state";
 import { usePanelStore } from "@/stores/panel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useWorkspaceDirectory, useWorkspaceFields } from "@/stores/session-store-hooks";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 type ListTerminalsPayload = ListTerminalsResponse["payload"];
 
@@ -84,16 +85,17 @@ function TerminalPanel() {
   }));
   const workspaceDirectory = workspaceFields?.workspaceDirectory || null;
   const isGitCheckout = workspaceFields?.isGitCheckout ?? false;
+  const showFileExplorer = getWorkspaceSurfaceConfig().showFileExplorer;
   const openFileExplorerForCheckout = usePanelStore((state) => state.openFileExplorerForCheckout);
   const handleOpenFileExplorer = useCallback(() => {
-    if (!workspaceDirectory) {
+    if (!showFileExplorer || !workspaceDirectory) {
       return;
     }
     openFileExplorerForCheckout({
       isCompact: true,
       checkout: { serverId, cwd: workspaceDirectory, isGit: isGitCheckout },
     });
-  }, [isGitCheckout, openFileExplorerForCheckout, serverId, workspaceDirectory]);
+  }, [isGitCheckout, openFileExplorerForCheckout, serverId, showFileExplorer, workspaceDirectory]);
   invariant(target.kind === "terminal", "TerminalPanel requires terminal target");
 
   if (!workspaceDirectory) {
