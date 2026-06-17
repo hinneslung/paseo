@@ -15,7 +15,7 @@ Follow these rules if you want your PR to be merged:
 - Explain the problem you're solving
 - Include repro steps if it's a bug
 - Include QA/testing evidence
-- UI changes need screenshots or video for every affected platform: iOS, Android, desktop, and web
+- UI changes need screenshots or video for every affected platform/UI host: iOS, Android, desktop, web, and VS Code
 - If you only tested one platform, say that clearly
 
 Your PR will be closed if you do any of these:
