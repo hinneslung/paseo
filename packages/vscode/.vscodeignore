@@ -1,9 +1,11 @@
 src/**
 scripts/**
+etc/**
 esbuild.mjs
-tsconfig.json
+tsconfig*.json
 *.tsbuildinfo
 **/*.test.*
+dist/**/*.map
 *.vsix
 .gitignore
 .vscode-test/**
