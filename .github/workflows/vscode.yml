@@ -1,0 +1,67 @@
+name: VS Code Extension
+
+on:
+  push:
+    paths:
+      - "packages/vscode/**"
+      - "packages/app/**"
+  pull_request:
+    paths:
+      - "packages/vscode/**"
+      - "packages/app/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # CI does not use the CUDA execution provider, and the onnxruntime-node
+  # postinstall download from NuGet is large enough to make npm ci flaky.
+  ONNXRUNTIME_NODE_INSTALL: skip
+
+jobs:
+  vscode:
+    runs-on: ubuntu-latest
+    env:
+      # This workflow does not run Electron; skipping the hosted binary avoids
+      # unrelated npm ci failures when Electron's CDN returns 504.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies with Electron retry
+        run: |
+          for attempt in 1 2 3; do
+            if npm ci; then
+              exit 0
+            else
+              exit_code=$?
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit $exit_code
+            fi
+            sleep $((attempt * 20))
+          done
+
+      - name: Build and package VS Code extension
+        run: npm run build:vscode
+
+      - name: Typecheck VS Code extension
+        run: npm run typecheck --workspace=paseo-vscode
+
+      # The package test script also runs @vscode/test-electron smoke tests,
+      # which need a display. Keep CI scoped to unit tests for now.
+      - name: Run VS Code unit tests
+        run: cd packages/vscode && npx vitest run src/**/*.test.ts --bail=1
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paseo-vsix
+          path: packages/vscode/paseo.vsix
