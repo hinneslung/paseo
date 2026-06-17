@@ -4,6 +4,16 @@ import path from "node:path";
 const ATTACHMENTS_DIRNAME = "attachments";
 const ATTACHMENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const EXTENSION_PATTERN = /^\.[A-Za-z0-9]{1,16}$/;
+const RASTER_IMAGE_SOURCE_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".bmp",
+  ".heic",
+  ".heif",
+]);
 
 export interface AttachmentFileResult {
   path: string;
@@ -60,6 +70,12 @@ function normalizeBytes(value: unknown): Uint8Array {
     return Uint8Array.from(value);
   }
   throw new Error("Attachment byte payload is required.");
+}
+
+function assertRasterImageSourcePath(sourcePath: string): void {
+  if (!RASTER_IMAGE_SOURCE_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) {
+    throw new Error("Attachment source path must be a supported raster image file.");
+  }
 }
 
 async function buildManagedAttachmentPath(
@@ -135,6 +151,7 @@ export async function copyAttachmentFileToManagedStorage(
   }
 
   const sourcePath = path.resolve(record.sourcePath.trim());
+  assertRasterImageSourcePath(sourcePath);
   const targetPath = await buildManagedAttachmentPath(storageRoot, {
     attachmentId: record.attachmentId,
     extension: record.extension,

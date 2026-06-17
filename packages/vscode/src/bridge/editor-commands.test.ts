@@ -42,9 +42,35 @@ describe("editor bridge command parsing", () => {
     ).toThrow("lineEnd must be greater than or equal to line.");
   });
 
-  it("parses external URL inputs", () => {
+  it("allows http, https, and mailto external URL inputs", () => {
     expect(parseOpenUrlInput({ url: " https://paseo.sh/docs " })).toEqual({
       url: "https://paseo.sh/docs",
     });
+    expect(parseOpenUrlInput({ url: "http://localhost:6768" })).toEqual({
+      url: "http://localhost:6768",
+    });
+    expect(parseOpenUrlInput({ url: "mailto:hello@paseo.sh" })).toEqual({
+      url: "mailto:hello@paseo.sh",
+    });
+  });
+
+  it("rejects URL schemes that can invoke local capabilities", () => {
+    for (const url of [
+      "file:///etc/passwd",
+      "command:workbench.action.openSettings",
+      "vscode://file/etc/passwd",
+      "javascript:alert(1)",
+      "data:text/plain,hello",
+    ]) {
+      expect(() => parseOpenUrlInput({ url })).toThrow(
+        "opener.openUrl only supports http:, https:, and mailto: URLs.",
+      );
+    }
+  });
+
+  it("rejects invalid external URL inputs", () => {
+    expect(() => parseOpenUrlInput({ url: "/relative/path" })).toThrow(
+      "opener.openUrl requires a valid URL.",
+    );
   });
 });

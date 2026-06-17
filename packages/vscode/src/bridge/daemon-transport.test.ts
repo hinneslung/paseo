@@ -114,7 +114,6 @@ describe("daemon transport", () => {
     expect(socket.input).toEqual({
       url: "ws://192.168.1.194:6768/ws",
       protocols: ["paseo.extra", "paseo.bearer.test-password"],
-      headers: { Authorization: "Bearer test-password" },
     });
     expect(events).toEqual([{ sessionId, kind: "open" }]);
 

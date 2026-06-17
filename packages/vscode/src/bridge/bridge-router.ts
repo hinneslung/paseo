@@ -48,16 +48,12 @@ function parseTransportTarget(args: unknown, fallbackEndpoint: string): TcpTrans
   if (args.transportType !== "tcp") {
     throw new Error("Only TCP daemon transport is supported in VS Code v1.");
   }
-  const endpoint =
-    typeof args.endpoint === "string" && args.endpoint.trim()
-      ? args.endpoint.trim()
-      : fallbackEndpoint;
   const protocols = Array.isArray(args.protocols)
     ? args.protocols.filter((protocol): protocol is string => typeof protocol === "string")
     : [];
   return {
     transportType: "tcp",
-    endpoint,
+    endpoint: fallbackEndpoint,
     ...(protocols.length > 0 ? { protocols } : {}),
   };
 }
@@ -167,11 +163,13 @@ export class BridgeRouter {
     if (stored) {
       return stored;
     }
-    // Test/automation seam (never set in production): authenticate from the env var directly,
-    // without touching SecretStorage or prompting. Keeps the E2E/CDP harness non-interactive.
-    const testPassword = process.env.PASEO_VSCODE_TEST_PASSWORD?.trim();
-    if (testPassword) {
-      return testPassword;
+    if (this.context.extensionMode !== vscode.ExtensionMode.Production) {
+      // Test/automation seam: authenticate from the env var directly without touching
+      // SecretStorage or prompting. Keeps the E2E/CDP harness non-interactive.
+      const testPassword = process.env.PASEO_VSCODE_TEST_PASSWORD?.trim();
+      if (testPassword) {
+        return testPassword;
+      }
     }
     if (!this.resolvedEndpoint.requiresPassword) {
       return null;

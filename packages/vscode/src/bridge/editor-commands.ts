@@ -15,6 +15,8 @@ export const VSCODE_EDITOR_TARGETS = [
   { id: "vscode-self", label: "VS Code", kind: "editor" as const },
 ];
 
+const ALLOWED_OPEN_URL_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -62,5 +64,15 @@ export function parseOpenUrlInput(args: unknown): OpenUrlInput {
   if (!isRecord(args) || typeof args.url !== "string" || args.url.trim().length === 0) {
     throw new Error("opener.openUrl requires a URL.");
   }
-  return { url: args.url.trim() };
+  const url = args.url.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("opener.openUrl requires a valid URL.");
+  }
+  if (!ALLOWED_OPEN_URL_PROTOCOLS.has(parsed.protocol)) {
+    throw new Error("opener.openUrl only supports http:, https:, and mailto: URLs.");
+  }
+  return { url };
 }

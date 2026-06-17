@@ -22,7 +22,7 @@ describe("attachment bridge commands", () => {
   });
 
   it("copies selected files into managed storage and reads them back", async () => {
-    const sourcePath = path.join(tempDir, "source.png");
+    const sourcePath = path.join(tempDir, "source.PNG");
     await writeFile(sourcePath, "image-bytes");
 
     const result = await copyAttachmentFileToManagedStorage(tempDir, {
@@ -37,6 +37,20 @@ describe("attachment bridge commands", () => {
     expect(await readManagedFileBase64(tempDir, { path: result.path })).toBe(
       Buffer.from("image-bytes").toString("base64"),
     );
+  });
+
+  it("rejects non-image source files even when the target extension is an image", async () => {
+    const sourcePath = path.join(tempDir, "secret.txt");
+    await writeFile(sourcePath, "secret-bytes");
+
+    await expect(
+      copyAttachmentFileToManagedStorage(tempDir, {
+        attachmentId: "secret",
+        sourcePath,
+        extension: ".png",
+      }),
+    ).rejects.toThrow("Attachment source path must be a supported raster image file.");
+    await expect(readFile(path.join(tempDir, "attachments", "secret.png"))).rejects.toThrow();
   });
 
   it("keeps managed file reads inside the attachment directory", async () => {

@@ -30,7 +30,6 @@ export interface WebSocketLike {
 export interface WebSocketFactoryInput {
   url: string;
   protocols?: string[];
-  headers?: Record<string, string>;
 }
 
 export type WebSocketFactory = (input: WebSocketFactoryInput) => WebSocketLike;
@@ -58,8 +57,7 @@ const WS_ENDPOINT_PATH = "/ws";
 const WS_CLOSE_DAEMON_AUTH_FAILED = 4401;
 
 function createWebSocket(input: WebSocketFactoryInput): WebSocketLike {
-  const options = input.headers ? { headers: input.headers } : undefined;
-  const ws = new WebSocket(input.url, input.protocols, options);
+  const ws = new WebSocket(input.url, input.protocols);
   return {
     get readyState() {
       return ws.readyState;
@@ -133,13 +131,11 @@ export class DaemonTransport {
       ...(input.target.protocols ?? []),
       ...(input.password ? [`paseo.bearer.${input.password}`] : []),
     ];
-    const headers = input.password ? { Authorization: `Bearer ${input.password}` } : undefined;
 
     return new Promise((resolve, reject) => {
       const ws = this.webSocketFactory({
         url,
         ...(protocols.length > 0 ? { protocols } : {}),
-        ...(headers ? { headers } : {}),
       });
       const session: Session = {
         id: sessionId,
