@@ -70,7 +70,7 @@
         "paseo.endpoint": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Optional daemon endpoint override for future VS Code daemon transport support. Example: `127.0.0.1:6768`."
+          "markdownDescription": "Optional Paseo daemon endpoint override for the VS Code extension. Example: `127.0.0.1:6768`."
         }
       }
     }
