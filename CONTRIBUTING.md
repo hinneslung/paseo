@@ -53,7 +53,7 @@ Here is the criteria I use to decide:
 - Explains the problem you're solving
 - QA evidence
 - Automated tests
-- Screenshots or video for UI changes, on every affected platform
+- Screenshots or video for UI changes, on every affected platform or UI host, including VS Code
 - Says which platforms you tested and which you didn't
 - Maintainer edits enabled
 
