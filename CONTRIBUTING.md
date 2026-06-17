@@ -29,7 +29,7 @@ Learning on the job is fine, I do not care how many years of experience you have
 - Explain the problem you're solving
 - Include repro steps if it's a bug
 - Include QA/testing evidence
-- UI changes need screenshots or video for every affected platform: iOS, Android, desktop, and web
+- UI changes need screenshots or video for every affected platform/UI host: iOS, Android, desktop, web, and VS Code
 - If you only tested one platform, say that clearly
 
 ⛔️ Will be rejected
