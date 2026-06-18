@@ -24,6 +24,7 @@ import {
   MIN_EXPLORER_SIDEBAR_WIDTH,
   MIN_SIDEBAR_WIDTH,
   migratePanelState,
+  resolveDefaultAgentListOpen,
   selectIsAgentListOpen,
   selectIsFileExplorerOpen,
   selectPanelVisibility,
@@ -34,7 +35,7 @@ import {
   type PanelVisibilityState,
   type SortOption,
 } from "./state";
-import { isWeb } from "@/constants/platform";
+import { getIsVscode, isWeb } from "@/constants/platform";
 export type { ExplorerTab } from "../explorer-tab-memory";
 export type { ExplorerCheckoutContext } from "../explorer-checkout-context";
 export type {
@@ -106,8 +107,6 @@ export interface PanelState {
   setExplorerFilesSplitRatio: (ratio: number) => void;
 }
 
-const DEFAULT_DESKTOP_OPEN = isWeb;
-
 export const usePanelStore = create<PanelState>()(
   persist(
     (set) => ({
@@ -116,7 +115,7 @@ export const usePanelStore = create<PanelState>()(
 
       // Desktop defaults based on platform
       desktop: {
-        agentListOpen: DEFAULT_DESKTOP_OPEN,
+        agentListOpen: resolveDefaultAgentListOpen({ isWeb, isVscode: getIsVscode() }),
         fileExplorerOpen: false,
         focusModeEnabled: false,
       },
