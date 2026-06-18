@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -39,18 +39,33 @@ describe("attachment bridge commands", () => {
     );
   });
 
-  it("rejects non-image source files even when the target extension is an image", async () => {
-    const sourcePath = path.join(tempDir, "secret.txt");
-    await writeFile(sourcePath, "secret-bytes");
+  it("copies selected non-image files into managed storage", async () => {
+    const sourcePath = path.join(tempDir, "notes.txt");
+    await writeFile(sourcePath, "note-bytes");
+
+    const result = await copyAttachmentFileToManagedStorage(tempDir, {
+      attachmentId: "notes",
+      sourcePath,
+      extension: ".txt",
+    });
+
+    expect(result.byteSize).toBe(10);
+    expect(result.path).toBe(path.join(tempDir, "attachments", "notes.txt"));
+    expect(await readFile(result.path, "utf8")).toBe("note-bytes");
+  });
+
+  it("rejects directories as attachment sources", async () => {
+    const sourcePath = path.join(tempDir, "source-directory");
+    await mkdir(sourcePath);
 
     await expect(
       copyAttachmentFileToManagedStorage(tempDir, {
-        attachmentId: "secret",
+        attachmentId: "directory",
         sourcePath,
-        extension: ".png",
+        extension: ".txt",
       }),
-    ).rejects.toThrow("Attachment source path must be a supported raster image file.");
-    await expect(readFile(path.join(tempDir, "attachments", "secret.png"))).rejects.toThrow();
+    ).rejects.toThrow("Attachment source path must be a regular file.");
+    await expect(readFile(path.join(tempDir, "attachments", "directory.txt"))).rejects.toThrow();
   });
 
   it("keeps managed file reads inside the attachment directory", async () => {

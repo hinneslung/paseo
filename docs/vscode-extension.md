@@ -96,10 +96,11 @@ postMessage into an unbounded local primitive.
 
 The bridge pins daemon transport connections to the Node-resolved endpoint and
 ignores any endpoint supplied by the webview. `opener.openUrl` only accepts
-`http:`, `https:`, and `mailto:` URLs. Attachment copy commands only accept
-source files with supported raster image extensions. The
-`PASEO_VSCODE_TEST_PASSWORD` automation seam is ignored in production extension
-mode. The daemon password never enters the webview.
+`http:`, `https:`, and `mailto:` URLs. Attachment copy commands accept regular
+source files, reject directories and non-files, and only write into
+VS Code-managed attachment storage. The `PASEO_VSCODE_TEST_PASSWORD` automation
+seam is ignored in production extension mode. The daemon password never enters
+the webview.
 
 ## Developer Notes
 
