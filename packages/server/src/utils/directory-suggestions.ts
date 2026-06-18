@@ -62,6 +62,11 @@ interface ChildWorkspaceEntry {
   kind: WorkspaceSuggestionKind;
 }
 
+interface WorkspaceSearchQueueEntry {
+  directory: string;
+  depth: number;
+}
+
 interface DirectoryListCacheEntry {
   expiresAt: number;
   entries: ChildDirectoryEntry[];
@@ -70,6 +75,16 @@ interface DirectoryListCacheEntry {
 interface WorkspaceEntryListCacheEntry {
   expiresAt: number;
   entries: ChildWorkspaceEntry[];
+}
+
+interface QueueWorkspaceDirectoryInput {
+  entry: ChildWorkspaceEntry;
+  current: WorkspaceSearchQueueEntry;
+  queue: WorkspaceSearchQueueEntry[];
+  visited: Set<string>;
+  maxDepth: number;
+  maxEntriesScanned: number;
+  scanned: number;
 }
 
 const directoryListCache = new Map<string, DirectoryListCacheEntry>();
@@ -91,6 +106,7 @@ const IGNORED_SUGGESTION_DIRECTORY_NAMES = new Set([
   "vendor",
   "__pycache__",
 ]);
+const HIDDEN_TRAVERSAL_IGNORED_DIRECTORY_NAMES = new Set([".git", ".hg", ".svn"]);
 
 export async function searchHomeDirectories(
   options: SearchHomeDirectoriesOptions,
@@ -160,6 +176,7 @@ export async function searchWorkspaceEntries(
   }
 
   const matchMode = options.matchMode ?? "fuzzy";
+  const includeHidden = matchMode === "suffix";
   if (queryParts.isPathQuery && matchMode !== "suffix") {
     return searchWorkspaceWithinParentDirectory({
       workspaceRoot,
@@ -168,6 +185,7 @@ export async function searchWorkspaceEntries(
       limit,
       includeDirectories,
       includeFiles,
+      includeHidden,
     });
   }
 
@@ -181,6 +199,7 @@ export async function searchWorkspaceEntries(
     limit,
     includeDirectories,
     includeFiles,
+    includeHidden,
     matchMode,
     maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
     maxEntriesScanned: options.maxEntriesScanned ?? DEFAULT_MAX_DIRECTORIES_SCANNED,
@@ -297,6 +316,7 @@ async function searchWorkspaceWithinParentDirectory(input: {
   limit: number;
   includeDirectories: boolean;
   includeFiles: boolean;
+  includeHidden: boolean;
 }): Promise<WorkspaceSuggestionEntry[]> {
   const parentPath = path.resolve(input.workspaceRoot, input.parentPart || ".");
   const parentRoot = await resolveDirectory(parentPath);
@@ -312,6 +332,9 @@ async function searchWorkspaceWithinParentDirectory(input: {
   });
 
   for (const entry of entries) {
+    if (!input.includeHidden && isHiddenDirectoryName(entry.name)) {
+      continue;
+    }
     if (entry.kind === "directory" && !input.includeDirectories) {
       continue;
     }
@@ -340,13 +363,12 @@ async function searchWorkspaceAcrossTree(input: {
   limit: number;
   includeDirectories: boolean;
   includeFiles: boolean;
+  includeHidden: boolean;
   matchMode: WorkspaceMatchMode;
   maxDepth: number;
   maxEntriesScanned: number;
 }): Promise<WorkspaceSuggestionEntry[]> {
-  const queue: Array<{ directory: string; depth: number }> = [
-    { directory: input.workspaceRoot, depth: 0 },
-  ];
+  const queue: WorkspaceSearchQueueEntry[] = [{ directory: input.workspaceRoot, depth: 0 }];
   const visited = new Set<string>([input.workspaceRoot]);
   const ranked: RankedWorkspaceEntry[] = [];
   let scanned = 0;
@@ -366,21 +388,20 @@ async function searchWorkspaceAcrossTree(input: {
     });
 
     for (const entry of entries) {
+      if (!input.includeHidden && isHiddenDirectoryName(entry.name)) {
+        continue;
+      }
       scanned += 1;
 
-      if (entry.kind === "directory") {
-        if (
-          !visited.has(entry.absolutePath) &&
-          current.depth < input.maxDepth &&
-          scanned < input.maxEntriesScanned
-        ) {
-          visited.add(entry.absolutePath);
-          queue.push({
-            directory: entry.absolutePath,
-            depth: current.depth + 1,
-          });
-        }
-      }
+      queueWorkspaceDirectory({
+        entry,
+        current,
+        queue,
+        visited,
+        maxDepth: input.maxDepth,
+        maxEntriesScanned: input.maxEntriesScanned,
+        scanned,
+      });
 
       if (entry.kind === "directory" && !input.includeDirectories) {
         continue;
@@ -418,6 +439,27 @@ async function searchWorkspaceAcrossTree(input: {
   }
 
   return dedupeAndSortWorkspaceEntries(ranked).slice(0, input.limit);
+}
+
+function queueWorkspaceDirectory(input: QueueWorkspaceDirectoryInput): void {
+  if (input.entry.kind !== "directory") {
+    return;
+  }
+  if (isHiddenTraversalIgnoredDirectoryName(input.entry.name)) {
+    return;
+  }
+  if (input.visited.has(input.entry.absolutePath)) {
+    return;
+  }
+  if (input.current.depth >= input.maxDepth || input.scanned >= input.maxEntriesScanned) {
+    return;
+  }
+
+  input.visited.add(input.entry.absolutePath);
+  input.queue.push({
+    directory: input.entry.absolutePath,
+    depth: input.current.depth + 1,
+  });
 }
 
 function workspaceEntryMatchesSuffixQuery(input: {
@@ -867,10 +909,7 @@ async function listWorkspaceChildEntries(input: {
   const dirents = await readdir(input.directory, { withFileTypes: true }).catch(
     () => [] as Dirent[],
   );
-  const candidates = dirents.filter(
-    (dirent) =>
-      !isHiddenDirectoryName(dirent.name) && !isIgnoredSuggestionDirectoryName(dirent.name),
-  );
+  const candidates = dirents.filter((dirent) => !isIgnoredSuggestionDirectoryName(dirent.name));
   const resolved = await Promise.all(
     candidates.map(async (dirent) => {
       const candidatePath = path.join(input.directory, dirent.name);
@@ -962,6 +1001,10 @@ function isHiddenDirectoryName(name: string): boolean {
 
 function isIgnoredSuggestionDirectoryName(name: string): boolean {
   return IGNORED_SUGGESTION_DIRECTORY_NAMES.has(name);
+}
+
+function isHiddenTraversalIgnoredDirectoryName(name: string): boolean {
+  return HIDDEN_TRAVERSAL_IGNORED_DIRECTORY_NAMES.has(name);
 }
 
 function setDirectoryListCache(cacheKey: string, entry: DirectoryListCacheEntry): void {
