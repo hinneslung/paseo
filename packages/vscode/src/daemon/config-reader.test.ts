@@ -32,9 +32,17 @@ describe("config-reader", () => {
     }
   });
 
-  it("expands tilde paths", () => {
+  it("expands forward-slash tilde paths on every platform", () => {
+    // "~/.paseo/config.json" must expand regardless of platform: on Windows path.sep is "\\",
+    // so matching only `~${path.sep}` left this default unexpanded and the config went unread.
     expect(expandHomePath("~/.paseo/config.json", "/home/tester")).toBe(
-      "/home/tester/.paseo/config.json",
+      path.join("/home/tester", ".paseo/config.json"),
+    );
+  });
+
+  it("expands native-separator tilde paths", () => {
+    expect(expandHomePath(`~${path.sep}.paseo${path.sep}config.json`, "/home/tester")).toBe(
+      path.join("/home/tester", ".paseo", "config.json"),
     );
   });
 });
