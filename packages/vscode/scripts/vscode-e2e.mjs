@@ -87,9 +87,11 @@ async function openPaseo(workbench) {
   );
   const quickInput = workbench.locator(".quick-input-widget input").first();
   await quickInput.waitFor({ state: "visible", timeout: 10_000 });
-  // Ctrl+Shift+P seeds the palette with the ">" command-mode prefix. fill() would replace the
-  // whole value and drop ">", turning it into a file search ("No matching results"). Keep ">".
-  await quickInput.fill(">Paseo: Open");
+  // Ctrl+Shift+P seeds the palette with the ">" command-mode prefix. Type real key events (NOT
+  // fill()) so VS Code's quick input tracks the active item and Enter activates the highlighted
+  // command. fill() only shows the filtered list; Enter then does not fire the command.
+  await workbench.keyboard.type("Paseo: Open");
+  await workbench.waitForTimeout(700);
   await workbench.keyboard.press("Enter");
   await quickInput.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => undefined);
 }
