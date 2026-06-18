@@ -62,6 +62,11 @@ interface ChildWorkspaceEntry {
   kind: WorkspaceSuggestionKind;
 }
 
+interface WorkspaceSearchQueueEntry {
+  directory: string;
+  depth: number;
+}
+
 interface DirectoryListCacheEntry {
   expiresAt: number;
   entries: ChildDirectoryEntry[];
@@ -70,6 +75,17 @@ interface DirectoryListCacheEntry {
 interface WorkspaceEntryListCacheEntry {
   expiresAt: number;
   entries: ChildWorkspaceEntry[];
+}
+
+interface QueueWorkspaceDirectoryInput {
+  entry: ChildWorkspaceEntry;
+  current: WorkspaceSearchQueueEntry;
+  queue: WorkspaceSearchQueueEntry[];
+  visited: Set<string>;
+  maxDepth: number;
+  maxEntriesScanned: number;
+  scanned: number;
+  traversableHiddenDirectoryNames: ReadonlySet<string>;
 }
 
 const directoryListCache = new Map<string, DirectoryListCacheEntry>();
@@ -100,6 +116,7 @@ const TRAVERSABLE_HIDDEN_WORKSPACE_DIRECTORY_NAMES = new Set([
   ".paseo",
   ".vscode",
 ]);
+const HIDDEN_TRAVERSAL_IGNORED_DIRECTORY_NAMES = new Set([".git", ".hg", ".svn"]);
 
 export async function searchHomeDirectories(
   options: SearchHomeDirectoriesOptions,
@@ -169,8 +186,9 @@ export async function searchWorkspaceEntries(
   }
 
   const matchMode = options.matchMode ?? "fuzzy";
+  const includeHidden = matchMode === "suffix";
   const exactEntry =
-    queryParts.isPathQuery && matchMode === "suffix"
+    matchMode === "suffix"
       ? await resolveWorkspaceExactEntry({
           workspaceRoot,
           query: options.query,
@@ -190,6 +208,7 @@ export async function searchWorkspaceEntries(
       limit,
       includeDirectories,
       includeFiles,
+      includeHidden,
     });
   }
 
@@ -203,6 +222,7 @@ export async function searchWorkspaceEntries(
     limit,
     includeDirectories,
     includeFiles,
+    includeHidden,
     matchMode,
     maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
     maxEntriesScanned: options.maxEntriesScanned ?? DEFAULT_MAX_DIRECTORIES_SCANNED,
@@ -379,6 +399,7 @@ async function searchWorkspaceWithinParentDirectory(input: {
   limit: number;
   includeDirectories: boolean;
   includeFiles: boolean;
+  includeHidden: boolean;
 }): Promise<WorkspaceSuggestionEntry[]> {
   const parentPath = path.resolve(input.workspaceRoot, input.parentPart || ".");
   const parentRoot = await resolveDirectory(parentPath);
@@ -394,6 +415,9 @@ async function searchWorkspaceWithinParentDirectory(input: {
   });
 
   for (const entry of entries) {
+    if (!input.includeHidden && isHiddenDirectoryName(entry.name)) {
+      continue;
+    }
     if (entry.kind === "directory" && !input.includeDirectories) {
       continue;
     }
@@ -425,17 +449,20 @@ async function searchWorkspaceAcrossTree(input: {
   limit: number;
   includeDirectories: boolean;
   includeFiles: boolean;
+  includeHidden: boolean;
   matchMode: WorkspaceMatchMode;
   maxDepth: number;
   maxEntriesScanned: number;
 }): Promise<WorkspaceSuggestionEntry[]> {
-  const queue: Array<{ directory: string; depth: number }> = [
-    { directory: input.workspaceRoot, depth: 0 },
-  ];
+  const queue: WorkspaceSearchQueueEntry[] = [{ directory: input.workspaceRoot, depth: 0 }];
   const visited = new Set<string>([input.workspaceRoot]);
   const ranked: RankedWorkspaceEntry[] = [];
   let scanned = 0;
   const searchLower = input.searchTerm.toLowerCase();
+  const traversableHiddenDirectoryNames =
+    input.matchMode === "suffix"
+      ? collectHiddenDirectoryNamesFromWorkspaceQuery(input.searchTerm)
+      : new Set<string>();
 
   for (
     let queueIndex = 0;
@@ -451,21 +478,21 @@ async function searchWorkspaceAcrossTree(input: {
     });
 
     for (const entry of entries) {
+      if (!input.includeHidden && isHiddenDirectoryName(entry.name)) {
+        continue;
+      }
       scanned += 1;
 
-      if (entry.kind === "directory") {
-        if (
-          !visited.has(entry.absolutePath) &&
-          current.depth < input.maxDepth &&
-          scanned < input.maxEntriesScanned
-        ) {
-          visited.add(entry.absolutePath);
-          queue.push({
-            directory: entry.absolutePath,
-            depth: current.depth + 1,
-          });
-        }
-      }
+      queueWorkspaceDirectory({
+        entry,
+        current,
+        queue,
+        visited,
+        maxDepth: input.maxDepth,
+        maxEntriesScanned: input.maxEntriesScanned,
+        scanned,
+        traversableHiddenDirectoryNames,
+      });
 
       if (entry.kind === "directory" && !input.includeDirectories) {
         continue;
@@ -507,6 +534,48 @@ async function searchWorkspaceAcrossTree(input: {
   }
 
   return dedupeAndSortWorkspaceEntries(ranked).slice(0, input.limit);
+}
+
+function queueWorkspaceDirectory(input: QueueWorkspaceDirectoryInput): void {
+  if (input.entry.kind !== "directory") {
+    return;
+  }
+  if (isHiddenTraversalIgnoredDirectoryName(input.entry.name)) {
+    return;
+  }
+  if (
+    isHiddenDirectoryName(input.entry.name) &&
+    !isTraversableHiddenWorkspaceDirectoryName(input.entry.name) &&
+    !input.traversableHiddenDirectoryNames.has(input.entry.name.toLowerCase())
+  ) {
+    return;
+  }
+  if (input.visited.has(input.entry.absolutePath)) {
+    return;
+  }
+  if (input.current.depth >= input.maxDepth || input.scanned >= input.maxEntriesScanned) {
+    return;
+  }
+
+  input.visited.add(input.entry.absolutePath);
+  input.queue.push({
+    directory: input.entry.absolutePath,
+    depth: input.current.depth + 1,
+  });
+}
+
+function collectHiddenDirectoryNamesFromWorkspaceQuery(query: string): Set<string> {
+  const names = new Set<string>();
+  for (const segment of query
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .split("/")) {
+    if (segment.startsWith(".") && segment.length > 1) {
+      names.add(segment.toLowerCase());
+    }
+  }
+  return names;
 }
 
 function workspaceEntryMatchesSuffixQuery(input: {
@@ -960,16 +1029,11 @@ async function listWorkspaceChildEntries(input: {
     if (isIgnoredSuggestionDirectoryName(dirent.name)) {
       return false;
     }
-    if (
-      isHiddenDirectoryName(dirent.name) &&
-      !dirent.isFile() &&
-      !isTraversableHiddenWorkspaceDirectoryName(dirent.name)
-    ) {
+    if (dirent.isDirectory() && isHiddenTraversalIgnoredDirectoryName(dirent.name)) {
       return false;
     }
-    // Allowlisted hidden directories remain traversable so file links like
-    // `.claude/settings.local.json` can resolve, but hidden files (e.g.
-    // `.DS_Store`) should never be suggested.
+    // Hidden directories may still be traversed for suffix file-link lookups,
+    // but hidden files (e.g. `.DS_Store`) should never be broad suggestions.
     if (dirent.isFile() && isHiddenDirectoryName(dirent.name)) {
       return false;
     }
@@ -1075,6 +1139,10 @@ function isIgnoredSuggestionDirectoryName(name: string): boolean {
 
 function isTraversableHiddenWorkspaceDirectoryName(name: string): boolean {
   return TRAVERSABLE_HIDDEN_WORKSPACE_DIRECTORY_NAMES.has(name);
+}
+
+function isHiddenTraversalIgnoredDirectoryName(name: string): boolean {
+  return HIDDEN_TRAVERSAL_IGNORED_DIRECTORY_NAMES.has(name);
 }
 
 function setDirectoryListCache(cacheKey: string, entry: DirectoryListCacheEntry): void {

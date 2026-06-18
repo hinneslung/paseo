@@ -7,6 +7,10 @@ import { searchHomeDirectories, searchWorkspaceEntries } from "./directory-sugge
 
 const isWindows = isPlatform("win32");
 
+function hasHiddenPathSegment(value: string): boolean {
+  return value.split("/").some((segment) => segment.startsWith("."));
+}
+
 describe("searchHomeDirectories", () => {
   let tempRoot: string;
   let homeDir: string;
@@ -202,7 +206,10 @@ describe("searchWorkspaceEntries", () => {
     mkdirSync(path.join(workspaceDir, "src", "components"), {
       recursive: true,
     });
+    mkdirSync(path.join(workspaceDir, "src", ".config"), { recursive: true });
     mkdirSync(path.join(workspaceDir, "docs"), { recursive: true });
+    mkdirSync(path.join(workspaceDir, ".github", "workflows"), { recursive: true });
+    mkdirSync(path.join(workspaceDir, ".git"), { recursive: true });
     mkdirSync(path.join(outsideDir, "escaped"), { recursive: true });
 
     writeFileSync(path.join(workspaceDir, "README.md"), "# paseo\n");
@@ -211,6 +218,11 @@ describe("searchWorkspaceEntries", () => {
       "export const ChatInput = null;\n",
     );
     writeFileSync(path.join(workspaceDir, "docs", "notes.md"), "notes\n");
+    writeFileSync(path.join(workspaceDir, "docs", "product.md"), "product\n");
+    writeFileSync(path.join(workspaceDir, ".github", "workflows", "ci.yml"), "name: CI\n");
+    writeFileSync(path.join(workspaceDir, ".env"), "TOKEN=test\n");
+    writeFileSync(path.join(workspaceDir, "src", ".config", "app.ts"), "export {};\n");
+    writeFileSync(path.join(workspaceDir, ".git", "HEAD"), "ref: refs/heads/main\n");
 
     if (!isWindows) {
       symlinkSync(path.join(outsideDir, "escaped"), path.join(workspaceDir, "escaped-link"));
@@ -382,11 +394,54 @@ describe("searchWorkspaceEntries", () => {
     expect(results).toEqual([{ path: ".dev/paseo-home/daemon.log", kind: "file" }]);
   });
 
+  it.each([".github/workflows/ci.yml", "workflows/ci.yml", "ci.yml"])(
+    "suffix mode resolves hidden workflow file for query %s",
+    async (query) => {
+      const results = await searchWorkspaceEntries({
+        cwd: workspaceDir,
+        query,
+        limit: 20,
+        includeFiles: true,
+        includeDirectories: false,
+        matchMode: "suffix",
+      });
+
+      expect(results).toEqual([{ path: ".github/workflows/ci.yml", kind: "file" }]);
+    },
+  );
+
+  it("suffix mode resolves root dotfiles", async () => {
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: ".env",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+      matchMode: "suffix",
+    });
+
+    expect(results).toEqual([{ path: ".env", kind: "file" }]);
+  });
+
+  it.each(["src/.config/app.ts", ".config/app.ts"])(
+    "suffix mode resolves files below mid-path hidden directories for query %s",
+    async (query) => {
+      const results = await searchWorkspaceEntries({
+        cwd: workspaceDir,
+        query,
+        limit: 20,
+        includeFiles: true,
+        includeDirectories: false,
+        matchMode: "suffix",
+      });
+
+      expect(results).toEqual([{ path: "src/.config/app.ts", kind: "file" }]);
+    },
+  );
+
   it("suffix mode finds files under allowlisted hidden workspace directories", async () => {
     mkdirSync(path.join(workspaceDir, ".claude"), { recursive: true });
-    mkdirSync(path.join(workspaceDir, ".github", "workflows"), { recursive: true });
     writeFileSync(path.join(workspaceDir, ".claude", "settings.local.json"), "{}");
-    writeFileSync(path.join(workspaceDir, ".github", "workflows", "ci.yml"), "");
 
     const claudeResults = await searchWorkspaceEntries({
       cwd: workspaceDir,
@@ -396,17 +451,8 @@ describe("searchWorkspaceEntries", () => {
       includeDirectories: false,
       matchMode: "suffix",
     });
-    const githubResults = await searchWorkspaceEntries({
-      cwd: workspaceDir,
-      query: "ci.yml",
-      limit: 20,
-      includeFiles: true,
-      includeDirectories: false,
-      matchMode: "suffix",
-    });
 
     expect(claudeResults).toEqual([{ path: ".claude/settings.local.json", kind: "file" }]);
-    expect(githubResults).toEqual([{ path: ".github/workflows/ci.yml", kind: "file" }]);
   });
 
   it("does not broadly traverse unlisted hidden workspace directories", async () => {
@@ -426,7 +472,7 @@ describe("searchWorkspaceEntries", () => {
     expect(results).toEqual([{ path: "src/needle.ts", kind: "file" }]);
   });
 
-  it("does not suggest hidden directories even when includeDirectories is true", async () => {
+  it("fuzzy mode does not suggest hidden directories even when includeDirectories is true", async () => {
     mkdirSync(path.join(workspaceDir, ".claude"), { recursive: true });
     writeFileSync(path.join(workspaceDir, ".claude", "settings.local.json"), "{}");
 
@@ -442,10 +488,7 @@ describe("searchWorkspaceEntries", () => {
     expect(results.some((entry) => entry.path === ".claude" && entry.kind === "directory")).toBe(
       false,
     );
-    expect(results).toContainEqual({
-      path: ".claude/settings.local.json",
-      kind: "file",
-    });
+    expect(results.some((entry) => hasHiddenPathSegment(entry.path))).toBe(false);
   });
 
   it("path mode does not suggest hidden workspace directories", async () => {
@@ -484,6 +527,18 @@ describe("searchWorkspaceEntries", () => {
     });
 
     expect(results).toEqual([]);
+  });
+
+  it.each(["env", "config"])("fuzzy mode excludes hidden paths for query %s", async (query) => {
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query,
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+    });
+
+    expect(results.some((entry) => hasHiddenPathSegment(entry.path))).toBe(false);
   });
 
   // POSIX-only: creates and follows a symlink escape fixture.
