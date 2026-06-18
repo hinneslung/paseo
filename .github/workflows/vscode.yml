@@ -19,8 +19,7 @@ env:
   ONNXRUNTIME_NODE_INSTALL: skip
 
 jobs:
-  # vscode-smoke covers Layer 1. WS3 will extend it with a real-daemon bridge
-  # round-trip, and WS4 will add vscode-e2e per docs/vscode-ci.md.
+  # vscode-smoke covers Layers 1 + 2; vscode-e2e covers Layer 3 per docs/vscode-ci.md.
   vscode-build:
     runs-on: ubuntu-latest
     env:
@@ -86,3 +85,37 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: packages/vscode
         run: node scripts/run-smoke-with-daemon.mjs
+
+  vscode-e2e:
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: ./.github/actions/npm-install
+
+      - name: Build VS Code extension
+        run: npm run build:vscode
+
+      - name: Build server and CLI for e2e
+        run: npm run build:server
+
+      - name: Cache VS Code test download
+        uses: actions/cache@v4
+        with:
+          path: packages/vscode/.vscode-test
+          key: vscode-test-e2e-${{ runner.os }}
+
+      - name: Run VS Code e2e tests
+        working-directory: packages/vscode
+        run: xvfb-run -a node scripts/vscode-e2e.mjs
+
+      - name: Upload VS Code e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-e2e-artifacts
+          path: packages/vscode/artifacts/vscode-e2e
+          if-no-files-found: ignore
