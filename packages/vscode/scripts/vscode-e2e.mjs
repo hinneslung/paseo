@@ -78,10 +78,44 @@ async function waitForAppFrame(browser, timeoutMs) {
     if (frame) return frame;
     await sleep(300);
   }
+  const report = [];
+  for (const frame of allFrames(browser)) {
+    report.push({
+      url: frame.url(),
+      probe: await frame
+        .evaluate(() => ({
+          hasPaseoVscode: typeof window.paseoVscode !== "undefined",
+          protocol: location.protocol,
+          hasRoot: !!document.querySelector("#root"),
+          rootChildren: document.querySelector("#root")?.childElementCount ?? -1,
+          title: document.title,
+          bodyTextHead: (document.body?.innerText ?? "").slice(0, 300),
+        }))
+        .catch((error) => ({ error: String(error) })),
+    });
+  }
+  console.log(`[vscode-e2e] frame report: ${JSON.stringify(report, null, 2)}`);
+  mkdirSync(artifactDir, { recursive: true });
+  writeFileSync(path.join(artifactDir, "frame-report.json"), JSON.stringify(report, null, 2));
   throw new Error("Paseo app webview frame was not found.");
 }
 
 async function openPaseo(workbench) {
+  // Reveal the persistent Paseo activity-bar view first; it renders the webview app reliably in
+  // headless CI. (The cdp-screenshot.mjs manual harness does the same.) The command palette alone
+  // opens a panel that may not become the focused/rendered editor.
+  await workbench
+    .evaluate(() => {
+      const items = Array.from(
+        document.querySelectorAll(".activitybar .action-label, .activitybar [role='tab']"),
+      );
+      const el = items.find((a) =>
+        (a.getAttribute("aria-label") || "").toLowerCase().includes("paseo"),
+      );
+      el?.click();
+    })
+    .catch(() => {});
+  await workbench.waitForTimeout(1500);
   await workbench.keyboard.press(
     process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P",
   );
