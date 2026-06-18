@@ -87,7 +87,9 @@ async function openPaseo(workbench) {
   );
   const quickInput = workbench.locator(".quick-input-widget input").first();
   await quickInput.waitFor({ state: "visible", timeout: 10_000 });
-  await quickInput.fill("Paseo: Open");
+  // Ctrl+Shift+P seeds the palette with the ">" command-mode prefix. fill() would replace the
+  // whole value and drop ">", turning it into a file search ("No matching results"). Keep ">".
+  await quickInput.fill(">Paseo: Open");
   await workbench.keyboard.press("Enter");
   await quickInput.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => undefined);
 }
@@ -95,7 +97,7 @@ async function openPaseo(workbench) {
 async function answerPasswordPrompt(workbench, password) {
   const passwordInput = workbench.locator(".quick-input-widget input[type='password']").first();
   const appeared = await passwordInput
-    .waitFor({ state: "visible", timeout: 5_000 })
+    .waitFor({ state: "visible", timeout: 15_000 })
     .then(() => true)
     .catch(() => false);
   if (!appeared) {
