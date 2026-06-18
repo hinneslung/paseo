@@ -10,7 +10,11 @@ export function expandHomePath(input: string, home = homedir()): string {
   if (input === "~") {
     return home;
   }
-  if (input.startsWith(`~${path.sep}`)) {
+  // Accept a forward slash regardless of platform: the default path literal and config values
+  // are written with "/", but on Windows path.sep is "\\". Matching only `~${path.sep}` left
+  // "~/.paseo/config.json" unexpanded on Windows, so the config was never read and daemon
+  // discovery fell back to 127.0.0.1 — which a LAN-bound daemon does not answer.
+  if (input.startsWith("~/") || input.startsWith(`~${path.sep}`)) {
     return path.join(home, input.slice(2));
   }
   return input;
