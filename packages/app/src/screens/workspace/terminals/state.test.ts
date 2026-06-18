@@ -1,3 +1,4 @@
+import type { CreateTerminalResponse } from "@getpaseo/protocol/messages";
 import { describe, expect, it } from "vitest";
 import {
   collectKnownTerminalIds,
@@ -5,13 +6,20 @@ import {
   collectStandaloneTerminalIds,
   reconcilePendingScriptTerminals,
   removeTerminalFromPayload,
+  terminalBelongsToWorkspace,
   upsertCreatedTerminalPayload,
   type ListTerminalsPayload,
 } from "@/screens/workspace/terminals/state";
-import type { CreateTerminalResponse } from "@getpaseo/protocol/messages";
 
-function listedTerminal(id: string): ListTerminalsPayload["terminals"][number] {
-  return { id, name: id, title: id };
+type TerminalEntry = ListTerminalsPayload["terminals"][number];
+
+function listedTerminal(id: string, input?: { workspaceId?: string }): TerminalEntry {
+  return {
+    id,
+    name: id,
+    title: id,
+    ...(input?.workspaceId !== undefined ? { workspaceId: input.workspaceId } : {}),
+  };
 }
 
 function createdTerminal(id: string): NonNullable<CreateTerminalResponse["payload"]["terminal"]> {
@@ -95,5 +103,34 @@ describe("workspace terminal state", () => {
       requestId: "existing",
       terminals: [],
     });
+  });
+});
+
+describe("terminalBelongsToWorkspace", () => {
+  it("keeps legacy terminals without workspaceId for cwd-scoped subscriptions", () => {
+    expect(
+      terminalBelongsToWorkspace({
+        terminal: listedTerminal("legacy-terminal"),
+        workspaceId: "workspace-1",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps stamped terminals whose workspaceId matches", () => {
+    expect(
+      terminalBelongsToWorkspace({
+        terminal: listedTerminal("matching-terminal", { workspaceId: "workspace-1" }),
+        workspaceId: "workspace-1",
+      }),
+    ).toBe(true);
+  });
+
+  it("excludes stamped terminals from sibling workspaces sharing a cwd", () => {
+    expect(
+      terminalBelongsToWorkspace({
+        terminal: listedTerminal("sibling-terminal", { workspaceId: "workspace-2" }),
+        workspaceId: "workspace-1",
+      }),
+    ).toBe(false);
   });
 });

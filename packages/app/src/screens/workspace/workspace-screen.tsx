@@ -2095,6 +2095,7 @@ function WorkspaceScreenContent({
         sessionAgents: state.sessions[normalizedServerId]?.agents,
         agentDetails: state.sessions[normalizedServerId]?.agentDetails,
         workspaceId: normalizedWorkspaceId,
+        workspaceDirectory,
       }),
     workspaceAgentVisibilityEqual,
   );

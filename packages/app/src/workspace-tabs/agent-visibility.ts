@@ -1,7 +1,7 @@
 import type { Agent } from "@/stores/session-store";
 import type { WorkspaceTabSnapshot } from "@/stores/workspace-layout-actions";
 import { isWorkspaceRootAgent } from "@/subagents/policies";
-import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
+import { normalizeWorkspaceOpaqueId, normalizeWorkspacePath } from "@/utils/workspace-identity";
 
 export interface WorkspaceAgentVisibility {
   activeAgentIds: Set<string>;
@@ -9,17 +9,29 @@ export interface WorkspaceAgentVisibility {
   knownAgentIds: Set<string>;
 }
 
-function agentBelongsToWorkspace(agent: Agent, workspaceId: string): boolean {
-  return normalizeWorkspaceOpaqueId(agent.workspaceId) === workspaceId;
+function agentBelongsToWorkspace(input: {
+  agent: Agent;
+  workspaceId: string;
+  workspaceDirectory: string | null;
+}): boolean {
+  const agentWorkspaceId = normalizeWorkspaceOpaqueId(input.agent.workspaceId);
+  if (agentWorkspaceId) {
+    return agentWorkspaceId === input.workspaceId;
+  }
+
+  // COMPAT(legacyAgentWorkspaceId): added 2026-06-18, remove after 2026-12-18 once daemon/storage floor always stamps workspaceId.
+  return normalizeWorkspacePath(input.agent.cwd) === input.workspaceDirectory;
 }
 
 export function deriveWorkspaceAgentVisibility(input: {
   sessionAgents: Map<string, Agent> | undefined;
   agentDetails?: Map<string, Agent> | undefined;
   workspaceId: string | null | undefined;
+  workspaceDirectory?: string | null | undefined;
 }): WorkspaceAgentVisibility {
   const { sessionAgents, agentDetails } = input;
   const workspaceId = normalizeWorkspaceOpaqueId(input.workspaceId);
+  const workspaceDirectory = normalizeWorkspacePath(input.workspaceDirectory);
   if ((!sessionAgents && !agentDetails) || !workspaceId) {
     return {
       activeAgentIds: new Set<string>(),
@@ -36,7 +48,7 @@ export function deriveWorkspaceAgentVisibility(input: {
     ...(sessionAgents?.entries() ?? []),
   ]);
   for (const agent of sessionAgents?.values() ?? []) {
-    if (!agentBelongsToWorkspace(agent, workspaceId)) {
+    if (!agentBelongsToWorkspace({ agent, workspaceId, workspaceDirectory })) {
       continue;
     }
     knownAgentIds.add(agent.id);
@@ -49,7 +61,7 @@ export function deriveWorkspaceAgentVisibility(input: {
     }
   }
   for (const agent of agentDetails?.values() ?? []) {
-    if (!agentBelongsToWorkspace(agent, workspaceId)) {
+    if (!agentBelongsToWorkspace({ agent, workspaceId, workspaceDirectory })) {
       continue;
     }
     knownAgentIds.add(agent.id);
