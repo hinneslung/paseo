@@ -35,6 +35,14 @@ export const DEFAULT_EXPLORER_FILES_SPLIT_RATIO = 0.38;
 export const MIN_EXPLORER_FILES_SPLIT_RATIO = 0.2;
 export const MAX_EXPLORER_FILES_SPLIT_RATIO = 0.8;
 
+export function resolveDefaultAgentListOpen(input: { isWeb: boolean; isVscode: boolean }): boolean {
+  // VS Code extension: hide the left navigation panel by default on first open.
+  if (input.isVscode) {
+    return false;
+  }
+  return input.isWeb;
+}
+
 export interface PanelVisibilityState {
   isAgentListOpen: boolean;
   isFileExplorerOpen: boolean;
