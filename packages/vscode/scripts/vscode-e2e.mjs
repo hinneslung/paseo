@@ -131,7 +131,10 @@ async function waitForWorkspace(frame, timeoutMs) {
   let lastState = null;
   while (Date.now() < deadline) {
     lastState = await readWorkspaceState(frame).catch((error) => ({ error: error.message }));
-    if (lastState.hasWorkspaceMarker && !lastState.hasSplash) {
+    if (
+      !lastState.hasSplash &&
+      (lastState.hasWorkspaceMarker || lastState.hasMessageInputRoot || lastState.hasWorkspaceTabsRow)
+    ) {
       return lastState;
     }
     await sleep(300);
