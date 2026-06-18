@@ -62,7 +62,7 @@
     "build:app-deps:clean": "npm run build:highlight:clean && npm run build:client:clean && npm run build --workspace=@getpaseo/expo-two-way-audio",
     "watch:protocol": "npm run watch --workspace=@getpaseo/protocol",
     "watch:client": "tsc -p packages/client/tsconfig.json --watch --preserveWatchOutput",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm --prefix packages/expo-two-way-audio run typecheck && npm --prefix packages/highlight run typecheck && npm --prefix packages/protocol run typecheck && npm --prefix packages/client run typecheck && npm --prefix packages/server run typecheck && npm --prefix packages/app run typecheck && npm --prefix packages/relay run typecheck && npm --prefix packages/website run typecheck && npm --prefix packages/desktop run typecheck && npm --prefix packages/vscode run typecheck && npm --prefix packages/cli run typecheck",
     "typecheck:server": "npm run typecheck --workspace=@getpaseo/relay && npm run typecheck --workspace=@getpaseo/protocol && npm run typecheck --workspace=@getpaseo/client && npm run typecheck --workspace=@getpaseo/server && npm run typecheck --workspace=@getpaseo/cli",
     "test": "npm run test --workspaces --if-present",
     "format": "oxfmt .",

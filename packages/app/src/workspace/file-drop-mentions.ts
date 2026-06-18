@@ -17,18 +17,36 @@ function normalizeDroppedPath(value: string): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
-function parseFileUri(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed.toLowerCase().startsWith("file:")) {
-    return null;
+function normalizeUrlPath(pathname: string): string | null {
+  const windowsPath = /^\/[A-Za-z]:\//.test(pathname) ? pathname.slice(1) : pathname;
+  return normalizeDroppedPath(windowsPath);
+}
+
+function normalizeWslFileUriPath(hostname: string, pathname: string): string | null {
+  const host = hostname.toLowerCase();
+  if (host === "wsl.localhost" || host === "wsl$") {
+    const match = /^\/[^/]+(\/.*)$/.exec(pathname);
+    return match ? normalizeDroppedPath(match[1]) : null;
   }
 
+  const uncMatch = /^\/+wsl(?:\.localhost|\$)\/[^/]+(\/.*)$/i.exec(pathname);
+  return uncMatch ? normalizeDroppedPath(uncMatch[1]) : null;
+}
+
+function parseFileUri(value: string): string | null {
+  const trimmed = value.trim();
   let url: URL;
   try {
     url = new URL(trimmed);
   } catch {
     return null;
   }
+
+  if (url.protocol === "vscode-remote:") {
+    const decodedPath = decodeUriComponent(url.pathname);
+    return decodedPath ? normalizeUrlPath(decodedPath) : null;
+  }
+
   if (url.protocol !== "file:") {
     return null;
   }
@@ -39,12 +57,16 @@ function parseFileUri(value: string): string | null {
   }
 
   const decodedHost = decodeUriComponent(url.hostname) ?? "";
+  const wslPath = normalizeWslFileUriPath(decodedHost, decodedPath);
+  if (wslPath) {
+    return wslPath;
+  }
+
   if (decodedHost && decodedHost !== "localhost") {
     return normalizeDroppedPath(`//${decodedHost}${decodedPath}`);
   }
 
-  const windowsPath = /^\/[A-Za-z]:\//.test(decodedPath) ? decodedPath.slice(1) : decodedPath;
-  return normalizeDroppedPath(windowsPath);
+  return normalizeUrlPath(decodedPath);
 }
 
 function parseUriList(value: string | null | undefined): string[] {
