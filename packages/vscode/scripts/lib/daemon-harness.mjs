@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,29 +154,39 @@ export function startDaemon({
   const listen = `${host}:${port}`;
   writeDaemonConfig(home, listen);
 
-  const cli = path.join(repoRoot, "packages", "cli", "dist", "cli.js");
-  const child = spawn(
-    process.execPath,
-    [
-      cli,
-      "daemon",
-      "start",
-      "--foreground",
-      "--no-relay",
-      "--no-mcp",
-      "--listen",
-      listen,
-      "--home",
-      home,
-    ],
-    {
-      cwd: repoRoot,
-      detached: process.platform !== "win32",
-      env: { ...process.env, PASEO_PASSWORD: password },
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    },
+  const worker = path.join(
+    repoRoot,
+    "packages",
+    "server",
+    "dist",
+    "server",
+    "server",
+    "daemon-worker.js",
   );
+  if (!existsSync(worker)) {
+    throw new Error(
+      `Paseo daemon worker not found at ${worker}; run "npm run build:server" first.`,
+    );
+  }
+
+  const child = spawn(process.execPath, [worker, "--no-relay", "--no-mcp"], {
+    cwd: repoRoot,
+    detached: process.platform !== "win32",
+    env: {
+      ...process.env,
+      PASEO_HOME: home,
+      PASEO_LISTEN: listen,
+      PASEO_PASSWORD: password,
+      // Match the cli-tests CI env: keep daemon startup fast and headless-safe
+      // (no speech model download / onnxruntime native init).
+      PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0",
+      PASEO_DICTATION_ENABLED: "0",
+      PASEO_VOICE_MODE_ENABLED: "0",
+      ONNXRUNTIME_NODE_INSTALL: "skip",
+    },
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 
   const getLog = captureDaemonLog(child);
   let daemonExit = null;
