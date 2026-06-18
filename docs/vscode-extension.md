@@ -104,6 +104,8 @@ the webview.
 
 ## Developer Notes
 
+For CI and e2e workflow details, see [vscode-ci.md](vscode-ci.md).
+
 The extension bundles the Expo web app from `packages/app/dist` into
 `packages/vscode/media/app-dist`, then serves it inside one VS Code webview
 document. `webview-host.ts` rewrites the static asset URLs into same-origin VS

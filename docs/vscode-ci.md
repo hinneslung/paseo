@@ -1,4 +1,4 @@
-# VS Code Extension CI & E2E Plan
+# VS Code Extension CI & E2E
 
 How the VS Code extension is built, tested, and guarded against regression in
 CI. This is the source of truth for the `vscode.yml` workflow shape and the
@@ -15,24 +15,26 @@ status check that iterates independently of the main suite.
 
 Because it is standalone, `vscode.yml` must still match `ci.yml`'s conventions:
 
-- **Triggers:** `push` / `pull_request` on `branches: [main]`, plus
-  `merge_group` (so the merge queue gates on it) and `workflow_dispatch`.
+- **Triggers:** `push` / `pull_request` on `branches: [main, vscode-extension]`,
+  plus `merge_group` (so the merge queue gates on it) and
+  `workflow_dispatch`. `vscode-extension` is transitional; narrow this back to
+  `main` once the extension lands there.
 - **No `paths:` filter.** `ci.yml` does not use them, and `paths` combined with
   `merge_group` can hang the merge queue (a path-filtered required check that
   never runs in the queue blocks the merge).
 - **Concurrency:** `ci-${{ github.workflow }}-${{ github.ref }}`,
   `cancel-in-progress` on pull requests.
 - **Shared install:** a `.github/actions/npm-install` composite action wraps the
-  Electron-retry `npm ci` (bash + pwsh) so the loop is defined once instead of
-  copy-pasted per job.
+  Electron-retry `npm ci` for bash and pwsh, so the cross-platform retry loop is
+  defined once instead of copy-pasted per job.
 
 ### Jobs
 
-| Job            | Runner(s)                     | Purpose                                                            |
-| -------------- | ----------------------------- | ------------------------------------------------------------------ |
-| `vscode-build` | ubuntu                        | `build:vscode`, typecheck, vitest unit tests, upload VSIX artifact |
-| `vscode-smoke` | ubuntu **+ windows** (matrix) | Layers 1 + 2: real-VS-Code smoke against a real in-process daemon  |
-| `vscode-e2e`   | ubuntu (windows optional)     | Layer 3: Playwright/CDP workspace-open + file-link specs           |
+| Job            | Runner(s)                     | Purpose                                                                      |
+| -------------- | ----------------------------- | ---------------------------------------------------------------------------- |
+| `vscode-build` | ubuntu                        | `build:vscode`, extension typecheck, vitest unit tests, upload VSIX artifact |
+| `vscode-smoke` | ubuntu **+ windows** (matrix) | Layers 1 + 2: real-VS-Code smoke plus daemon bridge round-trip               |
+| `vscode-e2e`   | ubuntu                        | Layer 3: Playwright/CDP workspace-open spec against a real daemon            |
 
 ## Why these tests: the regression map
 
@@ -45,75 +47,93 @@ shipped:
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `da0be24d` | `~/.paseo/config.json` never expanded on Windows (`path.sep` is `\`) → discovery fell back to 127.0.0.1, LAN daemon unreachable | Layer 2 bridge round-trip **on Windows** |
 | `a46672ad` | Folder unknown to daemon → startup splash hangs forever                                                                         | Layer 3 workspace-open spec              |
-| `517948bf` | Assistant links to hidden dot-paths (`.github/...`) did not resolve                                                             | Layer 3 file-link-click spec             |
+| `517948bf` | Assistant links to hidden dot-paths (`.github/...`) did not resolve                                                             | Layer 3 file-link-click spec (deferred)  |
 | `455e18d5` | Wrong left-nav panel state on first open                                                                                        | Layer 1 smoke ("first open renders")     |
 
 ## E2E layers
 
 ### Layer 1 — extension-host smoke (CI: ubuntu + windows)
 
-Runs the existing `@vscode/test-electron` smoke
+Runs inside `vscode-smoke` through
+[run-smoke-with-daemon.mjs](../packages/vscode/scripts/run-smoke-with-daemon.mjs),
+which invokes the existing `@vscode/test-electron` smoke
 ([run-vscode-smoke.mjs](../packages/vscode/src/test/run-vscode-smoke.mjs) →
-[vscode-smoke.ts](../packages/vscode/src/test/vscode-smoke.ts)): launches real
-VS Code headless, activates the extension, opens the Paseo webview, and asserts
-the webview HTML, CSP, runtime config, and bootstrap script. Catches activation,
-render, and first-open-state regressions. Windows coverage also catches
-Electron-launch / path issues.
+[vscode-smoke.ts](../packages/vscode/src/test/vscode-smoke.ts)). The smoke
+launches real VS Code, activates the extension, opens the Paseo webview, and
+asserts the webview HTML, CSP, runtime config, and bootstrap script. This catches
+activation, render, and first-open-state regressions. Windows coverage also
+catches Electron-launch and path issues.
 
-- **Linux:** wrap in `xvfb-run` if the existing `--headless
---ozone-platform=headless` flags are insufficient (the previous CI skipped the
-  smoke citing a display requirement — verify which is needed).
-- Cache the `@vscode/test-electron` VS Code download; upload logs on failure.
+Linux runs the smoke under `xvfb-run -a`; Windows runs the same script directly.
+The job caches the `@vscode/test-electron` VS Code download at
+`packages/vscode/.vscode-test`.
 
 ### Layer 2 — bridge round-trip vs a real daemon (CI: ubuntu + windows)
 
-Highest regression value. Boot a real Paseo daemon on `127.0.0.1` with a known
-password, write a `config.json` at the home path, then run the smoke with
+Also runs inside `vscode-smoke`. The wrapper
+[run-smoke-with-daemon.mjs](../packages/vscode/scripts/run-smoke-with-daemon.mjs)
+uses the shared
+[daemon-harness.mjs](../packages/vscode/scripts/lib/daemon-harness.mjs) helper to
+boot a real password-protected Paseo daemon on `127.0.0.1:6788`. The helper
+writes `~/.paseo/config.json` with the daemon listen target and starts the daemon
+with `PASEO_PASSWORD` set. The wrapper then runs the smoke with
 `PASEO_VSCODE_TEST_PASSWORD` set so `runBridgeRoundTrip`
-([vscode-smoke.ts](../packages/vscode/src/test/vscode-smoke.ts)) executes. This
-exercises **config discovery (the `~` expansion path) + the transport handshake
-end-to-end**, and on Windows it directly guards the `da0be24d` class.
+([vscode-smoke.ts](../packages/vscode/src/test/vscode-smoke.ts)) executes.
 
-- Reuse the harness in [ad-hoc-daemon-testing.md](ad-hoc-daemon-testing.md) to
-  boot the daemon.
-- The Windows fixture must write `%USERPROFILE%\.paseo\config.json` exactly as
-  `expandHomePath` resolves it — do not paper over the path under test.
-- Add an explicit "discovery reads config → server_info round-trip" assertion.
+This exercises **config discovery (the `~` expansion path) + the authenticated
+transport handshake end-to-end** on Linux and Windows. Windows directly guards
+the `da0be24d` class because the fixture writes the real home-relative config
+path that `expandHomePath` must resolve.
 
-### Layer 3 — workspace-open + file-link e2e (CI: ubuntu; windows optional)
+### Layer 3 — workspace-open + file-link e2e (CI: ubuntu)
 
-Promote the manual CDP harnesses into deterministic Playwright specs running
-against the in-process daemon:
+Runs in `vscode-e2e` via
+[vscode-e2e.mjs](../packages/vscode/scripts/vscode-e2e.mjs). The script launches
+real VS Code, connects Playwright over CDP with `connectOverCDP`, and runs
+against a real password-protected daemon from the shared daemon harness.
 
-- [cdp-screenshot.mjs](../packages/vscode/scripts/cdp-screenshot.mjs) → spec:
-  open VS Code on a fresh folder unknown to the daemon, assert the app leaves
-  the splash and reaches a workspace (guards `a46672ad`).
-- [cdp-filelink-click.mjs](../packages/vscode/scripts/cdp-filelink-click.mjs) →
-  spec: seed an agent message linking a `.github/...` dot-path, click it, assert
-  VS Code opens the file (guards `517948bf`).
+Spec 1, **workspace-open**, is implemented and deterministic: open VS Code on a
+fresh folder unknown to the daemon, assert the app leaves the splash, and assert
+the workspace rendered. It uses the `startup-splash`, `workspace-header-title`,
+`message-input-root`, and `workspace-tabs-row` `data-testid` markers, and treats
+the workspace as ready when the splash is gone and any core workspace chrome is
+present. This guards `a46672ad`.
 
-These need seeded, deterministic fixtures (a known workspace + a pre-seeded
-agent message) rather than the live LAN daemon the manual scripts assume. Mirror
-the `playwright` job's "upload artifacts on failure".
+Spec 2, **file-link click**, is deferred with `TODO(WS4 spec2)` in the spec. It
+needs a deterministic way to seed an agent timeline fixture through the daemon's
+supported persistence/API; guessing private agent JSON would make CI flaky. The
+manual [cdp-filelink-click.mjs](../packages/vscode/scripts/cdp-filelink-click.mjs)
+harness remains useful for ad-hoc local debugging, but it is not a CI gate.
+
+The job uploads `packages/vscode/artifacts/vscode-e2e` on failure.
 
 ## Implementation order
 
-1. **WS1 — structure.** `.github/actions/npm-install` composite; rewrite
-   `vscode.yml` (aligned triggers, three jobs, adopt composite).
-2. **WS2 — Layer 1 in CI.** `vscode-smoke` matrix; resolve xvfb vs headless;
-   cache VS Code download; upload logs on failure.
-3. **WS3 — Layer 2.** CI helper to boot a daemon + write `config.json`; wire
-   `PASEO_VSCODE_TEST_PASSWORD`; add discovery-from-config assertion. Front-load
-   attention here — highest value, riskiest plumbing (Windows home-path layout).
-4. **WS4 — Layer 3.** Convert the two CDP scripts to deterministic Playwright
-   specs; upload artifacts on failure. Heaviest lift, so last.
-5. **WS5 — docs.** Keep this doc and [testing.md](testing.md) current.
+1. **WS1 — done.** `.github/actions/npm-install` composite; `vscode.yml` has
+   aligned triggers, three jobs, and the shared install action.
+2. **WS2 — done.** `vscode-smoke` runs on ubuntu and windows; Linux uses
+   `xvfb-run -a`; the VS Code test download is cached.
+3. **WS3 — done.** The daemon helper boots a password-protected daemon, writes
+   `~/.paseo/config.json`, wires `PASEO_PASSWORD`, and the smoke wires
+   `PASEO_VSCODE_TEST_PASSWORD` for the bridge round-trip.
+4. **WS4 — done for the current CI gate.** `vscode-e2e` runs the CDP/Playwright
+   harness on ubuntu and implements the deterministic workspace-open spec with
+   failure artifacts.
+5. **Remaining.** Add Spec 2 once a supported deterministic agent timeline
+   fixture exists, and optionally add Windows coverage for Layer 3 after proving
+   the CDP workflow is stable there.
+6. **Docs.** Keep this doc and [testing.md](testing.md) current as the remaining
+   items land.
 
 ## Risk flags
 
-- Does `@vscode/test-electron` run displayless on Linux with the ozone flags, or
-  is `xvfb-run` still required? The prior CI skip suggests a display was the
-  blocker.
-- Windows home-path layout for `config.json` must match `expandHomePath` output
-  — that path is the thing under test.
-- CDP specs need deterministic fixtures, not the manual scripts' live LAN daemon.
+- Linux display is resolved by using `xvfb-run -a` for both smoke and Layer 3;
+  keep that wrapper unless a replacement is proven in CI.
+- Windows home-path layout for `config.json` is covered by Layer 2. Do not move
+  the fixture away from `~/.paseo/config.json`; that path is the thing under
+  test.
+- The deferred file-link spec still needs a supported deterministic agent
+  timeline fixture, not the manual scripts' live LAN daemon or guessed private
+  JSON.
+- Optional Windows coverage for Layer 3 remains unproven and should be added only
+  after validating VS Code CDP stability on the Windows runner.
