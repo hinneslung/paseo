@@ -19,8 +19,8 @@ env:
   ONNXRUNTIME_NODE_INSTALL: skip
 
 jobs:
-  # WS2-WS4 will add vscode-smoke (ubuntu + windows matrix) and vscode-e2e
-  # per docs/vscode-ci.md. Keep this workflow on the green build/unit layer for now.
+  # vscode-smoke covers Layer 1. WS3 will extend it with a real-daemon bridge
+  # round-trip, and WS4 will add vscode-e2e per docs/vscode-ci.md.
   vscode-build:
     runs-on: ubuntu-latest
     env:
@@ -49,3 +49,37 @@ jobs:
         with:
           name: paseo-vsix
           path: packages/vscode/paseo.vsix
+
+  vscode-smoke:
+    name: vscode-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: ./.github/actions/npm-install
+
+      - name: Build VS Code extension
+        run: npm run build:vscode
+
+      - name: Cache VS Code test download
+        uses: actions/cache@v4
+        with:
+          path: packages/vscode/.vscode-test
+          key: vscode-test-${{ runner.os }}
+
+      - name: Run VS Code smoke test (Linux)
+        if: runner.os == 'Linux'
+        working-directory: packages/vscode
+        run: xvfb-run -a node src/test/run-vscode-smoke.mjs
+
+      - name: Run VS Code smoke test (Windows)
+        if: runner.os == 'Windows'
+        working-directory: packages/vscode
+        run: node src/test/run-vscode-smoke.mjs
