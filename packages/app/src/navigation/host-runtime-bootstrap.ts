@@ -6,7 +6,10 @@ import {
   buildHostWorkspaceRoute,
   buildOpenProjectRoute,
 } from "@/utils/host-routes";
-import type { VscodeWorkspaceMatchState } from "@/desktop/vscode/initial-target";
+import {
+  buildVscodeWorkspaceMatchHref,
+  type VscodeWorkspaceMatchState,
+} from "@/desktop/vscode/initial-target";
 
 export interface HostRuntimeBootstrapStore {
   boot: () => void;
@@ -221,16 +224,10 @@ function resolveReadyIndexStartupRoute(input: ResolveIndexStartupRouteInput): St
     vscodeWorkspaceMatchState?.status === "ready" &&
     vscodeWorkspaceMatchState.match
   ) {
-    if ("workspaceId" in vscodeWorkspaceMatchState.match) {
-      return {
-        kind: "redirect",
-        href: buildHostWorkspaceRoute(
-          vscodeWorkspaceMatchState.match.serverId,
-          vscodeWorkspaceMatchState.match.workspaceId,
-        ),
-      };
-    }
-    return { kind: "redirect", href: buildHostRootRoute(vscodeWorkspaceMatchState.match.serverId) };
+    return {
+      kind: "redirect",
+      href: buildVscodeWorkspaceMatchHref(vscodeWorkspaceMatchState.match),
+    };
   }
 
   if (
