@@ -14,6 +14,7 @@ import {
   providersSnapshotQueryKey,
   providersSnapshotQueryRoot,
 } from "@/data/providers-snapshot";
+import { terminalBelongsToWorkspace } from "@/screens/workspace/terminals/state";
 
 type ProvidersSnapshotUpdateMessage = Extract<
   SessionOutboundMessage,
@@ -524,8 +525,8 @@ function applyTerminalsChanged(input: {
       continue;
     }
 
-    const matchingTerminals = input.message.payload.terminals.filter(
-      (terminal) => terminal.workspaceId === route.workspaceId,
+    const matchingTerminals = input.message.payload.terminals.filter((terminal) =>
+      terminalBelongsToWorkspace({ terminal, workspaceId: route.workspaceId }),
     );
 
     input.queryClient.setQueryData<ListTerminalsPayload>(query.queryKey, (current) => ({

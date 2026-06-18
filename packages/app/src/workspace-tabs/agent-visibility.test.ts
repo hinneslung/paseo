@@ -319,6 +319,40 @@ describe("workspace agent visibility", () => {
     expect(result.knownAgentIds).toEqual(new Set<string>());
   });
 
+  it("falls back to cwd for legacy agents without a workspaceId", () => {
+    const sessionAgents = new Map<string, Agent>([
+      ["legacy-agent", makeAgent({ id: "legacy-agent", cwd: "/repo/worktree/" })],
+    ]);
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents,
+      workspaceId: "ws-1",
+      workspaceDirectory: "/repo/worktree",
+    });
+
+    expect(result.activeAgentIds).toEqual(new Set(["legacy-agent"]));
+    expect(result.autoOpenAgentIds).toEqual(new Set(["legacy-agent"]));
+    expect(result.knownAgentIds).toEqual(new Set(["legacy-agent"]));
+  });
+
+  it("keeps workspaceId authoritative over cwd fallback", () => {
+    const sessionAgents = new Map<string, Agent>([
+      [
+        "other-ws-agent",
+        makeAgent({ id: "other-ws-agent", cwd: "/repo/worktree", workspaceId: "ws-2" }),
+      ],
+    ]);
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents,
+      workspaceId: "ws-1",
+      workspaceDirectory: "/repo/worktree",
+    });
+
+    expect(result.activeAgentIds).toEqual(new Set<string>());
+    expect(result.knownAgentIds).toEqual(new Set<string>());
+  });
+
   it("builds the tab reconciliation snapshot without callers unpacking agent visibility", () => {
     const agentVisibility = {
       activeAgentIds: new Set(["active-agent"]),
