@@ -137,3 +137,26 @@ The job uploads `packages/vscode/artifacts/vscode-e2e` on failure.
   JSON.
 - Optional Windows coverage for Layer 3 remains unproven and should be added only
   after validating VS Code CDP stability on the Windows runner.
+
+## CI gotchas
+
+- The smoke/e2e daemon harness spawns the worker entry directly:
+  `node packages/server/dist/server/server/daemon-worker.js` with
+  `PASEO_HOME`, `PASEO_LISTEN`, `PASEO_PASSWORD`,
+  `PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD=0`, `PASEO_DICTATION_ENABLED=0`,
+  `PASEO_VOICE_MODE_ENABLED=0`, and `ONNXRUNTIME_NODE_INSTALL=skip`. Do not use
+  `paseo daemon start`: `--foreground` exits code 0 almost immediately, and the
+  detached start discards worker stderr so health cannot be detected. Running the
+  worker directly serves `/api/health` in about 1s and logs to stdout; it requires
+  `npm run build:server` first so the worker dist exists.
+- In `packages/vscode/scripts/vscode-e2e.mjs` `openPaseo`, headless CI renders
+  the webview reliably only after revealing the activity-bar Paseo view by
+  clicking the `.activitybar` item whose `aria-label` contains `paseo`. Drive the
+  command palette with real keystrokes after `Ctrl+Shift+P`:
+  `keyboard.type("Paseo: Open")`; do not use Playwright `fill()`, which clobbers
+  the `>` command prefix and can leave Enter unable to activate the highlighted
+  command.
+- On `app-frame-not-found`, start with
+  `packages/vscode/artifacts/vscode-e2e/frame-report.json` and the screenshot.
+  The report lists every frame URL plus whether `window.paseoVscode` and `#root`
+  are present.
