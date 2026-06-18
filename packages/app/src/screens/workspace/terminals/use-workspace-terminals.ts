@@ -12,6 +12,7 @@ import {
   reconcilePendingScriptTerminals,
   removeTerminalFromPayload,
   TERMINALS_QUERY_STALE_TIME,
+  terminalBelongsToWorkspace,
   type ListTerminalsPayload,
   upsertCreatedTerminalPayload,
 } from "@/screens/workspace/terminals/state";
@@ -193,11 +194,11 @@ export function useWorkspaceTerminals(input: UseWorkspaceTerminalsInput) {
         return;
       }
 
-      // Two workspaces can share a cwd, so the push can carry terminals from a
-      // sibling workspace. A terminal belongs to a workspace only by its
-      // workspaceId, so keep only the ones whose workspaceId matches this pane.
-      const matchingTerminals = message.payload.terminals.filter(
-        (terminal) => terminal.workspaceId === paneWorkspaceId,
+      // Two workspaces can share a cwd, so stamped terminals must match this
+      // pane by workspaceId. Legacy terminals without workspaceId are kept by
+      // the cwd-scoped subscription until the daemon/storage floor stamps them.
+      const matchingTerminals = message.payload.terminals.filter((terminal) =>
+        terminalBelongsToWorkspace({ terminal, workspaceId: paneWorkspaceId }),
       );
 
       queryClient.setQueryData<ListTerminalsPayload>(queryKey, (current) => ({
