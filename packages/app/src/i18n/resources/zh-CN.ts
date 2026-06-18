@@ -1290,6 +1290,11 @@ export const zhCN: TranslationResources = {
   startup: {
     errorTitle: "出现问题",
     errorDescription: "本地服务器启动失败。如果持续发生，请在 GitHub 报告问题并附上下方日志。",
+    status: {
+      connecting: "正在连接 Paseo daemon…",
+      loadingWorkspaces: "正在加载你的工作区…",
+      opening: "正在用 Paseo 打开此文件夹…",
+    },
     logs: {
       loading: "正在加载 daemon 日志...",
       unavailable: "没有可用的 daemon 日志。",

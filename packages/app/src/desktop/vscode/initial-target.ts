@@ -1,6 +1,31 @@
 import type { Agent, WorkspaceDescriptor } from "@/stores/session-store";
+import { buildHostRootRoute, buildHostWorkspaceRoute } from "@/utils/host-routes";
+import type { Href } from "expo-router";
 
 export type VscodeWorkspaceMatch = { serverId: string; workspaceId: string } | { serverId: string };
+
+export type VscodeStartupStatus = "connecting" | "loading-workspaces" | "opening";
+
+export type VscodeStartupAction =
+  | { kind: "none" }
+  | { kind: "wait"; status: VscodeStartupStatus; detail: string | null }
+  | { kind: "redirect"; match: VscodeWorkspaceMatch }
+  | { kind: "open"; folder: string }
+  | { kind: "error"; message: string };
+
+export interface VscodeAutoOpenState {
+  status: "idle" | "pending" | "error";
+  folder: string | null;
+  message: string | null;
+}
+
+export interface ResolveVscodeStartupActionInput {
+  folders: readonly string[];
+  hosts: readonly VscodeWorkspaceMatchHost[];
+  hasConnectedHost: boolean;
+  connectionDetail: string | null;
+  autoOpen: VscodeAutoOpenState;
+}
 
 export interface VscodeWorkspaceMatchWorkspace {
   id: WorkspaceDescriptor["id"];
@@ -30,6 +55,11 @@ export interface ResolveVscodeWorkspaceMatchInput {
   hosts: readonly VscodeWorkspaceMatchHost[];
 }
 
+interface FirstUsableFolderPath {
+  original: string;
+  normalized: string;
+}
+
 function normalizePathForMatch(value: string | null | undefined): string | null {
   const trimmed = typeof value === "string" ? value.trim() : "";
   if (!trimmed) {
@@ -54,14 +84,22 @@ function normalizePathForMatch(value: string | null | undefined): string | null 
   return normalized;
 }
 
-function getFirstFolderPath(folders: readonly string[]): string | null {
+function getFirstUsableFolderPath(folders: readonly string[]): FirstUsableFolderPath | null {
   for (const folder of folders) {
     const normalized = normalizePathForMatch(folder);
     if (normalized) {
-      return normalized;
+      return { original: folder, normalized };
     }
   }
   return null;
+}
+
+function getFirstFolderPath(folders: readonly string[]): string | null {
+  return getFirstUsableFolderPath(folders)?.normalized ?? null;
+}
+
+function isAutoOpenFolder(autoOpen: VscodeAutoOpenState, normalizedFolder: string): boolean {
+  return normalizePathForMatch(autoOpen.folder) === normalizedFolder;
 }
 
 function getWorkspaceId(value: string | null | undefined): string | null {
@@ -188,6 +226,51 @@ export function resolveVscodeWorkspaceMatch(
     resolveProjectRootMatchForHosts(folderPath, input.hosts) ??
     resolveAgentCwdMatchForHosts(folderPath, input.hosts)
   );
+}
+
+export function buildVscodeWorkspaceMatchHref(match: VscodeWorkspaceMatch): Href {
+  if ("workspaceId" in match) {
+    return buildHostWorkspaceRoute(match.serverId, match.workspaceId);
+  }
+  return buildHostRootRoute(match.serverId);
+}
+
+export function resolveVscodeStartupAction(
+  input: ResolveVscodeStartupActionInput,
+): VscodeStartupAction {
+  const folderPath = getFirstUsableFolderPath(input.folders);
+  if (!folderPath) {
+    return { kind: "none" };
+  }
+
+  if (
+    input.autoOpen.status === "error" &&
+    isAutoOpenFolder(input.autoOpen, folderPath.normalized)
+  ) {
+    return { kind: "error", message: input.autoOpen.message ?? "Couldn't open this folder." };
+  }
+
+  if (
+    input.autoOpen.status === "pending" &&
+    isAutoOpenFolder(input.autoOpen, folderPath.normalized)
+  ) {
+    return { kind: "wait", status: "opening", detail: null };
+  }
+
+  if (!input.hasConnectedHost) {
+    return { kind: "wait", status: "connecting", detail: input.connectionDetail };
+  }
+
+  if (input.hosts.length === 0 || input.hosts.some((host) => !host.hasHydratedWorkspaces)) {
+    return { kind: "wait", status: "loading-workspaces", detail: null };
+  }
+
+  const match = resolveVscodeWorkspaceMatch({ folders: input.folders, hosts: input.hosts });
+  if (match) {
+    return { kind: "redirect", match };
+  }
+
+  return { kind: "open", folder: folderPath.original };
 }
 
 export function resolveVscodeWorkspaceMatchState(

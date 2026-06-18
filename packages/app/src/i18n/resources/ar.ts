@@ -1307,6 +1307,11 @@ export const ar: TranslationResources = {
     errorTitle: "حدث خطأ ما",
     errorDescription:
       "فشل الخادم المحلي في البدء. إذا استمر حدوث ذلك، فيرجى الإبلاغ عن المشكلة على GitHub وتضمين السجلات أدناه.",
+    status: {
+      connecting: "جارٍ الاتصال ببرنامج Paseo الخفي…",
+      loadingWorkspaces: "جارٍ تحميل مساحات العمل الخاصة بك…",
+      opening: "جارٍ فتح هذا المجلد في Paseo…",
+    },
     logs: {
       loading: "جارٍ تحميل سجلات البرنامج الخفي...",
       unavailable: "لا توجد سجلات خفية متاحة.",

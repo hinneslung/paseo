@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveVscodeWorkspaceMatch,
+  resolveVscodeStartupAction,
+  type VscodeAutoOpenState,
+  type VscodeStartupAction,
   type VscodeWorkspaceMatchAgent,
   type VscodeWorkspaceMatchHost,
   type VscodeWorkspaceMatchWorkspace,
 } from "./initial-target";
+
+const IDLE_AUTO_OPEN: VscodeAutoOpenState = { status: "idle", folder: null, message: null };
 
 function workspace(
   id: string,
@@ -20,16 +25,28 @@ function agent(cwd: string, workspaceId?: string): VscodeWorkspaceMatchAgent {
 
 function host(input: {
   serverId?: string;
+  hasHydratedAgents?: boolean;
+  hasHydratedWorkspaces?: boolean;
   workspaces?: VscodeWorkspaceMatchWorkspace[];
   agents?: VscodeWorkspaceMatchAgent[];
 }): VscodeWorkspaceMatchHost {
   return {
     serverId: input.serverId ?? "server-1",
-    hasHydratedAgents: true,
-    hasHydratedWorkspaces: true,
+    hasHydratedAgents: input.hasHydratedAgents ?? true,
+    hasHydratedWorkspaces: input.hasHydratedWorkspaces ?? true,
     workspaces: input.workspaces ?? [],
     agents: input.agents ?? [],
   };
+}
+
+interface StartupActionCase {
+  name: string;
+  folders: readonly string[];
+  hosts: readonly VscodeWorkspaceMatchHost[];
+  hasConnectedHost: boolean;
+  connectionDetail?: string | null;
+  autoOpen?: VscodeAutoOpenState;
+  expected: VscodeStartupAction;
 }
 
 describe("resolveVscodeWorkspaceMatch", () => {
@@ -115,5 +132,82 @@ describe("resolveVscodeWorkspaceMatch", () => {
         ],
       }),
     ).toBeNull();
+  });
+});
+
+describe("resolveVscodeStartupAction", () => {
+  const cases: StartupActionCase[] = [
+    {
+      name: "returns none when VS Code did not provide a usable folder",
+      folders: ["", "   "],
+      hosts: [],
+      hasConnectedHost: false,
+      expected: { kind: "none" },
+    },
+    {
+      name: "waits for a connected host before reading workspaces",
+      folders: ["/repo/app"],
+      hosts: [],
+      hasConnectedHost: false,
+      connectionDetail: "Dialing 127.0.0.1:6767",
+      expected: { kind: "wait", status: "connecting", detail: "Dialing 127.0.0.1:6767" },
+    },
+    {
+      name: "waits for workspaces to hydrate",
+      folders: ["/repo/app"],
+      hosts: [host({ hasHydratedWorkspaces: false })],
+      hasConnectedHost: true,
+      expected: { kind: "wait", status: "loading-workspaces", detail: null },
+    },
+    {
+      name: "redirects when the folder matches a project root",
+      folders: ["/repo/app"],
+      hosts: [
+        host({
+          hasHydratedAgents: false,
+          workspaces: [workspace("workspace-main", "project-app", "/repo/app")],
+        }),
+      ],
+      hasConnectedHost: true,
+      expected: {
+        kind: "redirect",
+        match: { serverId: "server-1", workspaceId: "workspace-main" },
+      },
+    },
+    {
+      name: "opens the original folder path when no workspace matches",
+      folders: ["C:\\Users\\Dev\\App\\"],
+      hosts: [host({ workspaces: [] })],
+      hasConnectedHost: true,
+      expected: { kind: "open", folder: "C:\\Users\\Dev\\App\\" },
+    },
+    {
+      name: "waits while the current folder is being opened",
+      folders: ["/repo/app"],
+      hosts: [],
+      hasConnectedHost: false,
+      autoOpen: { status: "pending", folder: "/repo/app/", message: null },
+      expected: { kind: "wait", status: "opening", detail: null },
+    },
+    {
+      name: "surfaces an error for the current folder",
+      folders: ["/repo/app"],
+      hosts: [],
+      hasConnectedHost: false,
+      autoOpen: { status: "error", folder: "/repo/app/", message: "Cannot open workspace" },
+      expected: { kind: "error", message: "Cannot open workspace" },
+    },
+  ];
+
+  it.each(cases)("$name", (testCase) => {
+    expect(
+      resolveVscodeStartupAction({
+        folders: testCase.folders,
+        hosts: testCase.hosts,
+        hasConnectedHost: testCase.hasConnectedHost,
+        connectionDetail: testCase.connectionDetail ?? null,
+        autoOpen: testCase.autoOpen ?? IDLE_AUTO_OPEN,
+      }),
+    ).toEqual(testCase.expected);
   });
 });

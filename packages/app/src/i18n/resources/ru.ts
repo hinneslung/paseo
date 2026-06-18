@@ -1336,6 +1336,11 @@ export const ru: TranslationResources = {
     errorTitle: "Что- то пошло не так",
     errorDescription:
       "Локальный сервер не удалось запустить. Если это повторяется, сообщите о проблеме на GitHub и приложите журналы ниже.",
+    status: {
+      connecting: "Подключение к демону Paseo…",
+      loadingWorkspaces: "Загрузка ваших рабочих областей…",
+      opening: "Открытие этой папки в Paseo…",
+    },
     logs: {
       loading: "Загрузка журналов демона...",
       unavailable: "Журналы демона отсутствуют.",
