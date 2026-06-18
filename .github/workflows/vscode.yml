@@ -1,14 +1,12 @@
 name: VS Code Extension
 
 on:
+  # vscode-extension is transitional; narrow to [main] once the extension lands on main.
   push:
-    paths:
-      - "packages/vscode/**"
-      - "packages/app/**"
+    branches: [main, vscode-extension]
   pull_request:
-    paths:
-      - "packages/vscode/**"
-      - "packages/app/**"
+    branches: [main, vscode-extension]
+  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -21,7 +19,9 @@ env:
   ONNXRUNTIME_NODE_INSTALL: skip
 
 jobs:
-  vscode:
+  # WS2-WS4 will add vscode-smoke (ubuntu + windows matrix) and vscode-e2e
+  # per docs/vscode-ci.md. Keep this workflow on the green build/unit layer for now.
+  vscode-build:
     runs-on: ubuntu-latest
     env:
       # This workflow does not run Electron; skipping the hosted binary avoids
@@ -30,24 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies with Electron retry
-        run: |
-          for attempt in 1 2 3; do
-            if npm ci; then
-              exit 0
-            else
-              exit_code=$?
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit $exit_code
-            fi
-            sleep $((attempt * 20))
-          done
+      - name: Install dependencies
+        uses: ./.github/actions/npm-install
 
       - name: Build and package VS Code extension
         run: npm run build:vscode
