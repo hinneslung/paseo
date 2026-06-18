@@ -105,6 +105,30 @@ describe("classifyForResolution", () => {
     });
   });
 
+  it("keeps inline-code paths with directory components as direct file targets", () => {
+    const result = classifyForResolution(
+      {
+        href: ".github/workflows/ci.yml",
+        text: ".github/workflows/ci.yml",
+        sourceType: "inline-code",
+      },
+      CONTEXT,
+    );
+
+    expect(result).toEqual({
+      kind: "resolved",
+      value: {
+        kind: "file",
+        target: {
+          raw: ".github/workflows/ci.yml",
+          path: "/Users/test/project/.github/workflows/ci.yml",
+          lineStart: undefined,
+          lineEnd: undefined,
+        },
+      },
+    });
+  });
+
   it("keeps explicit external URLs external", () => {
     const result = classifyForResolution({ href: "http://dumm.md", text: "dumm.md" }, CONTEXT);
 

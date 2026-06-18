@@ -34,6 +34,32 @@ describe("parseDroppedFilePaths", () => {
       }),
     ).toEqual(["C:/Users/dev/repo/packages/app/src/foo.tsx"]);
   });
+
+  it("normalizes VS Code Remote WSL URIs to Linux paths", () => {
+    expect(
+      parseDroppedFilePaths({
+        uriList: "vscode-remote://wsl+Ubuntu/home/dev/repo/packages/app/src/foo.tsx",
+      }),
+    ).toEqual(["/home/dev/repo/packages/app/src/foo.tsx"]);
+  });
+
+  it("normalizes WSL UNC file URIs to Linux paths", () => {
+    expect(
+      parseDroppedFilePaths({
+        uriList: [
+          "file://wsl.localhost/Ubuntu/home/dev/repo/packages/app/src/foo.tsx",
+          "file://wsl$/Ubuntu/home/dev/repo/packages/app/src/bar.tsx",
+          "file://///wsl.localhost/Ubuntu/home/dev/repo/packages/app/src/baz.tsx",
+          "file:/wsl.localhost/Ubuntu/home/dev/repo/packages/app/src/qux.tsx",
+        ].join("\n"),
+      }),
+    ).toEqual([
+      "/home/dev/repo/packages/app/src/foo.tsx",
+      "/home/dev/repo/packages/app/src/bar.tsx",
+      "/home/dev/repo/packages/app/src/baz.tsx",
+      "/home/dev/repo/packages/app/src/qux.tsx",
+    ]);
+  });
 });
 
 describe("resolveDroppedFileMentionPath", () => {
