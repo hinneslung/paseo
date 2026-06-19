@@ -31,6 +31,7 @@ export interface VscodeWorkspaceMatchWorkspace {
   id: WorkspaceDescriptor["id"];
   projectId: WorkspaceDescriptor["projectId"];
   projectRootPath: WorkspaceDescriptor["projectRootPath"];
+  workspaceDirectory: WorkspaceDescriptor["workspaceDirectory"];
 }
 
 export interface VscodeWorkspaceMatchAgent {
@@ -158,6 +159,27 @@ function resolveProjectRootMatch(
   return { serverId: host.serverId };
 }
 
+function resolveWorkspaceDirMatch(
+  folderPath: string,
+  host: VscodeWorkspaceMatchHost,
+): VscodeWorkspaceMatch | null {
+  const matchedWorkspaceIds = new Set<string>();
+  for (const workspace of host.workspaces) {
+    if (normalizePathForMatch(workspace.workspaceDirectory) === folderPath) {
+      matchedWorkspaceIds.add(workspace.id);
+    }
+  }
+
+  if (matchedWorkspaceIds.size === 0) {
+    return null;
+  }
+  if (matchedWorkspaceIds.size === 1) {
+    const workspaceId = getFirstSetValue(matchedWorkspaceIds);
+    return workspaceId ? { serverId: host.serverId, workspaceId } : { serverId: host.serverId };
+  }
+  return { serverId: host.serverId };
+}
+
 function resolveAgentCwdMatch(
   folderPath: string,
   host: VscodeWorkspaceMatchHost,
@@ -201,6 +223,19 @@ function resolveProjectRootMatchForHosts(
   return null;
 }
 
+function resolveWorkspaceDirMatchForHosts(
+  folderPath: string,
+  hosts: readonly VscodeWorkspaceMatchHost[],
+): VscodeWorkspaceMatch | null {
+  for (const host of hosts) {
+    const match = resolveWorkspaceDirMatch(folderPath, host);
+    if (match) {
+      return match;
+    }
+  }
+  return null;
+}
+
 function resolveAgentCwdMatchForHosts(
   folderPath: string,
   hosts: readonly VscodeWorkspaceMatchHost[],
@@ -224,6 +259,7 @@ export function resolveVscodeWorkspaceMatch(
 
   return (
     resolveProjectRootMatchForHosts(folderPath, input.hosts) ??
+    resolveWorkspaceDirMatchForHosts(folderPath, input.hosts) ??
     resolveAgentCwdMatchForHosts(folderPath, input.hosts)
   );
 }
@@ -288,6 +324,11 @@ export function resolveVscodeWorkspaceMatchState(
   const projectRootMatch = resolveProjectRootMatchForHosts(folderPath, input.hosts);
   if (projectRootMatch) {
     return { status: "ready", match: projectRootMatch };
+  }
+
+  const workspaceDirMatch = resolveWorkspaceDirMatchForHosts(folderPath, input.hosts);
+  if (workspaceDirMatch) {
+    return { status: "ready", match: workspaceDirMatch };
   }
 
   if (input.hosts.some((host) => !host.hasHydratedAgents)) {
