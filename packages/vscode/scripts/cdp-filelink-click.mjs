@@ -3,10 +3,17 @@
 // screenshot VS Code opening the file. Proves the assistant file-link fix in the real UI.
 import { chromium } from "playwright";
 import { downloadAndUnzipVSCode } from "@vscode/test-electron";
-import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  findAppFrame,
+  launchVsCode,
+  openPaseo,
+  sleep,
+  waitForCdp,
+  waitForWorkbench,
+} from "./lib/cdp-harness.mjs";
 
 const PKG_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const CDP_PORT = Number(process.env.PASEO_CDP_PORT ?? 9226);
@@ -16,93 +23,6 @@ const WS = process.env.PASEO_CDP_WORKSPACE ?? "/tmp/paseo-dotlinks-ws";
 const LINK = process.env.PASEO_LINK_TEXT ?? ".github/workflows/ci.yml";
 
 const log = (...a) => console.log("[cdp]", ...a);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const allPages = (b) => b.contexts().flatMap((c) => c.pages());
-const allFrames = (b) => allPages(b).flatMap((p) => p.frames());
-
-async function waitForCdp(port, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (res.ok) return await res.json();
-    } catch {
-      // not up yet
-    }
-    await sleep(300);
-  }
-  throw new Error("CDP endpoint never came up");
-}
-
-async function findAppFrame(browser) {
-  for (const frame of allFrames(browser)) {
-    const has = await frame
-      .evaluate(
-        () => typeof window.paseoVscode !== "undefined" || !!document.querySelector("#root"),
-      )
-      .catch(() => false);
-    if (has) return frame;
-  }
-  return null;
-}
-
-async function findWorkbench(browser) {
-  for (let attempt = 0; attempt < 40; attempt++) {
-    for (const page of allPages(browser)) {
-      const isWb = await page
-        .evaluate(() => !!document.querySelector(".monaco-workbench"))
-        .catch(() => false);
-      if (isWb) return page;
-    }
-    await sleep(500);
-  }
-  return null;
-}
-
-function launchVsCode(exe, userDataDir, workspaceDir) {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-  for (const k of Object.keys(env)) if (k.startsWith("VSCODE_")) delete env[k];
-  env.DISPLAY = env.DISPLAY || ":0";
-  const args = [
-    workspaceDir,
-    `--extensionDevelopmentPath=${PKG_ROOT}`,
-    `--remote-debugging-port=${CDP_PORT}`,
-    `--user-data-dir=${userDataDir}`,
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-workspace-trust",
-    "--skip-welcome",
-    "--skip-release-notes",
-    "--disable-updates",
-  ];
-  log("launching VS Code on", workspaceDir);
-  const proc = spawn(exe, args, { env, stdio: ["ignore", "pipe", "pipe"] });
-  proc.stdout.on("data", (d) => process.stdout.write(`[code] ${d}`));
-  proc.stderr.on("data", (d) => process.stderr.write(`[code-err] ${d}`));
-  return proc;
-}
-
-async function openPaseo(workbench) {
-  await workbench
-    .evaluate(() => {
-      const items = Array.from(
-        document.querySelectorAll(".activitybar .action-label, .activitybar [role='tab']"),
-      );
-      const el = items.find((a) =>
-        (a.getAttribute("aria-label") || "").toLowerCase().includes("paseo"),
-      );
-      el?.click();
-    })
-    .catch(() => {});
-  await sleep(1500);
-  await workbench.keyboard.press("Control+Shift+P");
-  await sleep(800);
-  await workbench.keyboard.type("Paseo: Open");
-  await sleep(800);
-  await workbench.keyboard.press("Enter");
-  await sleep(2500);
-}
 
 async function shoot(workbench, name) {
   mkdirSync(SHOT_DIR, { recursive: true });
@@ -142,7 +62,12 @@ async function editorTabs(workbench) {
 async function main() {
   const exe = await downloadAndUnzipVSCode("1.124.2");
   const userDataDir = mkdtempSync(path.join(tmpdir(), "paseo-cdp-user-"));
-  const proc = launchVsCode(exe, userDataDir, WS);
+  const proc = launchVsCode(exe, {
+    cdpPort: CDP_PORT,
+    logLaunch: ({ workspaceDir }) => log("launching VS Code on", workspaceDir),
+    userDataDir,
+    workspaceDir: WS,
+  });
   const cleanup = () => {
     try {
       proc.kill("SIGKILL");
@@ -156,17 +81,27 @@ async function main() {
     const version = await waitForCdp(CDP_PORT, 60_000);
     log("CDP up:", version.Browser);
     const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
-    const workbench = await findWorkbench(browser);
+    const workbench = await waitForWorkbench(browser, 20_000, {
+      intervalMs: 500,
+      returnNullOnTimeout: true,
+    });
     if (!workbench) return log("ERROR: no workbench");
     workbench.on("console", (m) => {
       if (m.type() === "error") log("wb-err:", m.text());
     });
 
-    await openPaseo(workbench);
+    await openPaseo(workbench, {
+      afterEnterWaitMs: 2500,
+      commandTypedWaitMs: 800,
+      paletteOpenWaitMs: 800,
+      shortcut: "Control+Shift+P",
+      waitForQuickInput: false,
+      waitForQuickInputHidden: false,
+    });
 
     let frame = null;
     for (let i = 0; i < 60 && !frame; i++) {
-      frame = await findAppFrame(browser);
+      frame = await findAppFrame(browser, { requireVscodeWebviewForRoot: false });
       if (!frame) await sleep(700);
     }
     if (!frame) return log("ERROR: no app frame");
