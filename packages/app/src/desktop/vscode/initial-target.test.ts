@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveVscodeWorkspaceMatch,
+  resolveVscodeWorkspaceMatchState,
   resolveVscodeStartupAction,
   type VscodeAutoOpenState,
   type VscodeStartupAction,
@@ -15,8 +16,9 @@ function workspace(
   id: string,
   projectId: string,
   projectRootPath: string,
+  workspaceDirectory = projectRootPath,
 ): VscodeWorkspaceMatchWorkspace {
-  return { id, projectId, projectRootPath };
+  return { id, projectId, projectRootPath, workspaceDirectory };
 }
 
 function agent(cwd: string, workspaceId?: string): VscodeWorkspaceMatchAgent {
@@ -106,6 +108,86 @@ describe("resolveVscodeWorkspaceMatch", () => {
     ).toEqual({ serverId: "server-1", workspaceId: "workspace-agent" });
   });
 
+  it("matches a VS Code folder to a worktree workspace by workspace directory", () => {
+    expect(
+      resolveVscodeWorkspaceMatch({
+        folders: ["/repo/worktrees/feature"],
+        hosts: [
+          host({
+            workspaces: [
+              workspace("workspace-main", "project-app", "/repo/main", "/repo/main"),
+              workspace(
+                "workspace-worktree",
+                "project-app",
+                "/repo/main",
+                "/repo/worktrees/feature",
+              ),
+            ],
+          }),
+        ],
+      }),
+    ).toEqual({ serverId: "server-1", workspaceId: "workspace-worktree" });
+  });
+
+  it("keeps project-level matching at the main repo root when worktrees share the project root", () => {
+    expect(
+      resolveVscodeWorkspaceMatch({
+        folders: ["/repo/main"],
+        hosts: [
+          host({
+            workspaces: [
+              workspace("workspace-main", "project-app", "/repo/main", "/repo/main"),
+              workspace(
+                "workspace-worktree",
+                "project-app",
+                "/repo/main",
+                "/repo/worktrees/feature",
+              ),
+            ],
+          }),
+        ],
+      }),
+    ).toEqual({ serverId: "server-1" });
+  });
+
+  it("returns the host when multiple workspaces share the matching workspace directory", () => {
+    expect(
+      resolveVscodeWorkspaceMatch({
+        folders: ["/repo/worktrees/shared"],
+        hosts: [
+          host({
+            workspaces: [
+              workspace("workspace-one", "project-app", "/repo/main", "/repo/worktrees/shared"),
+              workspace("workspace-two", "project-app", "/repo/main", "/repo/worktrees/shared"),
+            ],
+          }),
+        ],
+      }),
+    ).toEqual({ serverId: "server-1" });
+  });
+
+  it("prefers a workspace directory match over an agent cwd match", () => {
+    expect(
+      resolveVscodeWorkspaceMatch({
+        folders: ["/repo/worktrees/feature"],
+        hosts: [
+          host({
+            workspaces: [
+              workspace(
+                "workspace-worktree",
+                "project-app",
+                "/repo/main",
+                "/repo/worktrees/feature",
+              ),
+              workspace("workspace-agent", "project-app", "/repo/main", "/repo/worktrees/other"),
+            ],
+            agents: [agent("/repo/worktrees/feature/src", "workspace-agent")],
+          }),
+        ],
+      }),
+    ).toEqual({ serverId: "server-1", workspaceId: "workspace-worktree" });
+  });
+
   it("does not treat a Paseo worktree cwd as a different open folder match", () => {
     expect(
       resolveVscodeWorkspaceMatch({
@@ -132,6 +214,32 @@ describe("resolveVscodeWorkspaceMatch", () => {
         ],
       }),
     ).toBeNull();
+  });
+});
+
+describe("resolveVscodeWorkspaceMatchState", () => {
+  it("returns a workspace directory match without waiting for agents to hydrate", () => {
+    expect(
+      resolveVscodeWorkspaceMatchState({
+        folders: ["/repo/worktrees/feature"],
+        hosts: [
+          host({
+            hasHydratedAgents: false,
+            workspaces: [
+              workspace(
+                "workspace-worktree",
+                "project-app",
+                "/repo/main",
+                "/repo/worktrees/feature",
+              ),
+            ],
+          }),
+        ],
+      }),
+    ).toEqual({
+      status: "ready",
+      match: { serverId: "server-1", workspaceId: "workspace-worktree" },
+    });
   });
 });
 
