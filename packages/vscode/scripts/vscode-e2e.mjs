@@ -1,11 +1,19 @@
 import { chromium } from "playwright";
 import { downloadAndUnzipVSCode } from "@vscode/test-electron";
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  answerPasswordPrompt,
+  launchVsCode,
+  openPaseo,
+  sleep,
+  waitForAppFrame,
+  waitForCdp,
+  waitForWorkbench,
+} from "./lib/cdp-harness.mjs";
 import { startDaemon } from "./lib/daemon-harness.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -19,131 +27,6 @@ const workspaceMarkerSelector = '[data-testid="workspace-header-title"]';
 const splashSelector = '[data-testid="startup-splash"]';
 
 const log = (...args) => console.log("[vscode-e2e]", ...args);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const allPages = (browser) => browser.contexts().flatMap((context) => context.pages());
-const allFrames = (browser) => allPages(browser).flatMap((page) => page.frames());
-
-async function waitForCdp(port, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (response.ok) return await response.json();
-    } catch {
-      // VS Code is still starting the remote debugging server.
-    }
-    await sleep(300);
-  }
-  throw new Error(`CDP endpoint did not become ready on port ${port}.`);
-}
-
-async function findWorkbench(browser) {
-  for (const page of allPages(browser)) {
-    const isWorkbench = await page
-      .evaluate(() => !!document.querySelector(".monaco-workbench"))
-      .catch(() => false);
-    if (isWorkbench) return page;
-  }
-  return null;
-}
-
-async function waitForWorkbench(browser, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const workbench = await findWorkbench(browser);
-    if (workbench) return workbench;
-    await sleep(300);
-  }
-  throw new Error("VS Code workbench page was not found.");
-}
-
-async function findAppFrame(browser) {
-  for (const frame of allFrames(browser)) {
-    const isPaseoFrame = await frame
-      .evaluate(
-        () =>
-          typeof window.paseoVscode !== "undefined" ||
-          (location.protocol === "vscode-webview:" && !!document.querySelector("#root")),
-      )
-      .catch(() => false);
-    if (isPaseoFrame) return frame;
-  }
-  return null;
-}
-
-async function waitForAppFrame(browser, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const frame = await findAppFrame(browser);
-    if (frame) return frame;
-    await sleep(300);
-  }
-  const report = [];
-  for (const frame of allFrames(browser)) {
-    report.push({
-      url: frame.url(),
-      probe: await frame
-        .evaluate(() => ({
-          hasPaseoVscode: typeof window.paseoVscode !== "undefined",
-          protocol: location.protocol,
-          hasRoot: !!document.querySelector("#root"),
-          rootChildren: document.querySelector("#root")?.childElementCount ?? -1,
-          title: document.title,
-          bodyTextHead: (document.body?.innerText ?? "").slice(0, 300),
-        }))
-        .catch((error) => ({ error: String(error) })),
-    });
-  }
-  console.log(`[vscode-e2e] frame report: ${JSON.stringify(report, null, 2)}`);
-  mkdirSync(artifactDir, { recursive: true });
-  writeFileSync(path.join(artifactDir, "frame-report.json"), JSON.stringify(report, null, 2));
-  throw new Error("Paseo app webview frame was not found.");
-}
-
-async function openPaseo(workbench) {
-  // Reveal the persistent Paseo activity-bar view first; it renders the webview app reliably in
-  // headless CI. (The cdp-screenshot.mjs manual harness does the same.) The command palette alone
-  // opens a panel that may not become the focused/rendered editor.
-  await workbench
-    .evaluate(() => {
-      const items = Array.from(
-        document.querySelectorAll(".activitybar .action-label, .activitybar [role='tab']"),
-      );
-      const el = items.find((a) =>
-        (a.getAttribute("aria-label") || "").toLowerCase().includes("paseo"),
-      );
-      el?.click();
-    })
-    .catch(() => {});
-  await workbench.waitForTimeout(1500);
-  await workbench.keyboard.press(
-    process.platform === "darwin" ? "Meta+Shift+P" : "Control+Shift+P",
-  );
-  const quickInput = workbench.locator(".quick-input-widget input").first();
-  await quickInput.waitFor({ state: "visible", timeout: 10_000 });
-  // Ctrl+Shift+P seeds the palette with the ">" command-mode prefix. Type real key events (NOT
-  // fill()) so VS Code's quick input tracks the active item and Enter activates the highlighted
-  // command. fill() only shows the filtered list; Enter then does not fire the command.
-  await workbench.keyboard.type("Paseo: Open");
-  await workbench.waitForTimeout(700);
-  await workbench.keyboard.press("Enter");
-  await quickInput.waitFor({ state: "hidden", timeout: 10_000 }).catch(() => undefined);
-}
-
-async function answerPasswordPrompt(workbench, password) {
-  const passwordInput = workbench.locator(".quick-input-widget input[type='password']").first();
-  const appeared = await passwordInput
-    .waitFor({ state: "visible", timeout: 15_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (!appeared) {
-    log("password quick input did not appear; using PASEO_VSCODE_TEST_PASSWORD path");
-    return false;
-  }
-  await passwordInput.fill(password);
-  await workbench.keyboard.press("Enter");
-  return true;
-}
 
 async function readWorkspaceState(frame) {
   return frame.evaluate(
@@ -171,7 +54,9 @@ async function waitForWorkspace(frame, timeoutMs) {
     lastState = await readWorkspaceState(frame).catch((error) => ({ error: error.message }));
     if (
       !lastState.hasSplash &&
-      (lastState.hasWorkspaceMarker || lastState.hasMessageInputRoot || lastState.hasWorkspaceTabsRow)
+      (lastState.hasWorkspaceMarker ||
+        lastState.hasMessageInputRoot ||
+        lastState.hasWorkspaceTabsRow)
     ) {
       return lastState;
     }
@@ -180,40 +65,6 @@ async function waitForWorkspace(frame, timeoutMs) {
   throw new Error(
     `Paseo workspace did not render before timeout. Last state: ${JSON.stringify(lastState)}`,
   );
-}
-
-function launchVsCode(executable, { userDataDir, workspaceDir, daemonListen, password }) {
-  const env = {
-    ...process.env,
-    DISPLAY: process.env.DISPLAY || ":0",
-    PASEO_VSCODE_ENDPOINT: daemonListen,
-    PASEO_VSCODE_TEST_PASSWORD: password,
-  };
-  delete env.ELECTRON_RUN_AS_NODE;
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("VSCODE_")) delete env[key];
-  }
-
-  const args = [
-    workspaceDir,
-    `--extensionDevelopmentPath=${packageRoot}`,
-    `--remote-debugging-port=${cdpPort}`,
-    `--user-data-dir=${userDataDir}`,
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--disable-workspace-trust",
-    "--skip-welcome",
-    "--skip-release-notes",
-    "--disable-updates",
-    "--password-store=basic",
-  ];
-
-  log("launching VS Code", { workspaceDir, cdpPort, daemonListen });
-  const child = spawn(executable, args, { env, stdio: ["ignore", "pipe", "pipe"] });
-  child.stdout.on("data", (chunk) => process.stdout.write(`[code] ${chunk}`));
-  child.stderr.on("data", (chunk) => process.stderr.write(`[code-err] ${chunk}`));
-  return child;
 }
 
 async function screenshot(workbench, name) {
@@ -265,12 +116,21 @@ async function runWorkspaceOpenSpec() {
 
     const executable = await downloadAndUnzipVSCode(vscodeVersion);
     vscodeProcess = launchVsCode(executable, {
+      cdpPort,
+      env: {
+        PASEO_VSCODE_ENDPOINT: daemon.listen,
+        PASEO_VSCODE_TEST_PASSWORD: password,
+      },
+      extraArgs: ["--password-store=basic"],
+      extraArgsAfterGpu: ["--disable-dev-shm-usage"],
+      logLaunch: () =>
+        log("launching VS Code", { workspaceDir, cdpPort, daemonListen: daemon.listen }),
       userDataDir,
       workspaceDir,
-      daemonListen: daemon.listen,
-      password,
     });
-    const cdpVersion = await waitForCdp(cdpPort, 60_000);
+    const cdpVersion = await waitForCdp(cdpPort, 60_000, {
+      errorMessage: (port) => `CDP endpoint did not become ready on port ${port}.`,
+    });
     log("CDP ready", cdpVersion.Browser);
 
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
@@ -279,8 +139,8 @@ async function runWorkspaceOpenSpec() {
     workbench.on("pageerror", (error) => log("workbench pageerror", error.message));
 
     await openPaseo(workbench);
-    await answerPasswordPrompt(workbench, password);
-    const appFrame = await waitForAppFrame(browser, 45_000);
+    await answerPasswordPrompt(workbench, password, { log });
+    const appFrame = await waitForAppFrame(browser, 45_000, { artifactDir });
     const state = await waitForWorkspace(appFrame, 45_000);
 
     log("workspace-open passed", JSON.stringify(state));

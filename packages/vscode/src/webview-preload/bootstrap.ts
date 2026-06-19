@@ -1,11 +1,5 @@
 import type { HostToWebviewEnvelope, ResultEnvelope } from "../webview/messaging";
-
-interface VscodeRuntimeConfig {
-  endpoint: string | null;
-  hasPassword: boolean;
-  bridgeProtocol: number;
-  workspaceFolders: string[];
-}
+import type { VscodeRuntimeConfig } from "../webview/html-rewrite";
 
 type EventHandler = (payload: unknown) => void;
 type Unsubscribe = () => void;

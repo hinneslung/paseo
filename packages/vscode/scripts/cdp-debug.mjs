@@ -8,72 +8,26 @@
 //   node scripts/cdp-debug.mjs
 import { chromium } from "playwright";
 import { downloadAndUnzipVSCode } from "@vscode/test-electron";
-import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  allFrames,
+  allPages,
+  answerPasswordPrompt,
+  attachConsole,
+  findAppFrame,
+  launchVsCode,
+  openPaseo,
+  sleep,
+  waitForCdp,
+  waitForWorkbench,
+} from "./lib/cdp-harness.mjs";
 
-const PKG_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const CDP_PORT = Number(process.env.PASEO_CDP_PORT ?? 9222);
 const PASSWORD = process.env.PASEO_VSCODE_TEST_PASSWORD ?? "";
 
 const log = (...args) => console.log("[cdp]", ...args);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function allPages(browser) {
-  return browser.contexts().flatMap((context) => context.pages());
-}
-
-function allFrames(browser) {
-  return allPages(browser).flatMap((page) => page.frames());
-}
-
-async function waitForCdp(port, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (res.ok) return await res.json();
-    } catch {
-      // CDP endpoint not up yet
-    }
-    await sleep(300);
-  }
-  throw new Error("CDP endpoint never came up");
-}
-
-// Scan every page+frame for the one that defines window.paseoVscode (our injected marker).
-async function findAppFrame(browser) {
-  for (const frame of allFrames(browser)) {
-    const has = await frame
-      .evaluate(
-        () => typeof window.paseoVscode !== "undefined" || !!document.querySelector("#root"),
-      )
-      .catch(() => false);
-    if (has) return frame;
-  }
-  return null;
-}
-
-async function findWorkbench(browser) {
-  for (let attempt = 0; attempt < 40; attempt++) {
-    for (const page of allPages(browser)) {
-      const isWb = await page
-        .evaluate(() => !!document.querySelector(".monaco-workbench"))
-        .catch(() => false);
-      if (isWb) return page;
-    }
-    await sleep(500);
-  }
-  return null;
-}
-
-function attachConsole(browser, prefix) {
-  for (const page of allPages(browser)) {
-    page.on("console", (msg) => log(`${prefix}[${msg.type()}]:`, msg.text()));
-    page.on("pageerror", (err) => log(`${prefix}-pageerror:`, err.message));
-  }
-}
 
 async function clickLastMatching(frame, selectors, label) {
   for (const selector of selectors) {
@@ -103,86 +57,6 @@ function dumpFrame(frame) {
   });
 }
 
-async function openPaseo(workbench) {
-  const labels = await workbench
-    .evaluate(() =>
-      Array.from(
-        document.querySelectorAll(".activitybar .action-label, .activitybar [role='tab']"),
-      ).map((a) => a.getAttribute("aria-label")),
-    )
-    .catch(() => []);
-  log("activity bar labels:", JSON.stringify(labels));
-  const clicked = await workbench
-    .evaluate(() => {
-      const items = Array.from(
-        document.querySelectorAll(".activitybar .action-label, .activitybar [role='tab']"),
-      );
-      const el = items.find((a) =>
-        (a.getAttribute("aria-label") || "").toLowerCase().includes("paseo"),
-      );
-      el?.click();
-      return el ? el.getAttribute("aria-label") : null;
-    })
-    .catch(() => null);
-  log("clicked activity item:", clicked);
-  await sleep(2500);
-  // Also open the full-tab panel via command palette as a second path.
-  await workbench.keyboard.press("Control+Shift+P");
-  await sleep(800);
-  await workbench.keyboard.type("Paseo: Open");
-  await sleep(800);
-  await workbench.keyboard.press("Enter");
-  await sleep(2500);
-}
-
-// VS Code's quick input ignores a programmatically-set .value, so drive it with real keys.
-async function answerPasswordPrompt(workbench) {
-  if (!PASSWORD) return;
-  for (let i = 0; i < 30; i++) {
-    const visible = await workbench
-      .evaluate(() => {
-        const input = document.querySelector(".quick-input-widget input");
-        return !!(input && input.offsetParent !== null);
-      })
-      .catch(() => false);
-    if (visible) {
-      await workbench
-        .evaluate(() => document.querySelector(".quick-input-widget input")?.focus())
-        .catch(() => {});
-      await workbench.keyboard.type(PASSWORD, { delay: 20 });
-      await sleep(250);
-      await workbench.keyboard.press("Enter");
-      log("typed password into quick input");
-      return;
-    }
-    await sleep(500);
-  }
-}
-
-function launchVsCode(exe, userDataDir, workspaceDir) {
-  const env = { ...process.env };
-  delete env.ELECTRON_RUN_AS_NODE;
-  for (const k of Object.keys(env)) if (k.startsWith("VSCODE_")) delete env[k];
-  env.DISPLAY = env.DISPLAY || ":0";
-  const args = [
-    workspaceDir,
-    `--extensionDevelopmentPath=${PKG_ROOT}`,
-    `--remote-debugging-port=${CDP_PORT}`,
-    `--user-data-dir=${userDataDir}`,
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-workspace-trust",
-    "--skip-welcome",
-    "--skip-release-notes",
-    "--disable-updates",
-  ];
-  log("launching VS Code:", args.join(" "));
-  const proc = spawn(exe, args, { env, stdio: ["ignore", "pipe", "pipe"] });
-  proc.stdout.on("data", (d) => process.stdout.write(`[code] ${d}`));
-  proc.stderr.on("data", (d) => process.stderr.write(`[code-err] ${d}`));
-  return proc;
-}
-
 async function main() {
   const exe = await downloadAndUnzipVSCode("1.124.2");
   log("vscode exe:", exe);
@@ -190,7 +64,12 @@ async function main() {
   // Open a real folder (PASEO_CDP_WORKSPACE) to exercise folder auto-scope, else a temp dir.
   const externalWorkspace = process.env.PASEO_CDP_WORKSPACE;
   const workspaceDir = externalWorkspace || mkdtempSync(path.join(tmpdir(), "paseo-cdp-ws-"));
-  const proc = launchVsCode(exe, userDataDir, workspaceDir);
+  const proc = launchVsCode(exe, {
+    cdpPort: CDP_PORT,
+    logLaunch: ({ args }) => log("launching VS Code:", args.join(" ")),
+    userDataDir,
+    workspaceDir,
+  });
   const cleanup = () => {
     try {
       proc.kill("SIGKILL");
@@ -206,9 +85,12 @@ async function main() {
     log("CDP up:", version.Browser);
     const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
     log("connected over CDP");
-    attachConsole(browser, "console");
+    attachConsole(browser, "console", log);
 
-    const workbench = await findWorkbench(browser);
+    const workbench = await waitForWorkbench(browser, 20_000, {
+      intervalMs: 500,
+      returnNullOnTimeout: true,
+    });
     if (!workbench) {
       log(
         "ERROR: workbench page not found. Pages:",
@@ -219,13 +101,30 @@ async function main() {
     log("workbench found:", workbench.url());
     workbench.on("console", (msg) => log(`wb-console[${msg.type()}]:`, msg.text()));
 
-    await openPaseo(workbench);
-    await answerPasswordPrompt(workbench);
+    await openPaseo(workbench, {
+      activityWaitMs: 2500,
+      afterEnterWaitMs: 2500,
+      commandTypedWaitMs: 800,
+      log,
+      logActivityLabels: true,
+      logClickedActivity: true,
+      paletteOpenWaitMs: 800,
+      shortcut: "Control+Shift+P",
+      waitForQuickInput: false,
+      waitForQuickInputHidden: false,
+    });
+    await answerPasswordPrompt(workbench, PASSWORD, {
+      log,
+      missingMessage: null,
+      selector: ".quick-input-widget input",
+      typedMessage: "typed password into quick input",
+      useKeyboard: true,
+    });
 
     // The webview HTML is only set after the password prompt resolves, so poll for the frame.
     let found = null;
     for (let i = 0; i < 60 && !found; i++) {
-      found = await findAppFrame(browser);
+      found = await findAppFrame(browser, { requireVscodeWebviewForRoot: false });
       if (!found) await sleep(700);
     }
     if (!found) {
@@ -257,7 +156,8 @@ async function main() {
       ]) {
         await workbench.setViewportSize(size);
         await sleep(1500);
-        const resizedFrame = (await findAppFrame(browser)) ?? found;
+        const resizedFrame =
+          (await findAppFrame(browser, { requireVscodeWebviewForRoot: false })) ?? found;
         const resizedDump = await dumpFrame(resizedFrame);
         log(
           "resize probe:",
