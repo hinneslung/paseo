@@ -170,7 +170,12 @@ function buildVscodeWorkspaceMatchHosts(input: {
       serverId: host.serverId,
       hasHydratedAgents: session?.hasHydratedAgents ?? false,
       hasHydratedWorkspaces: session?.hasHydratedWorkspaces ?? false,
-      workspaces: session?.workspaces.values() ?? [],
+      workspaces: Array.from(session?.workspaces.values() ?? [], (workspace) => ({
+        id: workspace.id,
+        projectId: workspace.projectId,
+        projectRootPath: workspace.projectRootPath,
+        workspaceDirectory: workspace.workspaceDirectory,
+      })),
       agents: session?.agents.values() ?? [],
     };
   });
