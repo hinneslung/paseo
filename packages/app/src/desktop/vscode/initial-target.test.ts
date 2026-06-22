@@ -129,7 +129,7 @@ describe("resolveVscodeWorkspaceMatch", () => {
     ).toEqual({ serverId: "server-1", workspaceId: "workspace-worktree" });
   });
 
-  it("keeps project-level matching at the main repo root when worktrees share the project root", () => {
+  it("selects the main checkout when opening the main repo root while a worktree exists", () => {
     expect(
       resolveVscodeWorkspaceMatch({
         folders: ["/repo/main"],
@@ -147,7 +147,7 @@ describe("resolveVscodeWorkspaceMatch", () => {
           }),
         ],
       }),
-    ).toEqual({ serverId: "server-1" });
+    ).toEqual({ serverId: "server-1", workspaceId: "workspace-main" });
   });
 
   it("returns the host when multiple workspaces share the matching workspace directory", () => {
@@ -218,6 +218,30 @@ describe("resolveVscodeWorkspaceMatch", () => {
 });
 
 describe("resolveVscodeWorkspaceMatchState", () => {
+  it("selects the main checkout when opening the main repo root while a worktree exists", () => {
+    expect(
+      resolveVscodeWorkspaceMatchState({
+        folders: ["/repo/main"],
+        hosts: [
+          host({
+            workspaces: [
+              workspace("workspace-main", "project-app", "/repo/main", "/repo/main"),
+              workspace(
+                "workspace-worktree",
+                "project-app",
+                "/repo/main",
+                "/repo/worktrees/feature",
+              ),
+            ],
+          }),
+        ],
+      }),
+    ).toEqual({
+      status: "ready",
+      match: { serverId: "server-1", workspaceId: "workspace-main" },
+    });
+  });
+
   it("returns a workspace directory match without waiting for agents to hydrate", () => {
     expect(
       resolveVscodeWorkspaceMatchState({
