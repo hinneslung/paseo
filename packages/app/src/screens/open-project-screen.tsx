@@ -23,6 +23,7 @@ import { ImportSessionSheet } from "@/components/import-session-sheet";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { useOpenProject } from "@/hooks/use-open-project";
 import type { Href } from "expo-router";
+import { getIsVscode } from "@/constants/platform";
 
 export function OpenProjectScreen({ serverId }: { serverId: string }) {
   const { t } = useTranslation();
@@ -36,12 +37,13 @@ export function OpenProjectScreen({ serverId }: { serverId: string }) {
   const [isImportSheetOpen, setIsImportSheetOpen] = useState(false);
 
   const isCompactLayout = useIsCompactFormFactor();
+  const isVscodeRuntime = getIsVscode();
 
   useEffect(() => {
-    if (!isCompactLayout) {
+    if (!isCompactLayout && !isVscodeRuntime) {
       openDesktopAgentList();
     }
-  }, [isCompactLayout, openDesktopAgentList]);
+  }, [isCompactLayout, isVscodeRuntime, openDesktopAgentList]);
 
   const handleOpenPicker = useCallback(() => {
     void openProjectPicker();
