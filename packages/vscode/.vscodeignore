@@ -6,6 +6,7 @@ tsconfig*.json
 *.tsbuildinfo
 **/*.test.*
 dist/**/*.map
+dist/test/**
 *.vsix
 .gitignore
 .vscode-test/**
