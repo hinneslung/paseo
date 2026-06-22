@@ -1,0 +1,46 @@
+name: Publish VS Code Extension
+
+# Publishes packages/vscode to the VS Code Marketplace when a GitHub Release is
+# published. Gated on the `marketplace` environment so a human can approve the
+# run. Auth uses the VSCE_PAT secret (a global Azure DevOps PAT, Marketplace >
+# Manage). The PAT path is the temporary bootstrap; migrate to Microsoft Entra
+# (workload identity federation) before global PATs retire on 2026-12-01.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: vscode-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: marketplace
+    env:
+      # This workflow does not run Electron; skipping the hosted binary avoids
+      # unrelated npm ci failures when Electron's CDN is flaky.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: ./.github/actions/npm-install
+
+      - name: Build and package VS Code extension
+        run: npm run build:vscode
+
+      - name: Publish to VS Code Marketplace
+        # vsce reads the token from the VSCE_PAT environment variable, so the
+        # secret never appears in the command line / process args.
+        run: cd packages/vscode && npx @vscode/vsce publish --packagePath paseo.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
