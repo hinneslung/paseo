@@ -258,8 +258,8 @@ export function resolveVscodeWorkspaceMatch(
   }
 
   return (
-    resolveProjectRootMatchForHosts(folderPath, input.hosts) ??
     resolveWorkspaceDirMatchForHosts(folderPath, input.hosts) ??
+    resolveProjectRootMatchForHosts(folderPath, input.hosts) ??
     resolveAgentCwdMatchForHosts(folderPath, input.hosts)
   );
 }
@@ -321,14 +321,14 @@ export function resolveVscodeWorkspaceMatchState(
     return { status: "loading" };
   }
 
-  const projectRootMatch = resolveProjectRootMatchForHosts(folderPath, input.hosts);
-  if (projectRootMatch) {
-    return { status: "ready", match: projectRootMatch };
-  }
-
   const workspaceDirMatch = resolveWorkspaceDirMatchForHosts(folderPath, input.hosts);
   if (workspaceDirMatch) {
     return { status: "ready", match: workspaceDirMatch };
+  }
+
+  const projectRootMatch = resolveProjectRootMatchForHosts(folderPath, input.hosts);
+  if (projectRootMatch) {
+    return { status: "ready", match: projectRootMatch };
   }
 
   if (input.hosts.some((host) => !host.hasHydratedAgents)) {
