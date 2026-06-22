@@ -1,16 +1,35 @@
 {
   "name": "paseo-vscode",
-  "displayName": "Paseo",
-  "version": "0.1.96",
+  "displayName": "Paseo (Unofficial)",
+  "version": "0.1.0",
   "private": true,
-  "description": "Paseo inside VS Code.",
+  "description": "Unofficial: run Paseo inside VS Code — auto-opens the matching project/worktree, drag-and-Shift-drop files to @-mention them, and chat with your local AI coding agents (Claude Code, Codex, Copilot, OpenCode, Pi).",
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "keywords": [
+    "agent",
+    "ai",
+    "claude code",
+    "codex",
+    "coding agent",
+    "copilot",
+    "opencode",
+    "paseo"
+  ],
+  "homepage": "https://github.com/hinneslung/paseo",
+  "bugs": {
+    "url": "https://github.com/hinneslung/paseo/issues"
+  },
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "https://github.com/getpaseo/paseo.git",
+    "url": "https://github.com/hinneslung/paseo.git",
     "directory": "packages/vscode"
   },
-  "publisher": "getpaseo",
+  "publisher": "hinnes",
   "main": "dist/extension.js",
   "scripts": {
     "copy:app-dist": "node scripts/copy-app-dist.mjs",
@@ -84,6 +103,7 @@
   "extensionKind": [
     "workspace"
   ],
+  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.96.0"
   }
