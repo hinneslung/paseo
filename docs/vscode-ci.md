@@ -28,6 +28,24 @@ Because it is standalone, `vscode.yml` must still match `ci.yml`'s conventions:
   Electron-retry `npm ci` for bash and pwsh, so the cross-platform retry loop is
   defined once instead of copy-pasted per job.
 
+## Publish workflow
+
+`.github/workflows/vscode-publish.yml` is a deploy workflow, not part of the
+required test gate. It publishes `packages/vscode` from namespaced extension tags
+like `vscode-v0.1.0`, keeping the extension's independent version track separate
+from the monorepo's `v*` release tags.
+
+Publish tags must satisfy all of the workflow's guards:
+
+- The tag name matches `vscode-v*` and the concrete package version in
+  `packages/vscode/package.json`.
+- The tagged commit is reachable from `origin/vscode-extension`.
+- The `marketplace` environment is approved by a human before `vsce publish`
+  receives `VSCE_PAT`.
+
+Use a tag push for extension releases. `workflow_dispatch` exists only to rerun a
+specific already-created `vscode-v*` tag through the same validation path.
+
 ### Jobs
 
 | Job            | Runner(s)                     | Purpose                                                                      |
