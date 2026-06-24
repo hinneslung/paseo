@@ -11,38 +11,60 @@ export interface DialogOpenInput {
   filters?: DialogOpenFilter[];
 }
 
+export type DialogAskKind = "info" | "warning" | "error";
+
+export interface DialogAskInput {
+  message: string;
+  title?: string;
+  okLabel: string;
+  cancelLabel: string;
+  kind: DialogAskKind;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function parseOptionalString(value: unknown, fieldName: string): string | undefined {
+function parseOptionalString(
+  value: unknown,
+  fieldName: string,
+  commandName = "dialog.open",
+): string | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
   if (typeof value !== "string") {
-    throw new Error(`dialog.open ${fieldName} must be a string.`);
+    throw new Error(`${commandName} ${fieldName} must be a string.`);
   }
   const trimmed = value.trim();
   return trimmed || undefined;
 }
 
-function parseOptionalBoolean(value: unknown, fieldName: string): boolean {
+function parseOptionalBoolean(
+  value: unknown,
+  fieldName: string,
+  commandName = "dialog.open",
+): boolean {
   if (value === undefined || value === null) {
     return false;
   }
   if (typeof value !== "boolean") {
-    throw new Error(`dialog.open ${fieldName} must be a boolean.`);
+    throw new Error(`${commandName} ${fieldName} must be a boolean.`);
   }
   return value;
 }
 
-function parseRequiredString(value: unknown, fieldName: string): string {
+function parseRequiredString(
+  value: unknown,
+  fieldName: string,
+  commandName = "dialog.open",
+): string {
   if (typeof value !== "string") {
-    throw new Error(`dialog.open ${fieldName} must be a string.`);
+    throw new Error(`${commandName} ${fieldName} must be a string.`);
   }
   const trimmed = value.trim();
   if (!trimmed) {
-    throw new Error(`dialog.open ${fieldName} must not be empty.`);
+    throw new Error(`${commandName} ${fieldName} must not be empty.`);
   }
   return trimmed;
 }
@@ -80,18 +102,44 @@ function parseFilters(value: unknown): DialogOpenFilter[] | undefined {
   return filters.length > 0 ? filters : undefined;
 }
 
-function getWrappedOptions(args: unknown): Record<string, unknown> {
+function getWrappedOptions(args: unknown, commandName = "dialog.open"): Record<string, unknown> {
   if (!isRecord(args)) {
-    throw new Error("dialog.open requires an options object.");
+    throw new Error(`${commandName} requires an options object.`);
   }
   const options = args.options;
   if (options === undefined || options === null) {
     return {};
   }
   if (!isRecord(options)) {
-    throw new Error("dialog.open options must be an object.");
+    throw new Error(`${commandName} options must be an object.`);
   }
   return options;
+}
+
+function parseDialogAskKind(value: unknown): DialogAskKind {
+  if (value === undefined || value === null) {
+    return "info";
+  }
+  if (value === "info" || value === "warning" || value === "error") {
+    return value;
+  }
+  throw new Error("dialog.ask kind must be info, warning, or error.");
+}
+
+export function parseDialogAskInput(args: unknown): DialogAskInput {
+  if (!isRecord(args)) {
+    throw new Error("dialog.ask requires an input object.");
+  }
+  const options = getWrappedOptions(args, "dialog.ask");
+  const title = parseOptionalString(options.title, "title", "dialog.ask");
+
+  return {
+    message: parseRequiredString(args.message, "message", "dialog.ask"),
+    ...(title !== undefined ? { title } : {}),
+    okLabel: parseOptionalString(options.okLabel, "okLabel", "dialog.ask") ?? "OK",
+    cancelLabel: parseOptionalString(options.cancelLabel, "cancelLabel", "dialog.ask") ?? "Cancel",
+    kind: parseDialogAskKind(options.kind),
+  };
 }
 
 export function parseDialogOpenInput(args: unknown): DialogOpenInput {

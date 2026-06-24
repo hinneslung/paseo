@@ -22,6 +22,7 @@ export interface ResolvedPin {
 interface UsePinnedLaunchersInput {
   serverId: string;
   onLaunch: (target: PinnedTabTarget) => void;
+  showBrowser?: boolean;
 }
 
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
@@ -52,7 +53,11 @@ export function ProfileIcon({ iconKey }: { iconKey: string | undefined }): React
   return <ThemedProviderPinIcon iconKey={iconKey} size={14} uniProps={mutedColorMapping} />;
 }
 
-export function usePinnedLaunchers({ serverId, onLaunch }: UsePinnedLaunchersInput): ResolvedPin[] {
+export function usePinnedLaunchers({
+  serverId,
+  onLaunch,
+  showBrowser = true,
+}: UsePinnedLaunchersInput): ResolvedPin[] {
   const { t } = useTranslation();
   const pinned = usePinnedTargetsStore((state) => state.pinned);
   const { config } = useDaemonConfig(serverId);
@@ -83,6 +88,9 @@ export function usePinnedLaunchers({ serverId, onLaunch }: UsePinnedLaunchersInp
         continue;
       }
       if (target.kind === "browser") {
+        if (!showBrowser) {
+          continue;
+        }
         resolved.push({
           key: pinnedTargetKey(target),
           label: t("workspace.tabs.actions.newBrowser"),
@@ -103,5 +111,5 @@ export function usePinnedLaunchers({ serverId, onLaunch }: UsePinnedLaunchersInp
       });
     }
     return resolved;
-  }, [onLaunch, pinned, profiles, t]);
+  }, [onLaunch, pinned, profiles, showBrowser, t]);
 }

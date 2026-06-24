@@ -253,7 +253,11 @@ function WorkspaceTabRowExtras({
     [handlers, profiles],
   );
 
-  const launchers = usePinnedLaunchers({ serverId: normalizedServerId, onLaunch });
+  const launchers = usePinnedLaunchers({
+    serverId: normalizedServerId,
+    onLaunch,
+    showBrowser: showCreateBrowserTab,
+  });
 
   return (
     <>
