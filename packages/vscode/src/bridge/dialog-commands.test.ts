@@ -2,11 +2,50 @@ import { describe, expect, it } from "vitest";
 import {
   formatDialogOpenResult,
   getVscodeOpenDialogFilters,
+  parseDialogAskInput,
   parseDialogOpenInput,
   parseDialogOpenSelectionOverride,
 } from "./dialog-commands";
 
 describe("dialog bridge command parsing", () => {
+  it("parses wrapped ask dialog options", () => {
+    expect(
+      parseDialogAskInput({
+        message: " Stop the terminal ",
+        options: {
+          title: " Close terminal? ",
+          okLabel: " Close ",
+          cancelLabel: " Cancel ",
+          kind: "warning",
+        },
+      }),
+    ).toEqual({
+      message: "Stop the terminal",
+      title: "Close terminal?",
+      okLabel: "Close",
+      cancelLabel: "Cancel",
+      kind: "warning",
+    });
+  });
+
+  it("defaults ask dialog options", () => {
+    expect(parseDialogAskInput({ message: "Continue?" })).toEqual({
+      message: "Continue?",
+      okLabel: "OK",
+      cancelLabel: "Cancel",
+      kind: "info",
+    });
+  });
+
+  it("rejects malformed ask dialog kinds", () => {
+    expect(() =>
+      parseDialogAskInput({
+        message: "Continue?",
+        options: { kind: "question" },
+      }),
+    ).toThrow("dialog.ask kind must be info, warning, or error.");
+  });
+
   it("parses wrapped open dialog options", () => {
     expect(
       parseDialogOpenInput({
