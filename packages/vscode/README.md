@@ -1,49 +1,42 @@
 # Paseo for VS Code (Unofficial)
 
-> **Unofficial, third-party, community-built extension.** Not affiliated with or
-> endorsed by Paseo. Use at your own discretion.
+> **Unofficial, third-party, community-built extension.**
+> Use at your own discretion.
 
-Chat with and manage your local AI coding agents — **Claude Code, Codex, GitHub
-Copilot, OpenCode, and Pi** — without leaving VS Code. The extension embeds the
-Paseo app in a side panel and connects to the Paseo daemon running on your
-machine.
+This extension is designed to work with [Paseo](https://paseo.sh), an open-sourced desktop & mobile app for working with and managing AI coding agents - **Claude Code, Codex, GitHub Copilot, OpenCode, Pi, and more**.
+
+It embeds the Paseo UI in a VS Code tab or side panel and connects to the Paseo daemon running on your machine. [Paseo daemon to be installed separately](https://paseo.sh/download).
 
 ## Features
 
-- **Auto-opens your workspace.** Opens the Paseo workspace that matches the
-  folder you have open in VS Code — including the exact **git worktree** when you
-  open a worktree directory.
+- **Open chat files in VS Code.** Click linked files in chat to open
+  them in the editor, including line navigation when available.
 - **Drag files to mention them.** Drag a file from the Explorer or your OS file
   manager into the chat. **Hold Shift while dropping** to insert it as an
-  `@`-mention instead of attaching or opening it.
-- **Full agent chat & management** — start agents, follow their turns, review and
-  reply, all inside the editor.
+  `@`-mention.
+- **Auto-opens your workspace and host.** Automatically opens the Paseo workspace
+  that matches the current VS Code window - including the exact **git worktree**
+  when you open a worktree directory.
+- **Works with WSL and remote SSH.** When the VS Code window is connected to WSL
+  or a remote SSH host, it connects the Paseo daemon running on the connected host.
 
 ## Requirements
 
-- A running **Paseo daemon** on your machine (or reachable over your LAN). The
-  extension discovers it from `~/.paseo/config.json`, or set `paseo.endpoint`
-  (e.g. `127.0.0.1:6768`).
-- Socket/pipe daemon targets are not supported in VS Code v1 — use a **TCP**
-  endpoint.
-- For **Remote SSH / WSL**, install the extension on the remote host so it can
-  reach the daemon and `~/.paseo` state there.
+- A separate **Paseo daemon** installation is required. Download Paseo from the
+  [official download page](https://paseo.sh/download), then run the daemon on
+  your machine or on a host your VS Code is connecting to. The extension discovers
+  it from `~/.paseo/config.json`, or set `paseo.endpoint` (e.g. `127.0.0.1:6767`).
+- For **Remote SSH / WSL**, install the extension and run the Paseo daemon on the
+  remote host.
+- The extension currently connects only to TCP daemon endpoints such as
+  `127.0.0.1:6767`.
 
 ## Commands
 
-- **Paseo: Open** — open the Paseo panel.
+- **Paseo: Open** - open the Paseo panel.
 - **Paseo: Set Daemon Password** / **Paseo: Clear Daemon Password**.
 
-## Install
-
-From the Marketplace: search **"Paseo (Unofficial)"** or install `hinnes.paseo`.
-
-Or sideload from source:
-
-```bash
-npm run build:vscode
-code --install-extension packages/vscode/paseo.vsix
-```
+## Development
 
 See
 [docs/vscode-extension.md](https://github.com/hinneslung/paseo/blob/vscode-extension/docs/vscode-extension.md)
@@ -51,4 +44,4 @@ for full setup, daemon discovery, the security model, and known limitations.
 
 ## License
 
-AGPL-3.0-or-later — follows the Paseo repository.
+AGPL-3.0 - follows the upstream [Paseo](https://github.com/getpaseo/paseo) repository.

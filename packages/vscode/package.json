@@ -1,7 +1,7 @@
 {
   "name": "paseo-vscode",
   "displayName": "Paseo (Unofficial)",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Unofficial: run Paseo inside VS Code — auto-opens the matching project/worktree, drag-and-Shift-drop files to @-mention them, and chat with your local AI coding agents (Claude Code, Codex, Copilot, OpenCode, Pi).",
   "categories": [
