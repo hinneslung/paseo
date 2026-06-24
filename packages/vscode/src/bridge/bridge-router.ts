@@ -17,6 +17,7 @@ import {
   type TransportEventPayload,
 } from "./daemon-transport";
 import {
+  parseDialogAskInput,
   formatDialogOpenResult,
   getVscodeOpenDialogFilters,
   parseDialogOpenInput,
@@ -124,6 +125,8 @@ export class BridgeRouter {
         return await copyAttachmentFileToManagedStorage(this.context.globalStorageUri.fsPath, args);
       case "delete_attachment_file":
         return await deleteManagedAttachmentFile(this.context.globalStorageUri.fsPath, args);
+      case "dialog.ask":
+        return await this.askDialog(args);
       case "dialog.open":
         return await this.openDialog(args);
       case "editor.listTargets":
@@ -241,6 +244,25 @@ export class BridgeRouter {
       uris?.map((uri) => uri.fsPath),
       input.multiple,
     );
+  }
+
+  private async askDialog(args: unknown): Promise<boolean> {
+    const input = parseDialogAskInput(args);
+    const message = input.title ?? input.message;
+    const options: vscode.MessageOptions = {
+      modal: false,
+      ...(input.title ? { detail: input.message } : {}),
+    };
+    const buttons = [input.cancelLabel, input.okLabel];
+    let selected: string | undefined;
+    if (input.kind === "error") {
+      selected = await vscode.window.showErrorMessage(message, options, ...buttons);
+    } else if (input.kind === "warning") {
+      selected = await vscode.window.showWarningMessage(message, options, ...buttons);
+    } else {
+      selected = await vscode.window.showInformationMessage(message, options, ...buttons);
+    }
+    return selected === input.okLabel;
   }
 
   private async openUrl(args: unknown): Promise<void> {
