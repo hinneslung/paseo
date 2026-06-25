@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { openProjectDirectly } from "@/hooks/open-project";
+import { openProjectDirectly, openProjectWorkspaceDirectly } from "@/hooks/open-project";
 import type { EmptyProjectDescriptor as ProjectWithoutWorkspacesDescriptor } from "@/stores/session-store";
 
 const SERVER_ID = "server-1";
@@ -14,6 +14,29 @@ function buildProjectPayload() {
   };
 }
 
+function buildWorkspacePayload() {
+  return {
+    id: "workspace-1",
+    projectId: "project-1",
+    projectDisplayName: "project",
+    projectCustomName: null,
+    projectRootPath: PROJECT_PATH,
+    workspaceDirectory: PROJECT_PATH,
+    projectKind: "git" as const,
+    workspaceKind: "local_checkout" as const,
+    name: "main",
+    title: null,
+    status: "done" as const,
+    statusEnteredAt: null,
+    activityAt: null,
+    archivingAt: null,
+    diffStat: null,
+    scripts: [],
+    gitRuntime: null,
+    githubRuntime: null,
+  };
+}
+
 interface RecordedProject {
   serverId: string;
   project: ProjectWithoutWorkspacesDescriptor;
@@ -24,17 +47,41 @@ interface RecordedHydrated {
   hydrated: boolean;
 }
 
+interface RecordedWorkspace {
+  serverId: string;
+  workspaceIds: string[];
+}
+
 function createFakeSession() {
   const projects: RecordedProject[] = [];
+  const workspaces: RecordedWorkspace[] = [];
   const hydrated: RecordedHydrated[] = [];
+  const draftWorkspaceKeys: string[] = [];
+  const navigations: Array<{ serverId: string; workspaceId: string }> = [];
   return {
     projects,
+    workspaces,
     hydrated,
+    draftWorkspaceKeys,
+    navigations,
     addEmptyProject: (serverId: string, project: ProjectWithoutWorkspacesDescriptor) => {
       projects.push({ serverId, project });
     },
+    mergeWorkspaces: (serverId: string, incoming: Iterable<{ id: string }>) => {
+      workspaces.push({
+        serverId,
+        workspaceIds: Array.from(incoming, (workspace) => workspace.id),
+      });
+    },
     setHasHydratedWorkspaces: (serverId: string, value: boolean) => {
       hydrated.push({ serverId, hydrated: value });
+    },
+    openDraftTab: (workspaceKey: string) => {
+      draftWorkspaceKeys.push(workspaceKey);
+      return "tab-1";
+    },
+    navigateToWorkspace: (serverId: string, workspaceId: string) => {
+      navigations.push({ serverId, workspaceId });
     },
   };
 }
@@ -130,5 +177,32 @@ describe("openProjectDirectly", () => {
     });
     expect(session.projects).toEqual([]);
     expect(session.hydrated).toEqual([]);
+  });
+
+  it("opens a workspace when requested by VS Code startup", async () => {
+    const session = createFakeSession();
+
+    const result = await openProjectWorkspaceDirectly({
+      serverId: SERVER_ID,
+      projectPath: PROJECT_PATH,
+      isConnected: true,
+      client: {
+        openProject: async () => ({
+          requestId: "request-workspace",
+          error: null,
+          workspace: buildWorkspacePayload(),
+        }),
+      },
+      mergeWorkspaces: session.mergeWorkspaces,
+      setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
+      openDraftTab: session.openDraftTab,
+      navigateToWorkspace: session.navigateToWorkspace,
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(session.workspaces).toEqual([{ serverId: SERVER_ID, workspaceIds: ["workspace-1"] }]);
+    expect(session.hydrated).toEqual([{ serverId: SERVER_ID, hydrated: true }]);
+    expect(session.draftWorkspaceKeys).toEqual([`${SERVER_ID}:workspace-1`]);
+    expect(session.navigations).toEqual([{ serverId: SERVER_ID, workspaceId: "workspace-1" }]);
   });
 });

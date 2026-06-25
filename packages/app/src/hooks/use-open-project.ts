@@ -1,7 +1,14 @@
 import { useCallback } from "react";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
-import { openProjectDirectly, type OpenProjectResult } from "@/hooks/open-project";
+import {
+  openProjectDirectly,
+  openProjectWorkspaceDirectly,
+  type OpenProjectResult,
+} from "@/hooks/open-project";
+import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import { generateDraftId } from "@/stores/draft-keys";
+import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 
 export function useOpenProject(
   serverId: string | null,
@@ -37,5 +44,35 @@ export function useOpenProject(
       normalizedServerId,
       setHasHydratedWorkspaces,
     ],
+  );
+}
+
+export function useOpenProjectWorkspace(
+  serverId: string | null,
+): (path: string) => Promise<OpenProjectResult> {
+  const normalizedServerId = serverId?.trim() ?? "";
+  const client = useHostRuntimeClient(normalizedServerId);
+  const isConnected = useHostRuntimeIsConnected(normalizedServerId);
+  const mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
+  const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
+
+  return useCallback(
+    async (path: string) => {
+      return openProjectWorkspaceDirectly({
+        serverId: normalizedServerId,
+        projectPath: path,
+        isConnected,
+        client,
+        mergeWorkspaces,
+        setHasHydratedWorkspaces,
+        openDraftTab: (workspaceKey: string) =>
+          useWorkspaceLayoutStore.getState().openTabFocused(workspaceKey, {
+            kind: "draft",
+            draftId: generateDraftId(),
+          }),
+        navigateToWorkspace,
+      });
+    },
+    [client, isConnected, mergeWorkspaces, normalizedServerId, setHasHydratedWorkspaces],
   );
 }
