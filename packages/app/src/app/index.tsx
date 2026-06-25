@@ -33,7 +33,7 @@ import {
 import { getIsVscode } from "@/constants/platform";
 import { useSessionStore, type SessionState } from "@/stores/session-store";
 import type { HostProfile } from "@/types/host-connection";
-import { useOpenProject } from "@/hooks/use-open-project";
+import { useOpenProjectWorkspace } from "@/hooks/use-open-project";
 import type { OpenProjectResult } from "@/hooks/open-project";
 
 const isDesktop = shouldUseDesktopDaemon();
@@ -203,7 +203,7 @@ function useVscodeStartupState({
   const firstKnownHostServerId = hosts[0]?.serverId ?? "";
   const connectionStatus = useHostRuntimeConnectionStatus(firstKnownHostServerId);
   const connectionLastError = useHostRuntimeLastError(firstKnownHostServerId);
-  const openProject = useOpenProject(anyOnlineHostServerId);
+  const openProject = useOpenProjectWorkspace(anyOnlineHostServerId);
   const autoOpenFolderRef = useRef<string | null>(null);
   const [autoOpen, setAutoOpen] = useState<VscodeAutoOpenState>(IDLE_AUTO_OPEN);
   const retryAutoOpen = useCallback(() => setAutoOpen(IDLE_AUTO_OPEN), []);
