@@ -902,6 +902,7 @@ export const ja: TranslationResources = {
         openIn: "{{target}}でワークスペースを開く",
         openFileIn: "{{target}}で{{fileName}}を開く",
         failedOpen: "ワークスペースを開けませんでした",
+        failedOpenFile: "ファイルを開けませんでした",
       },
       pr: {
         actions: {
@@ -1319,6 +1320,11 @@ export const ja: TranslationResources = {
     errorTitle: "問題が発生しました",
     errorDescription:
       "ローカルサーバーの起動に失敗しました。この問題が続く場合は、以下のログを添えてGitHubでIssueを作成してください。",
+    status: {
+      connecting: "Paseoデーモンに接続中…",
+      loadingWorkspaces: "ワークスペースを読み込み中…",
+      opening: "このフォルダをPaseoで開いています…",
+    },
     logs: {
       loading: "デーモンログを読み込み中...",
       unavailable: "利用可能なデーモンログがありません。",
