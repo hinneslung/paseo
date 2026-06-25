@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Redirect, usePathname } from "expo-router";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { StartupSplashScreen, type VscodeStartupError } from "@/screens/startup-splash-screen";
 import { useEarliestOnlineHostServerId, useHostRuntimeBootstrapState } from "@/app/_layout";
@@ -88,6 +89,18 @@ interface RenderVscodeStartupActionInput {
   action: VscodeStartupAction | undefined;
   statusMessage: string | null;
   vscodeError: VscodeStartupError | null;
+}
+
+interface UseVscodeStartupStateInput {
+  isVscodeRuntime: boolean;
+  anyOnlineHostServerId: string | null;
+  hosts: readonly HostProfile[];
+  t: TFunction;
+}
+
+interface VscodeStartupState {
+  workspaceMatchState: ReturnType<typeof resolveVscodeWorkspaceMatchState> | undefined;
+  startupElement: React.ReactElement | null;
 }
 
 function startVscodeAutoOpen(input: VscodeAutoOpenEffectInput): void {
@@ -181,15 +194,83 @@ function buildVscodeWorkspaceMatchHosts(input: {
   });
 }
 
+function useVscodeStartupState({
+  isVscodeRuntime,
+  anyOnlineHostServerId,
+  hosts,
+  t,
+}: UseVscodeStartupStateInput): VscodeStartupState {
+  const firstKnownHostServerId = hosts[0]?.serverId ?? "";
+  const connectionStatus = useHostRuntimeConnectionStatus(firstKnownHostServerId);
+  const connectionLastError = useHostRuntimeLastError(firstKnownHostServerId);
+  const openProject = useOpenProject(anyOnlineHostServerId);
+  const autoOpenFolderRef = useRef<string | null>(null);
+  const [autoOpen, setAutoOpen] = useState<VscodeAutoOpenState>(IDLE_AUTO_OPEN);
+  const retryAutoOpen = useCallback(() => setAutoOpen(IDLE_AUTO_OPEN), []);
+  const sessions = useSessionStore((state) => (isVscodeRuntime ? state.sessions : EMPTY_SESSIONS));
+  const vscodeRuntimeConfig = isVscodeRuntime ? getVscodeRuntimeConfig() : null;
+  const folders = vscodeRuntimeConfig?.workspaceFolders ?? EMPTY_WORKSPACE_FOLDERS;
+  const matchHosts = isVscodeRuntime
+    ? buildVscodeWorkspaceMatchHosts({
+        hosts,
+        sessions,
+        anyOnlineHostServerId,
+      })
+    : [];
+  const connectionDetail =
+    isVscodeRuntime && connectionStatus === "error" ? connectionLastError : null;
+  const action = isVscodeRuntime
+    ? resolveVscodeStartupAction({
+        folders,
+        hosts: matchHosts,
+        hasConnectedHost: anyOnlineHostServerId != null,
+        connectionDetail,
+        autoOpen,
+      })
+    : undefined;
+  const workspaceMatchState = isVscodeRuntime
+    ? resolveVscodeWorkspaceMatchState({
+        folders,
+        hosts: matchHosts,
+      })
+    : undefined;
+  const openFolder = action?.kind === "open" ? action.folder : null;
+  const status = getVscodeActionStatus(action);
+  const statusMessage = status ? t(statusKeyFor(status)) : null;
+  const errorMessage = action?.kind === "error" ? action.message : null;
+  const vscodeError = useMemo<VscodeStartupError | null>(() => {
+    if (errorMessage === null) {
+      return null;
+    }
+    return { message: errorMessage, onRetry: retryAutoOpen };
+  }, [errorMessage, retryAutoOpen]);
+
+  useEffect(() => {
+    startVscodeAutoOpen({
+      isVscodeRuntime,
+      folder: openFolder,
+      autoOpenFolderRef,
+      openProject,
+      setAutoOpen,
+    });
+  }, [isVscodeRuntime, openFolder, openProject]);
+
+  return {
+    workspaceMatchState,
+    startupElement: renderVscodeStartupAction({
+      action,
+      statusMessage,
+      vscodeError,
+    }),
+  };
+}
+
 export default function Index() {
   const { t } = useTranslation();
   const pathname = usePathname();
   const bootstrapState = useHostRuntimeBootstrapState();
   const anyOnlineHostServerId = useEarliestOnlineHostServerId();
   const hosts = useHosts();
-  const firstKnownHostServerId = hosts[0]?.serverId ?? "";
-  const connectionStatus = useHostRuntimeConnectionStatus(firstKnownHostServerId);
-  const connectionLastError = useHostRuntimeLastError(firstKnownHostServerId);
   const hostRegistryStatus = useHostRegistryStatus();
   const workspaceSelection = useLastWorkspaceSelection();
   const isWorkspaceSelectionLoaded = useIsLastWorkspaceSelectionHydrated();
@@ -201,57 +282,13 @@ export default function Index() {
     workspaceSelectionWorkspaceId,
   );
   const isVscodeRuntime = getIsVscode();
-  const openProject = useOpenProject(anyOnlineHostServerId);
-  const autoOpenFolderRef = useRef<string | null>(null);
-  const [autoOpen, setAutoOpen] = useState<VscodeAutoOpenState>(IDLE_AUTO_OPEN);
-  const retryAutoOpen = useCallback(() => setAutoOpen(IDLE_AUTO_OPEN), []);
-  const sessions = useSessionStore((state) => (isVscodeRuntime ? state.sessions : EMPTY_SESSIONS));
-  const vscodeRuntimeConfig = isVscodeRuntime ? getVscodeRuntimeConfig() : null;
-  const folders = vscodeRuntimeConfig?.workspaceFolders ?? EMPTY_WORKSPACE_FOLDERS;
-  const vscodeMatchHosts = isVscodeRuntime
-    ? buildVscodeWorkspaceMatchHosts({
-        hosts,
-        sessions,
-        anyOnlineHostServerId,
-      })
-    : [];
-  const connectionDetail =
-    isVscodeRuntime && connectionStatus === "error" ? connectionLastError : null;
-  const vscodeAction = isVscodeRuntime
-    ? resolveVscodeStartupAction({
-        folders,
-        hosts: vscodeMatchHosts,
-        hasConnectedHost: anyOnlineHostServerId != null,
-        connectionDetail,
-        autoOpen,
-      })
-    : undefined;
-  const vscodeWorkspaceMatchState = isVscodeRuntime
-    ? resolveVscodeWorkspaceMatchState({
-        folders,
-        hosts: vscodeMatchHosts,
-      })
-    : undefined;
-  const vscodeOpenFolder = vscodeAction?.kind === "open" ? vscodeAction.folder : null;
-  const vscodeStatus = getVscodeActionStatus(vscodeAction);
-  const vscodeStatusMessage = vscodeStatus ? t(statusKeyFor(vscodeStatus)) : null;
-  const vscodeErrorMessage = vscodeAction?.kind === "error" ? vscodeAction.message : null;
-  const vscodeError = useMemo<VscodeStartupError | null>(() => {
-    if (vscodeErrorMessage === null) {
-      return null;
-    }
-    return { message: vscodeErrorMessage, onRetry: retryAutoOpen };
-  }, [retryAutoOpen, vscodeErrorMessage]);
-
-  useEffect(() => {
-    startVscodeAutoOpen({
+  const { workspaceMatchState: vscodeWorkspaceMatchState, startupElement: vscodeStartupElement } =
+    useVscodeStartupState({
       isVscodeRuntime,
-      folder: vscodeOpenFolder,
-      autoOpenFolderRef,
-      openProject,
-      setAutoOpen,
+      anyOnlineHostServerId,
+      hosts,
+      t,
     });
-  }, [isVscodeRuntime, openProject, vscodeOpenFolder]);
 
   const startupRoute = resolveStartupRoute({
     route: { kind: "index", pathname },
@@ -270,12 +307,7 @@ export default function Index() {
     vscodeWorkspaceMatchState,
   });
 
-  const vscodeStartupElement = renderVscodeStartupAction({
-    action: vscodeAction,
-    statusMessage: vscodeStatusMessage,
-    vscodeError,
-  });
-  if (isVscodeRuntime && vscodeStartupElement) {
+  if (vscodeStartupElement) {
     return vscodeStartupElement;
   }
 
