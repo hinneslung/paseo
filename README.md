@@ -1,3 +1,15 @@
+# Fork - VS Code Extension for Paseo
+
+> Download the Paseo VS Code extension from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=hinnes.paseo-vscode).
+
+This fork adds a VS Code extension package to the monorepo that embeds the Paseo UI in VS Code and connects to your Paseo daemon.
+
+<p align="center">
+  <img src="packages/vscode/media/screenshot.png" alt="Paseo VS Code extension screenshot placeholder" width="100%">
+</p>
+
+---
+
 <p align="center">
   <img src="packages/website/public/logo.svg" width="64" height="64" alt="Paseo logo">
 </p>
