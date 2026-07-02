@@ -1,5 +1,6 @@
 import type { HostToWebviewEnvelope, ResultEnvelope } from "../webview/messaging";
 import type { VscodeRuntimeConfig } from "../webview/html-rewrite";
+import { isEditingShortcutTarget, resolveEditingCommand } from "./editing-shortcuts";
 
 type EventHandler = (payload: unknown) => void;
 type Unsubscribe = () => void;
@@ -139,6 +140,34 @@ try {
 } catch {
   // replaceState can throw in restricted contexts; routing falls back to default.
 }
+// See editing-shortcuts.ts for why the webview must implement basic editing
+// shortcuts itself. This listener must stay capture-phase on window (it has to
+// run before react-native-web's keydown stopPropagation) and this script must
+// stay injected before the app bundle so it registers first.
+const isMacLikePlatform =
+  /Macintosh|Mac OS|iPhone|iPad|iPod/i.test(navigator.userAgent ?? "") ||
+  /Mac|iPhone|iPad|iPod/i.test(navigator.platform ?? "");
+
+window.addEventListener(
+  "keydown",
+  (event) => {
+    if (!isEditingShortcutTarget(event.target)) {
+      return;
+    }
+    const command = resolveEditingCommand(event, isMacLikePlatform);
+    if (!command) {
+      return;
+    }
+    // Take full ownership: preventDefault stops double handling on platforms
+    // where the renderer natively supports the combo, stopPropagation keeps the
+    // VS Code webview host from also forwarding it to workbench keybindings.
+    event.preventDefault();
+    event.stopPropagation();
+    document.execCommand(command);
+  },
+  true,
+);
+
 const pendingInvokes = new Map<string, PendingInvoke>();
 const eventHandlers = new Map<string, Set<EventHandler>>();
 let nextInvokeId = 0;
