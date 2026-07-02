@@ -67,6 +67,87 @@ async function waitForWorkspace(frame, timeoutMs) {
   );
 }
 
+async function readMessageInputState(frame) {
+  return frame.evaluate(() => {
+    const textarea = document.querySelector('[data-testid="message-input-root"] textarea');
+    if (!(textarea instanceof HTMLTextAreaElement)) {
+      return { present: false };
+    }
+    return {
+      present: true,
+      focused: document.activeElement === textarea,
+      value: textarea.value,
+      selectionStart: textarea.selectionStart,
+      selectionEnd: textarea.selectionEnd,
+    };
+  });
+}
+
+async function waitForMessageInputState(frame, timeoutMs, predicate, label) {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await readMessageInputState(frame).catch((error) => ({ error: error.message }));
+    if (predicate(lastState)) {
+      return lastState;
+    }
+    await sleep(150);
+  }
+  throw new Error(
+    `editing-shortcuts: ${label} not reached. Last state: ${JSON.stringify(lastState)}`,
+  );
+}
+
+// Guards the bootstrap's capture-phase editing-shortcut handler
+// (webview-preload/editing-shortcuts.ts). Uses Ctrl combos, which exercise the
+// same handler the mac Cmd combos hit; the modifier mapping is unit-tested.
+async function runEditingShortcutsProbe(appFrame) {
+  const probeText = `paseo edit probe ${Date.now()}`;
+  const textarea = appFrame.locator('[data-testid="message-input-root"] textarea').first();
+  await textarea.click();
+  await waitForMessageInputState(appFrame, 10_000, (s) => s.present && s.focused, "composer focus");
+
+  const keyboard = appFrame.page().keyboard;
+  await keyboard.type(probeText);
+  await waitForMessageInputState(
+    appFrame,
+    10_000,
+    (s) => s.value === probeText,
+    "typed probe text",
+  );
+
+  // A synthetic (untrusted) Ctrl+A cannot trigger the browser's native
+  // select-all, so a full selection here proves the bootstrap handler itself
+  // handled the combo. This is what fails if the capture listener is removed.
+  await appFrame.evaluate(() => {
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true }),
+    );
+  });
+  await waitForMessageInputState(
+    appFrame,
+    5_000,
+    (s) => s.selectionStart === 0 && s.selectionEnd === probeText.length,
+    "select-all selection",
+  );
+
+  // Real keystrokes: the handler preventDefaults the native editing path, so a
+  // successful cut/paste round-trip proves document.execCommand("cut"/"paste")
+  // works against the real clipboard inside the webview.
+  await keyboard.press("Control+x");
+  await waitForMessageInputState(appFrame, 5_000, (s) => s.value === "", "cut emptied composer");
+
+  await keyboard.press("Control+v");
+  await waitForMessageInputState(
+    appFrame,
+    5_000,
+    (s) => s.value === probeText,
+    "paste restored probe text",
+  );
+
+  log("editing-shortcuts passed");
+}
+
 async function screenshot(workbench, name) {
   mkdirSync(artifactDir, { recursive: true });
   const file = path.join(artifactDir, `${name}.png`);
@@ -144,6 +225,8 @@ async function runWorkspaceOpenSpec() {
     const state = await waitForWorkspace(appFrame, 45_000);
 
     log("workspace-open passed", JSON.stringify(state));
+
+    await runEditingShortcutsProbe(appFrame);
   } catch (error) {
     if (workbench) await screenshot(workbench, "workspace-open-failure");
     writeArtifact("workspace-open-error.txt", error.stack || error.message || String(error));
