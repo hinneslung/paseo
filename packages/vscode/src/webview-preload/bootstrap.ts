@@ -3,9 +3,6 @@ import type { VscodeRuntimeConfig } from "../webview/html-rewrite";
 
 type EventHandler = (payload: unknown) => void;
 type Unsubscribe = () => void;
-type WebviewEditCommand = "selectAll" | "copy" | "cut" | "paste";
-
-const WEBVIEW_EDIT_COMMAND_EVENT = "vscode-edit-command";
 
 interface DesktopDialogAskOptions {
   title?: string;
@@ -116,8 +113,6 @@ interface PendingInvoke {
   resolve(value: unknown): void;
   reject(error: Error): void;
 }
-
-type TextControl = HTMLInputElement | HTMLTextAreaElement;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -251,128 +246,6 @@ function parseEditorTargets(value: unknown): Array<{
   return targets;
 }
 
-function getWebviewEditCommand(value: unknown): WebviewEditCommand | null {
-  if (!isRecord(value) || typeof value.command !== "string") {
-    return null;
-  }
-  if (
-    value.command === "selectAll" ||
-    value.command === "copy" ||
-    value.command === "cut" ||
-    value.command === "paste"
-  ) {
-    return value.command;
-  }
-  return null;
-}
-
-function isTextInput(element: HTMLInputElement): boolean {
-  const type = element.type.toLowerCase();
-  return (
-    type === "" ||
-    type === "email" ||
-    type === "password" ||
-    type === "search" ||
-    type === "tel" ||
-    type === "text" ||
-    type === "url"
-  );
-}
-
-function isFocusedDocument(): boolean {
-  return typeof document.hasFocus !== "function" || document.hasFocus();
-}
-
-function getFocusedTextControl(): TextControl | null {
-  const active = document.activeElement;
-  if (active instanceof HTMLTextAreaElement) {
-    return active;
-  }
-  if (active instanceof HTMLInputElement && isTextInput(active)) {
-    return active;
-  }
-  return null;
-}
-
-function isWritableTextControl(element: TextControl): boolean {
-  return !element.disabled && !element.readOnly;
-}
-
-function getTextControlSelection(element: TextControl): { start: number; end: number } {
-  const start = element.selectionStart ?? element.value.length;
-  const end = element.selectionEnd ?? start;
-  return { start, end };
-}
-
-function getSelectedTextFromControl(element: TextControl): string {
-  const { start, end } = getTextControlSelection(element);
-  return element.value.slice(start, end);
-}
-
-function replaceSelectedText(element: TextControl, text: string): void {
-  const { start, end } = getTextControlSelection(element);
-  element.setRangeText(text, start, end, "end");
-  element.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
-async function readClipboardText(): Promise<string> {
-  const value = await invoke("clipboard.readText");
-  return typeof value === "string" ? value : "";
-}
-
-async function writeClipboardText(text: string): Promise<void> {
-  await invoke("clipboard.writeText", { text });
-}
-
-function getSelectionText(): string {
-  return window.getSelection()?.toString() ?? "";
-}
-
-async function handleWebviewEditCommand(payload: unknown): Promise<void> {
-  const command = getWebviewEditCommand(payload);
-  if (!command) {
-    return;
-  }
-  if (!isFocusedDocument()) {
-    return;
-  }
-
-  const textControl = getFocusedTextControl();
-  if (command === "selectAll") {
-    textControl?.select();
-    return;
-  }
-
-  if (command === "copy") {
-    const selectedText = textControl ? getSelectedTextFromControl(textControl) : getSelectionText();
-    if (selectedText) {
-      await writeClipboardText(selectedText);
-    }
-    return;
-  }
-
-  if (command === "cut") {
-    if (!textControl || !isWritableTextControl(textControl)) {
-      return;
-    }
-    const selectedText = getSelectedTextFromControl(textControl);
-    if (!selectedText) {
-      return;
-    }
-    await writeClipboardText(selectedText);
-    replaceSelectedText(textControl, "");
-    return;
-  }
-
-  if (!textControl || !isWritableTextControl(textControl)) {
-    return;
-  }
-  const text = await readClipboardText();
-  if (text) {
-    replaceSelectedText(textControl, text);
-  }
-}
-
 window.addEventListener("message", (event) => {
   const envelope = getHostEnvelope(event.data);
   if (!envelope) {
@@ -389,11 +262,6 @@ window.addEventListener("message", (event) => {
       return;
     }
     pending.reject(new Error(envelope.error ?? "VS Code bridge command failed."));
-    return;
-  }
-
-  if (envelope.event === WEBVIEW_EDIT_COMMAND_EVENT) {
-    void handleWebviewEditCommand(envelope.payload);
     return;
   }
 

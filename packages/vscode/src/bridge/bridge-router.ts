@@ -84,13 +84,6 @@ function parseSendInput(args: unknown): {
   };
 }
 
-function parseClipboardWriteTextInput(args: unknown): string {
-  if (!isRecord(args) || typeof args.text !== "string") {
-    throw new Error("clipboard.writeText requires a text string.");
-  }
-  return args.text;
-}
-
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -127,11 +120,6 @@ export class BridgeRouter {
         return null;
       case "close_local_daemon_transport":
         this.transport.closeLocalTransportSession(parseSessionId(args));
-        return null;
-      case "clipboard.readText":
-        return await vscode.env.clipboard.readText();
-      case "clipboard.writeText":
-        await vscode.env.clipboard.writeText(parseClipboardWriteTextInput(args));
         return null;
       case "copy_attachment_file":
         return await copyAttachmentFileToManagedStorage(this.context.globalStorageUri.fsPath, args);
