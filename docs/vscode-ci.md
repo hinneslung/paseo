@@ -67,6 +67,7 @@ shipped:
 | `a46672ad` | Folder unknown to daemon → startup splash hangs forever                                                                         | Layer 3 workspace-open spec              |
 | `517948bf` | Assistant links to hidden dot-paths (`.github/...`) did not resolve                                                             | Layer 3 file-link-click spec (deferred)  |
 | `455e18d5` | Wrong left-nav panel state on first open                                                                                        | Layer 1 smoke ("first open renders")     |
+| (v0.1.4)   | macOS Cmd+A/C/V dead in composer — react-native-web swallows keydown before VS Code's webview key forwarder                     | Layer 3 editing-shortcuts probe          |
 
 ## E2E layers
 
