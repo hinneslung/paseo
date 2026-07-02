@@ -3,7 +3,7 @@ import { getPassword, clearPassword, promptForDaemonPassword } from "./auth/secr
 import { BridgeRouter } from "./bridge/bridge-router";
 import { readDaemonListen } from "./daemon/config-reader";
 import { discoverDaemonEndpoint, type ResolvedDaemonEndpoint } from "./daemon/discovery";
-import { dispatchWebviewMessage } from "./webview/messaging";
+import { createEventEnvelope, dispatchWebviewMessage } from "./webview/messaging";
 import { buildWebviewDocument } from "./webview/webview-host";
 import type { VscodeRuntimeConfig } from "./webview/html-rewrite";
 
@@ -15,6 +15,11 @@ interface PaseoExtensionApi {
 let lastWebviewHtml: string | null = null;
 let activePanelCount = 0;
 let disposables: vscode.Disposable[] = [];
+const activeWebviews = new Set<vscode.Webview>();
+
+type WebviewEditCommand = "selectAll" | "copy" | "cut" | "paste";
+
+const WEBVIEW_EDIT_COMMAND_EVENT = "vscode-edit-command";
 
 function getLocalResourceRoots(context: vscode.ExtensionContext): vscode.Uri[] {
   return [
@@ -61,6 +66,7 @@ async function renderWebview(
   webview: vscode.Webview,
   context: vscode.ExtensionContext,
 ): Promise<vscode.Disposable> {
+  activeWebviews.add(webview);
   webview.options = {
     enableScripts: true,
     localResourceRoots: getLocalResourceRoots(context),
@@ -106,7 +112,29 @@ async function renderWebview(
   });
   webview.html = html;
   lastWebviewHtml = html;
-  return vscode.Disposable.from(messageDisposable, { dispose: () => router.closeAll() });
+  return vscode.Disposable.from(messageDisposable, {
+    dispose: () => {
+      activeWebviews.delete(webview);
+      router.closeAll();
+    },
+  });
+}
+
+async function postWebviewEditCommand(command: WebviewEditCommand): Promise<void> {
+  const message = createEventEnvelope(WEBVIEW_EDIT_COMMAND_EVENT, { command });
+  await Promise.allSettled(
+    Array.from(activeWebviews, (webview) => {
+      const postMessage = webview.postMessage.bind(webview);
+      return postMessage(message);
+    }),
+  );
+}
+
+function registerWebviewEditCommand(
+  commandId: string,
+  command: WebviewEditCommand,
+): vscode.Disposable {
+  return vscode.commands.registerCommand(commandId, () => postWebviewEditCommand(command));
 }
 
 class PaseoWebviewViewProvider implements vscode.WebviewViewProvider {
@@ -158,6 +186,10 @@ export function activate(context: vscode.ExtensionContext): PaseoExtensionApi {
     vscode.commands.registerCommand("paseo.open", () => openPaseoPanel(context)),
     vscode.commands.registerCommand("paseo.setPassword", () => setDaemonPassword(context)),
     vscode.commands.registerCommand("paseo.clearPassword", () => clearDaemonPassword(context)),
+    registerWebviewEditCommand("paseo.webview.selectAll", "selectAll"),
+    registerWebviewEditCommand("paseo.webview.copy", "copy"),
+    registerWebviewEditCommand("paseo.webview.cut", "cut"),
+    registerWebviewEditCommand("paseo.webview.paste", "paste"),
   ];
   context.subscriptions.push(...disposables);
 
@@ -174,4 +206,5 @@ export function deactivate(): void {
   disposables = [];
   lastWebviewHtml = null;
   activePanelCount = 0;
+  activeWebviews.clear();
 }

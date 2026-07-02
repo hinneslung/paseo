@@ -83,6 +83,32 @@
         "title": "Paseo: Clear Daemon Password"
       }
     ],
+    "keybindings": [
+      {
+        "command": "paseo.webview.selectAll",
+        "key": "ctrl+a",
+        "mac": "cmd+a",
+        "when": "focusedView == 'paseo.webview' || activeWebviewPanelId == 'paseo.webviewPanel'"
+      },
+      {
+        "command": "paseo.webview.copy",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "focusedView == 'paseo.webview' || activeWebviewPanelId == 'paseo.webviewPanel'"
+      },
+      {
+        "command": "paseo.webview.cut",
+        "key": "ctrl+x",
+        "mac": "cmd+x",
+        "when": "focusedView == 'paseo.webview' || activeWebviewPanelId == 'paseo.webviewPanel'"
+      },
+      {
+        "command": "paseo.webview.paste",
+        "key": "ctrl+v",
+        "mac": "cmd+v",
+        "when": "focusedView == 'paseo.webview' || activeWebviewPanelId == 'paseo.webviewPanel'"
+      }
+    ],
     "configuration": {
       "title": "Paseo",
       "properties": {
