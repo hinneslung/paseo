@@ -1,5 +1,6 @@
 import type { HostToWebviewEnvelope, ResultEnvelope } from "../webview/messaging";
 import type { VscodeRuntimeConfig } from "../webview/html-rewrite";
+import { isEditingShortcutTarget, resolveEditingCommand } from "./editing-shortcuts";
 
 type EventHandler = (payload: unknown) => void;
 type Unsubscribe = () => void;
@@ -139,6 +140,46 @@ try {
 } catch {
   // replaceState can throw in restricted contexts; routing falls back to default.
 }
+// See editing-shortcuts.ts for why the webview must implement basic editing
+// shortcuts itself. This listener must stay capture-phase on window (it has to
+// run before react-native-web's keydown stopPropagation) and this script must
+// stay injected before the app bundle so it registers first.
+const isMacLikePlatform =
+  /Macintosh|Mac OS|iPhone|iPad|iPod/i.test(navigator.userAgent ?? "") ||
+  /Mac|iPhone|iPad|iPod/i.test(navigator.platform ?? "");
+
+window.addEventListener(
+  "keydown",
+  (event) => {
+    if (!isEditingShortcutTarget(event.target)) {
+      return;
+    }
+    const command = resolveEditingCommand(event, isMacLikePlatform);
+    if (!command) {
+      return;
+    }
+    // Act first, consume only on success. Where execCommand works (Electron
+    // desktop VS Code grants webviews clipboard access), preventDefault stops
+    // the platforms with native renderer handling from double-executing and
+    // stopPropagation keeps the VS Code webview host from also forwarding the
+    // key to workbench keybindings. Where it fails — browser-hosted webviews
+    // (Codespaces web, code-server) refuse programmatic paste, copy with an
+    // empty selection, cut in a readonly field — the event stays untouched so
+    // the host's native handling still applies.
+    let handled = false;
+    try {
+      handled = document.execCommand(command);
+    } catch {
+      handled = false;
+    }
+    if (handled) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  },
+  true,
+);
+
 const pendingInvokes = new Map<string, PendingInvoke>();
 const eventHandlers = new Map<string, Set<EventHandler>>();
 let nextInvokeId = 0;

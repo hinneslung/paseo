@@ -78,6 +78,29 @@ surfaces when VS Code already owns them:
 Chat file links open in the VS Code editor, including line navigation when a
 line is present.
 
+## Keyboard and Clipboard
+
+Basic editing shortcuts (select all / copy / cut / paste / undo / redo) in Paseo
+text fields are handled by the webview bootstrap itself
+(`src/webview-preload/editing-shortcuts.ts`), not by VS Code. react-native-web's
+`TextInput` stops keydown propagation, so keystrokes typed in Paseo inputs never
+reach the bubble-phase window listener VS Code's webview host uses to forward
+keys to the workbench. On macOS there is no native renderer fallback for
+Cmd+A/C/V/X/Z (they are menu key equivalents in Cocoa, and VS Code suppresses
+menu shortcuts while a webview is focused), so without the bootstrap handler
+basic editing in the composer breaks entirely. The handler is a capture-phase
+window listener (runs before React can swallow the event) that executes
+`document.execCommand`, so real `input`/`paste` events still fire and image
+paste keeps working. The event is only consumed when `execCommand` reports
+success; in browser-hosted webviews (Codespaces web, code-server), where
+programmatic paste is refused, the event stays untouched and the browser's
+native handling applies as before. The terminal is excluded — xterm owns its
+keystrokes.
+
+For the same propagation reason, VS Code workbench keybindings (for example
+Cmd+Shift+P) do not fire while focus is inside a Paseo text field. That is a
+known limitation; focus outside the input first.
+
 ## Known Limitations
 
 Dragging files from the OS or VS Code Explorer into chat works through standard
