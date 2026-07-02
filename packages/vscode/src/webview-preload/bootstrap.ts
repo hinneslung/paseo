@@ -158,12 +158,24 @@ window.addEventListener(
     if (!command) {
       return;
     }
-    // Take full ownership: preventDefault stops double handling on platforms
-    // where the renderer natively supports the combo, stopPropagation keeps the
-    // VS Code webview host from also forwarding it to workbench keybindings.
-    event.preventDefault();
-    event.stopPropagation();
-    document.execCommand(command);
+    // Act first, consume only on success. Where execCommand works (Electron
+    // desktop VS Code grants webviews clipboard access), preventDefault stops
+    // the platforms with native renderer handling from double-executing and
+    // stopPropagation keeps the VS Code webview host from also forwarding the
+    // key to workbench keybindings. Where it fails — browser-hosted webviews
+    // (Codespaces web, code-server) refuse programmatic paste, copy with an
+    // empty selection, cut in a readonly field — the event stays untouched so
+    // the host's native handling still applies.
+    let handled = false;
+    try {
+      handled = document.execCommand(command);
+    } catch {
+      handled = false;
+    }
+    if (handled) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
   },
   true,
 );

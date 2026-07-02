@@ -91,7 +91,11 @@ menu shortcuts while a webview is focused), so without the bootstrap handler
 basic editing in the composer breaks entirely. The handler is a capture-phase
 window listener (runs before React can swallow the event) that executes
 `document.execCommand`, so real `input`/`paste` events still fire and image
-paste keeps working. The terminal is excluded — xterm owns its keystrokes.
+paste keeps working. The event is only consumed when `execCommand` reports
+success; in browser-hosted webviews (Codespaces web, code-server), where
+programmatic paste is refused, the event stays untouched and the browser's
+native handling applies as before. The terminal is excluded — xterm owns its
+keystrokes.
 
 For the same propagation reason, VS Code workbench keybindings (for example
 Cmd+Shift+P) do not fire while focus is inside a Paseo text field. That is a
