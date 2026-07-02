@@ -12,10 +12,18 @@ import { DraftAgentModeControl } from "@/composer/agent-controls/mode-control";
 import { ComposerImportPill } from "@/composer/draft/import-pill";
 import { FileDropZone } from "@/components/file-drop-zone";
 import { AgentStreamView } from "@/agent-stream/view";
+import {
+  getMimeTypeFromPath,
+  isRasterImageFile,
+  isRasterImagePath,
+} from "@/attachments/file-types";
 import { composerWorkspaceAttachment } from "@/composer/attachments/workspace";
+import { uploadFileAttachments } from "@/composer/actions";
 import type { ImageAttachment } from "@/composer/types";
 import { useAgentInputDraft } from "@/composer/draft/input-draft";
 import type { CreateAgentInitialValues } from "@/hooks/use-agent-form-state";
+import { readDesktopFileBytes } from "@/hooks/use-file-picker";
+import type { DroppedItem } from "@/hooks/use-file-drop-zone";
 import { useDraftAgentCreateFlow, type DraftCreateAttempt } from "@/composer/draft/create-flow";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { buildWorkspaceDraftAgentConfig } from "@/screens/workspace/workspace-draft-agent-config";
@@ -32,7 +40,7 @@ import { validateDraftSubmission } from "@/composer/draft/workspace-tab-core";
 import type { AgentCapabilityFlags } from "@getpaseo/protocol/agent-types";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { WorkspaceComposerAttachment } from "@/attachments/types";
+import type { UserComposerAttachment, WorkspaceComposerAttachment } from "@/attachments/types";
 import {
   useWorkspaceAttachments,
   useWorkspaceAttachmentScopeKey,
@@ -45,6 +53,7 @@ import {
 } from "@/constants/layout";
 import { isWeb } from "@/constants/platform";
 import type { WorkspaceDraftTabSetup } from "@/stores/workspace-tabs-store";
+import { resolveDroppedFileMentionPath } from "@/workspace/file-drop-mentions";
 import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 const EMPTY_PENDING_PERMISSIONS = new Map();
@@ -281,6 +290,28 @@ function resolveOnlineServerIds(input: { isConnected: boolean; serverId: string 
   return [input.serverId];
 }
 
+function splitDroppedItemsForMentions(input: { items: DroppedItem[]; cwd: string }): {
+  mentionPaths: string[];
+  uploadItems: DroppedItem[];
+} {
+  const mentionPaths: string[] = [];
+  const uploadItems: DroppedItem[] = [];
+  for (const item of input.items) {
+    if (item.kind !== "file-uri") {
+      uploadItems.push(item);
+      continue;
+    }
+
+    const relativePath = resolveDroppedFileMentionPath({ path: item.path, cwd: input.cwd });
+    if (relativePath) {
+      mentionPaths.push(relativePath);
+      continue;
+    }
+    uploadItems.push({ kind: "desktop-path", path: item.path });
+  }
+  return { mentionPaths, uploadItems };
+}
+
 interface WorkspaceDraftAgentTabProps {
   serverId: string;
   workspaceId: string;
@@ -334,6 +365,8 @@ export function WorkspaceDraftAgentTab({
   });
   const onlineServerIds = resolveOnlineServerIds({ isConnected, serverId });
   const addImagesRef = useRef<((images: ImageAttachment[]) => void) | null>(null);
+  const addFilesRef = useRef<((files: UserComposerAttachment[]) => void) | null>(null);
+  const addFileMentionsRef = useRef<((relativePaths: string[]) => void) | null>(null);
   const draftStoreKey = useMemo(
     () =>
       buildDraftStoreKey({
@@ -549,6 +582,59 @@ export function WorkspaceDraftAgentTab({
     addImagesRef.current = addImages;
   }, []);
 
+  const handleAddFilesCallback = useCallback(
+    (addFiles: (files: UserComposerAttachment[]) => void) => {
+      addFilesRef.current = addFiles;
+    },
+    [],
+  );
+
+  const handleAddFileMentionsCallback = useCallback(
+    (addFileMentions: (relativePaths: string[]) => void) => {
+      addFileMentionsRef.current = addFileMentions;
+    },
+    [],
+  );
+
+  const handleGenericFilesDropped = useCallback(
+    async (items: DroppedItem[]) => {
+      const { mentionPaths, uploadItems } = splitDroppedItemsForMentions({
+        items,
+        cwd: composerState.workingDir,
+      });
+      if (mentionPaths.length > 0) {
+        addFileMentionsRef.current?.(mentionPaths);
+      }
+      if (!client || !isConnected) return;
+      const nonImageItems = uploadItems.filter((item) => {
+        if (item.kind === "web-file") return !isRasterImageFile(item.file);
+        return !isRasterImagePath(item.path);
+      });
+      if (nonImageItems.length === 0) return;
+      try {
+        const files = await Promise.all(
+          nonImageItems.map(async (item) => {
+            if (item.kind === "web-file") {
+              return {
+                fileName: item.file.name,
+                mimeType: item.file.type || getMimeTypeFromPath(item.file.name),
+                bytes: new Uint8Array(await item.file.arrayBuffer()),
+              };
+            }
+            const fileName = item.path.split("/").pop() ?? item.path.split("\\").pop() ?? item.path;
+            const bytes = await readDesktopFileBytes(item.path);
+            return { fileName, mimeType: getMimeTypeFromPath(item.path), bytes };
+          }),
+        );
+        const uploaded = await uploadFileAttachments({ client, files });
+        addFilesRef.current?.(uploaded);
+      } catch (error) {
+        console.error("[WorkspaceDraftAgentTab] Failed to upload dropped files:", error);
+      }
+    },
+    [client, composerState.workingDir, isConnected],
+  );
+
   const focusInputRef = useRef<(() => void) | null>(null);
 
   const handleFocusInputCallback = useCallback((focus: () => void) => {
@@ -656,7 +742,10 @@ export function WorkspaceDraftAgentTab({
   );
 
   return (
-    <FileDropZone onFilesDropped={handleFilesDropped}>
+    <FileDropZone
+      onFilesDropped={handleFilesDropped}
+      onGenericFilesDropped={handleGenericFilesDropped}
+    >
       <View style={styles.container}>
         <View style={styles.contentContainer}>
           {isSubmitting && draftAgent ? (
@@ -712,6 +801,8 @@ export function WorkspaceDraftAgentTab({
             clearDraft={draftInput.clear}
             autoFocus={shouldAutoFocusWorkspaceDraftComposer({ isPaneFocused, isSubmitting })}
             onAddImages={handleAddImagesCallback}
+            onAddFiles={handleAddFilesCallback}
+            onAddFileMentions={handleAddFileMentionsCallback}
             onFocusInput={handleFocusInputCallback}
             commandDraftConfig={composerState.commandDraftConfig}
             agentControls={composerAgentControls}
