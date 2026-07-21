@@ -43,6 +43,8 @@ import { ContextWindowMeter } from "@/components/context-window-meter";
 import { useImageAttachmentPicker } from "@/hooks/use-image-attachment-picker";
 import { useSessionStore } from "@/stores/session-store";
 import { useFilePicker } from "@/hooks/use-file-picker";
+import { useFileDrop } from "@/components/file-drop/use-file-drop";
+import type { DroppedItem } from "@/components/file-drop/types";
 import { MessageInput, type MessageInputRef, type AttachmentMenuItem } from "./input/input";
 import type { ImageAttachment, MessagePayload } from "./types";
 import { ICON_SIZE, type Theme } from "@/styles/theme";
@@ -99,7 +101,10 @@ import type {
   UserComposerAttachment,
   WorkspaceComposerAttachment,
 } from "@/attachments/types";
+import type { PickedFile } from "@/attachments/picked-file";
 import { composerWorkspaceAttachment } from "@/composer/attachments/workspace";
+import { useWorkspaceAttachmentsForScopes } from "@/attachments/workspace-attachments-store";
+import { droppedItemsToPickedFiles } from "@/composer/attachments/drop";
 import { getFileTypeLabel } from "@/attachments/file-types";
 import { Combobox, ComboboxItem, type ComboboxOption } from "@/components/ui/combobox";
 import { AttachmentLabel, AttachmentPill, AttachmentThumbnail } from "@/components/attachment-pill";
@@ -112,12 +117,37 @@ import { useComposerGithubAutoAttach } from "./github/auto-attach";
 import { resolveClientSlashCommand, type ClientSlashCommand } from "@/client-slash-commands";
 import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 import { appendFileMentionPaths } from "@/utils/file-mention-autocomplete";
+import { resolveDroppedFileMentionPath } from "@/workspace/file-drop-mentions";
 
 type QueuedMessage = QueuedComposerMessage;
 
 type AttachmentListUpdater =
   | UserComposerAttachment[]
   | ((prev: UserComposerAttachment[]) => UserComposerAttachment[]);
+
+function splitDroppedItemsForMentions(input: { items: DroppedItem[]; cwd: string }): {
+  mentionPaths: string[];
+  uploadItems: DroppedItem[];
+} {
+  const mentionPaths: string[] = [];
+  const uploadItems: DroppedItem[] = [];
+  for (const item of input.items) {
+    if (item.kind !== "file-uri") {
+      uploadItems.push(item);
+      continue;
+    }
+
+    const relativePath = resolveDroppedFileMentionPath({ path: item.path, cwd: input.cwd });
+    if (relativePath) {
+      mentionPaths.push(relativePath);
+    } else {
+      uploadItems.push({ kind: "desktop-path", path: item.path });
+    }
+  }
+  return { mentionPaths, uploadItems };
+}
+
+const EMPTY_ATTACHMENT_SCOPE_KEYS: readonly string[] = [];
 
 function noop() {}
 const noopCallback = () => {};
@@ -411,7 +441,7 @@ function renderComposerAttachmentPill(args: RenderComposerAttachmentPillArgs): R
   );
 }
 
-function resolveVoiceStartErrorMessage(error: unknown): string | null {
+function resolveErrorMessage(error: unknown): string | null {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   return null;
@@ -433,7 +463,7 @@ function attemptStartRealtimeVoice(args: AttemptStartRealtimeVoiceArgs): void {
   if (voice.isVoiceModeForAgent(serverId, agentId)) return;
   void voice.startVoice(serverId, agentId).catch((error) => {
     console.error("[Composer] Failed to start voice mode", error);
-    const message = resolveVoiceStartErrorMessage(error);
+    const message = resolveErrorMessage(error);
     if (message && message.trim().length > 0) {
       toastErrorRef.current(message);
     }
@@ -762,19 +792,13 @@ interface ComposerProps {
   value: string;
   onChangeText: (text: string) => void;
   attachments: UserComposerAttachment[];
-  workspaceAttachments?: readonly WorkspaceComposerAttachment[];
+  attachmentScopeKeys?: readonly string[];
   onOpenWorkspaceAttachment?: (attachment: WorkspaceComposerAttachment) => void;
   onChangeAttachments: (updater: AttachmentListUpdater) => void;
   cwd: string;
   clearDraft: (lifecycle: "sent" | "abandoned") => void;
   /** When true, auto-focuses the text input on web. */
   autoFocus?: boolean;
-  /** Callback to expose the addImages function to parent components */
-  onAddImages?: (addImages: (images: ImageAttachment[]) => void) => void;
-  /** Callback to expose the addFiles function to parent components */
-  onAddFiles?: (addFiles: (files: UserComposerAttachment[]) => void) => void;
-  /** Callback to expose file mention insertion for VS Code/file-drop integrations. */
-  onAddFileMentions?: (addFileMentions: (relativePaths: string[]) => void) => void;
   /** Callback to expose a focus function to parent components (desktop only). */
   onFocusInput?: (focus: () => void) => void;
   /** Optional draft context for listing commands before an agent exists. */
@@ -982,15 +1006,12 @@ export function Composer({
   value,
   onChangeText,
   attachments,
-  workspaceAttachments = [],
+  attachmentScopeKeys = EMPTY_ATTACHMENT_SCOPE_KEYS,
   onOpenWorkspaceAttachment,
   onChangeAttachments,
   cwd,
   clearDraft,
   autoFocus = false,
-  onAddImages,
-  onAddFiles,
-  onAddFileMentions,
   onFocusInput,
   commandDraftConfig,
   onMessageSent,
@@ -1041,6 +1062,7 @@ export function Composer({
   const messagePlaceholder = resolveMessagePlaceholder(isDesktopLayout, t);
   const userInput = value;
   const setUserInput = onChangeText;
+  const workspaceAttachments = useWorkspaceAttachmentsForScopes(attachmentScopeKeys);
   const {
     selectedAttachments,
     buildOutgoingAttachments,
@@ -1152,7 +1174,6 @@ export function Composer({
   >(null);
   const onSubmitMessageRef = useRef(onSubmitMessage);
 
-  // Expose addImages function to parent for drag-and-drop support
   const addImages = useCallback(
     (images: ImageAttachment[]) => {
       setSelectedAttachments((prev) => [
@@ -1163,23 +1184,12 @@ export function Composer({
     [setSelectedAttachments],
   );
 
-  useEffect(() => {
-    onAddImages?.(addImages);
-  }, [addImages, onAddImages]);
-
-  // Expose addFiles function to parent for drag-and-drop support
   const addFiles = useCallback(
     (files: UserComposerAttachment[]) => {
       setSelectedAttachments((prev) => [...prev, ...files]);
     },
     [setSelectedAttachments],
   );
-
-  /* oxlint-disable react-hooks/exhaustive-deps */
-  useEffect(() => {
-    onAddFiles?.(addFiles);
-  }, [addFiles, onAddFiles]);
-  /* oxlint-enable react-hooks/exhaustive-deps */
 
   const focusInput = useCallback(() => {
     if (isNative) return;
@@ -1208,10 +1218,6 @@ export function Composer({
     },
     [setUserInput, userInput],
   );
-
-  useEffect(() => {
-    onAddFileMentions?.(addFileMentions);
-  }, [addFileMentions, onAddFileMentions]);
 
   const submitMessage = useCallback(
     async (text: string, submitAttachments: ComposerAttachment[]) => {
@@ -1393,14 +1399,13 @@ export function Composer({
     addImages(newImages);
   }, [addImages, pickImages]);
 
-  const handlePickFile = useCallback(async () => {
-    if (!client) {
-      toastErrorRef.current(t("composer.errors.daemonClientDisconnected"));
-      return;
-    }
-    try {
-      const files = await pickFiles();
-      if (!files || files.length === 0) return;
+  const uploadPickedFiles = useCallback(
+    async (files: PickedFile[]) => {
+      if (files.length === 0) return;
+      if (!client) {
+        toastErrorRef.current(t("composer.errors.daemonClientDisconnected"));
+        return;
+      }
 
       const oversized = files.find((f) => f.bytes.byteLength > MAX_FILE_SIZE_BYTES);
       if (oversized) {
@@ -1411,17 +1416,61 @@ export function Composer({
       }
 
       setIsUploadingFile(true);
-      const uploaded = await uploadFileAttachments({ client, files });
-      addFiles(uploaded);
+      try {
+        const uploaded = await uploadFileAttachments({ client, files });
+        addFiles(uploaded);
+      } catch (error) {
+        console.error("[Composer] Failed to upload file:", error);
+        toastErrorRef.current(
+          error instanceof Error ? error.message : t("composer.errors.uploadFailed"),
+        );
+      } finally {
+        setIsUploadingFile(false);
+      }
+    },
+    [addFiles, client, t],
+  );
+
+  const handlePickFile = useCallback(async () => {
+    if (!client) {
+      toastErrorRef.current(t("composer.errors.daemonClientDisconnected"));
+      return;
+    }
+    try {
+      const files = await pickFiles();
+      if (!files) return;
+      await uploadPickedFiles(files);
     } catch (error) {
       console.error("[Composer] Failed to upload file:", error);
       toastErrorRef.current(
         error instanceof Error ? error.message : t("composer.errors.uploadFailed"),
       );
-    } finally {
-      setIsUploadingFile(false);
     }
-  }, [client, pickFiles, addFiles, t]);
+  }, [client, pickFiles, t, uploadPickedFiles]);
+
+  const handleGenericFilesDropped = useCallback(
+    async (items: DroppedItem[]) => {
+      try {
+        const { mentionPaths, uploadItems } = splitDroppedItemsForMentions({ items, cwd });
+        if (mentionPaths.length > 0) {
+          addFileMentions(mentionPaths);
+        }
+        const files = await droppedItemsToPickedFiles(uploadItems);
+        if (files.length === 0) return;
+        if (!client || !isConnected) {
+          toastErrorRef.current(t("composer.errors.daemonClientDisconnected"));
+          return;
+        }
+        await uploadPickedFiles(files);
+      } catch (error) {
+        console.error("[Composer] Failed to upload dropped files:", error);
+        toastErrorRef.current(
+          error instanceof Error ? error.message : t("composer.errors.uploadFailed"),
+        );
+      }
+    },
+    [addFileMentions, client, cwd, isConnected, t, uploadPickedFiles],
+  );
 
   const handleRemoveAttachment = useCallback(
     (index: number) => {
@@ -1467,6 +1516,13 @@ export function Composer({
       isAgentRunning,
       isCancellingAgent,
       isConnected,
+      onCancelFailed: (error) => {
+        setIsCancellingAgent(false);
+        const message = resolveErrorMessage(error);
+        if (message && message.trim().length > 0) {
+          toastErrorRef.current(message);
+        }
+      },
     });
     if (!didCancel) return;
     setIsCancellingAgent(true);
@@ -1890,6 +1946,15 @@ export function Composer({
   const messageInputContainerRef = useRef<View>(null);
 
   const isSubmitBusy = isProcessing || isSubmitLoading || isUploadingFile;
+
+  // Disable drops while submitting/uploading: the submit path clears and restores attachments,
+  // so a drop in that window would be lost or land on a locked draft. `disabled` hides the
+  // backdrop and rejects the drop atomically, instead of accepting a drop with no feedback.
+  useFileDrop(
+    { onFiles: addImages, onGenericFiles: handleGenericFilesDropped },
+    { disabled: isSubmitBusy },
+  );
+
   const messageInputAutoFocus = autoFocus && isDesktopWebBreakpoint;
   const submitLoadingPressHandler = isAgentRunning ? handleCancelAgent : undefined;
   const sendErrorNode = useMemo(

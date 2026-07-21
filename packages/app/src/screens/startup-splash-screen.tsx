@@ -20,7 +20,6 @@ import { Button } from "@/components/ui/button";
 import { getDesktopDaemonLogs, type DesktopDaemonLogs } from "@/desktop/daemon/desktop-daemon";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { isNative, isWeb } from "@/constants/platform";
-import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 
 export interface VscodeStartupError {
@@ -331,15 +330,6 @@ export function StartupSplashScreen({
 }: StartupSplashScreenProps) {
   const { t } = useTranslation();
   const { theme } = useUnistyles();
-  const webScrollbarStyle = useWebScrollbarStyle();
-  const errorScrollViewStyle = useMemo(
-    () => [styles.errorScrollView, webScrollbarStyle],
-    [webScrollbarStyle],
-  );
-  const logsScrollStyle = useMemo(
-    () => [styles.logsScroll, webScrollbarStyle],
-    [webScrollbarStyle],
-  );
   const [daemonLogs, setDaemonLogs] = useState<DesktopDaemonLogs | null>(null);
   const [logsError, setLogsError] = useState<string | null>(null);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
@@ -444,7 +434,7 @@ export function StartupSplashScreen({
       <View style={styles.errorScreen}>
         <TitlebarDragRegion />
         <ScrollView
-          style={errorScrollViewStyle}
+          style={styles.errorScrollView}
           contentContainerStyle={styles.errorScrollContent}
           showsVerticalScrollIndicator
         >
@@ -484,7 +474,7 @@ export function StartupSplashScreen({
     <View style={styles.errorScreen}>
       <TitlebarDragRegion />
       <ScrollView
-        style={errorScrollViewStyle}
+        style={styles.errorScrollView}
         contentContainerStyle={styles.errorScrollContent}
         showsVerticalScrollIndicator
       >
@@ -504,7 +494,7 @@ export function StartupSplashScreen({
 
           <View style={styles.logsContainer}>
             <ScrollView
-              style={logsScrollStyle}
+              style={styles.logsScroll}
               contentContainerStyle={styles.logsContent}
               showsVerticalScrollIndicator
             >

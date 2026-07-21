@@ -8,6 +8,11 @@ import { type ExplorerCheckoutContext } from "../explorer-checkout-context";
 
 export type MobilePanelView = "agent" | "agent-list" | "file-explorer";
 
+export interface MobilePanelSelection {
+  target: MobilePanelView;
+  revision: number;
+}
+
 export interface DesktopSidebarState {
   agentListOpen: boolean;
   fileExplorerOpen: boolean;
@@ -51,7 +56,7 @@ export interface ExplorerPanelIntent extends PanelLayoutInput {
 }
 
 export interface PanelCoreState {
-  mobileView: MobilePanelView;
+  mobilePanel: MobilePanelSelection;
   desktop: DesktopSidebarState;
   explorerTab: ExplorerTab;
   explorerTabByCheckout: Record<string, ExplorerTab>;
@@ -82,8 +87,8 @@ export function selectPanelVisibility(
 ): PanelVisibilityState {
   if (input.isCompact) {
     return {
-      isAgentListOpen: state.mobileView === "agent-list",
-      isFileExplorerOpen: state.mobileView === "file-explorer",
+      isAgentListOpen: state.mobilePanel.target === "agent-list",
+      isFileExplorerOpen: state.mobilePanel.target === "file-explorer",
     };
   }
   return {
@@ -100,6 +105,16 @@ export function selectIsFileExplorerOpen(state: PanelCoreState, input: PanelLayo
   return selectPanelVisibility(state, input).isFileExplorerOpen;
 }
 
+export function setMobilePanelTarget(
+  selection: MobilePanelSelection,
+  target: MobilePanelView,
+): MobilePanelSelection {
+  if (selection.target === target) {
+    return selection;
+  }
+  return { target, revision: selection.revision + 1 };
+}
+
 function resolveExplorerTabFromCheckout(
   state: PanelCoreState,
   checkout: ExplorerCheckoutContext,
@@ -113,7 +128,7 @@ function resolveExplorerTabFromCheckout(
 }
 
 export interface OpenFileExplorerPatch {
-  mobileView?: MobilePanelView;
+  mobilePanel?: MobilePanelSelection;
   desktop?: DesktopSidebarState;
   explorerTab: ExplorerTab;
 }
@@ -125,7 +140,7 @@ export function buildOpenFileExplorerPatch(
   const resolvedTab = resolveExplorerTabFromCheckout(state, input.checkout);
   if (input.isCompact) {
     return {
-      mobileView: "file-explorer",
+      mobilePanel: setMobilePanelTarget(state.mobilePanel, "file-explorer"),
       explorerTab: resolvedTab,
     };
   }
@@ -137,7 +152,7 @@ export function buildOpenFileExplorerPatch(
 
 export type ToggleFileExplorerPatch =
   | OpenFileExplorerPatch
-  | { mobileView: MobilePanelView }
+  | { mobilePanel: MobilePanelSelection }
   | { desktop: DesktopSidebarState };
 
 export function buildToggleFileExplorerPatch(
@@ -149,7 +164,7 @@ export function buildToggleFileExplorerPatch(
     return buildOpenFileExplorerPatch(state, input);
   }
   if (input.isCompact) {
-    return { mobileView: "agent" };
+    return { mobilePanel: setMobilePanelTarget(state.mobilePanel, "agent") };
   }
   return { desktop: { ...state.desktop, fileExplorerOpen: false } };
 }
@@ -253,8 +268,21 @@ export function migratePanelState(
   ) {
     state.diffExpandedPathsByWorkspace = {};
   }
+  if (
+    version < 12 ||
+    typeof state.diffCollapsedFoldersByWorkspace !== "object" ||
+    !state.diffCollapsedFoldersByWorkspace
+  ) {
+    state.diffCollapsedFoldersByWorkspace = {};
+  }
   if (typeof state.explorerShowHiddenFiles !== "boolean") {
     state.explorerShowHiddenFiles = true;
+  }
+  if (version < 12) {
+    // Compact panel position is transient UI state. Cold starts always begin
+    // at content, regardless of what an older version persisted.
+    delete state.mobileView;
+    delete state.mobilePanel;
   }
 
   return state;

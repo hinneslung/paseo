@@ -32,6 +32,8 @@ function workspace(input: {
   projectId?: string;
   projectName?: string;
   remoteUrl?: string | null;
+  currentBranch?: string;
+  archivingAt?: string | null;
 }): WorkspaceDescriptor {
   return {
     id: input.id,
@@ -43,12 +45,12 @@ function workspace(input: {
     workspaceKind: "local_checkout",
     name: input.id,
     status: "done",
-    archivingAt: null,
+    archivingAt: input.archivingAt ?? null,
     statusEnteredAt: null,
     diffStat: null,
     scripts: [],
     gitRuntime: {
-      currentBranch: "main",
+      currentBranch: input.currentBranch ?? "main",
       remoteUrl: input.remoteUrl ?? input.project?.checkout.remoteUrl ?? null,
       isPaseoOwnedWorktree: false,
       isDirty: false,
@@ -62,6 +64,50 @@ function workspace(input: {
 }
 
 describe("buildProjects", () => {
+  it("normalizes detached and blank branches out of workspace summaries", () => {
+    const result = buildProjects({
+      hosts: [
+        {
+          serverId: "local",
+          serverName: "Local",
+          isOnline: true,
+          workspaces: [
+            workspace({ id: "detached", repoRoot: "/repo/app", currentBranch: "HEAD" }),
+            workspace({ id: "blank", repoRoot: "/repo/app", currentBranch: "  " }),
+          ],
+        },
+      ],
+    });
+
+    expect(result.projects[0]?.hosts[0]?.workspaces).toMatchObject([
+      { id: "detached", currentBranch: null },
+      { id: "blank", currentBranch: null },
+    ]);
+  });
+
+  it("carries active archive state into workspace summaries", () => {
+    const archivingAt = "2026-07-15T18:00:00.000Z";
+    const result = buildProjects({
+      hosts: [
+        {
+          serverId: "local",
+          serverName: "Local",
+          isOnline: true,
+          workspaces: [
+            workspace({ id: "archiving", repoRoot: "/repo/app", archivingAt }),
+            workspace({ id: "active", repoRoot: "/repo/app" }),
+          ],
+        },
+      ],
+    });
+
+    expect(result.projects[0]?.hosts[0]?.workspaces).toMatchObject([
+      { id: "archiving", archivingAt },
+      { id: "active" },
+    ]);
+    expect(result.projects[0]?.hosts[0]?.workspaces[1]).not.toHaveProperty("archivingAt");
+  });
+
   it("groups two daemons with the same GitHub project key into one project with one host entry per daemon", () => {
     const result = buildProjects({
       hosts: [
@@ -513,5 +559,37 @@ describe("buildProjects", () => {
     expect(summary?.hosts).toHaveLength(1);
     expect(summary?.hosts[0]?.repoRoot).toBe("/repo/legacy");
     expect(summary?.hosts[0]?.workspaceCount).toBe(1);
+  });
+
+  it("surfaces a project with no workspaces yet and gives its host an editable repoRoot", () => {
+    const result = buildProjects({
+      hosts: [
+        {
+          serverId: "local",
+          serverName: "Local",
+          isOnline: true,
+          workspaces: [],
+          emptyProjects: [
+            {
+              projectId: "/repo/fresh",
+              projectDisplayName: "fresh",
+              projectCustomName: null,
+              projectRootPath: "/repo/fresh",
+              projectKind: "git",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.projects).toHaveLength(1);
+    const summary = result.projects[0];
+    expect(summary?.projectKey).toBe("/repo/fresh");
+    expect(summary?.totalWorkspaceCount).toBe(0);
+    expect(summary?.hosts).toHaveLength(1);
+    // repoRoot must be non-empty or the project settings screen treats the host
+    // as non-editable and shows its empty state.
+    expect(summary?.hosts[0]?.repoRoot).toBe("/repo/fresh");
+    expect(summary?.hosts[0]?.workspaceCount).toBe(0);
   });
 });

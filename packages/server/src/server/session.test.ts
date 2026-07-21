@@ -1,6 +1,6 @@
 import { execSync } from "child_process";
-import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
-import { homedir, tmpdir } from "os";
+import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { join, resolve as resolvePath } from "path";
 import pino from "pino";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -41,8 +41,14 @@ import type {
   GitHubPullRequestStatusFacts,
   GitHubService,
 } from "../services/github-service.js";
+import {
+  GitHubAuthenticationError,
+  GitHubCliMissingError,
+  GitHubCommandError,
+} from "../services/github-service.js";
 
 interface SessionHandlerInternals {
+  interruptAgentIfRunning(agentId: string): Promise<void>;
   handleSendAgentMessage(
     agentId: string,
     text: string,
@@ -88,6 +94,85 @@ function createBinaryMessageHandler(
     binaryMessages.push(frame);
   };
 }
+
+test("interruptAgentIfRunning rejects when graceful cancellation is refused", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111111";
+  const session = createSessionForTest({
+    agentManager: {
+      getAgent: vi.fn(() => ({ id: agentId, provider: "codex", lifecycle: "running" })),
+      hasInFlightRun: vi.fn(() => true),
+      cancelAgentRun: vi.fn(async () => ({ status: "refused" as const })),
+    },
+  });
+
+  await expect(asSessionInternals(session).interruptAgentIfRunning(agentId)).rejects.toThrow(
+    "active run cancellation was not acknowledged",
+  );
+});
+
+test("cancel_agent_request reports refusal only through its response", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111111";
+  const messages: SessionOutboundMessage[] = [];
+  const getAgent = vi
+    .fn()
+    .mockReturnValueOnce({ id: agentId, provider: "codex", lifecycle: "running" })
+    .mockReturnValue(null);
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      getAgent,
+      hasInFlightRun: vi.fn(() => true),
+      cancelAgentRun: vi.fn(async () => ({ status: "refused" as const })),
+    },
+  });
+
+  await session.handleMessage({
+    type: "cancel_agent_request",
+    agentId,
+    requestId: "cancel-refused",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "cancel_agent_response",
+      payload: {
+        requestId: "cancel-refused",
+        agentId,
+        agent: null,
+        error:
+          "Cannot stop agent 11111111-1111-4111-8111-111111111111 because its active run cancellation was not acknowledged",
+      },
+    },
+  ]);
+});
+
+test("legacy cancel_agent_request reports refusal through the activity log", async () => {
+  const agentId = "11111111-1111-4111-8111-111111111111";
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      getAgent: vi.fn(() => ({ id: agentId, provider: "codex", lifecycle: "running" })),
+      hasInFlightRun: vi.fn(() => true),
+      cancelAgentRun: vi.fn(async () => ({ status: "refused" as const })),
+    },
+  });
+
+  await session.handleMessage({ type: "cancel_agent_request", agentId });
+
+  expect(messages).toEqual([
+    {
+      type: "activity_log",
+      payload: {
+        id: expect.any(String),
+        timestamp: expect.any(Date),
+        type: "error",
+        content:
+          "Failed to cancel running agent on request: Cannot stop agent 11111111-1111-4111-8111-111111111111 because its active run cancellation was not acknowledged",
+      },
+    },
+  ]);
+});
 
 const checkoutGitMocks = vi.hoisted(() => ({
   checkoutResolvedBranch: vi.fn(),
@@ -193,6 +278,7 @@ interface SessionForTestOptions {
   github?: Partial<GitHubService>;
   checkoutDiffManager?: { scheduleRefreshForCwd: ReturnType<typeof vi.fn> };
   workspaceGitService?: {
+    getCheckout?: ReturnType<typeof vi.fn>;
     getCheckoutDiff?: ReturnType<typeof vi.fn>;
     getSnapshot?: ReturnType<typeof vi.fn>;
     suggestBranchesForCwd?: ReturnType<typeof vi.fn>;
@@ -235,6 +321,7 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
     scheduleRefreshForCwd: vi.fn(),
   };
   const workspaceGitService = options.workspaceGitService ?? {
+    getCheckout: vi.fn(),
     getCheckoutDiff: vi.fn(),
     getSnapshot: vi.fn(),
     suggestBranchesForCwd: vi.fn(),
@@ -306,6 +393,223 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
     daemonRuntimeConfig: options.daemonRuntimeConfig,
   });
 }
+
+describe("project command-center RPCs", () => {
+  test("returns normalized repositories from the host GitHub service", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const searchRepositories = vi.fn().mockResolvedValue([
+      {
+        id: "R_paseo",
+        name: "paseo",
+        nameWithOwner: "getpaseo/paseo",
+        description: "Development environment in your pocket",
+        visibility: "public",
+        updatedAt: "2026-07-15T10:00:00Z",
+        cloneUrl: "git@github.com:getpaseo/paseo.git",
+      },
+    ]);
+    const session = createSessionForTest({ messages, github: { searchRepositories } });
+
+    await session.handleMessage({
+      type: "workspace.github.search_repositories.request",
+      query: "paseo",
+      limit: 10,
+      requestId: "req-repositories",
+    });
+
+    expect(searchRepositories).toHaveBeenCalledWith({
+      cwd: expect.any(String),
+      query: "paseo",
+      limit: 10,
+    });
+    expect(messages).toEqual([
+      {
+        type: "workspace.github.search_repositories.response",
+        payload: {
+          status: "success",
+          requestId: "req-repositories",
+          repositories: [
+            {
+              id: "R_paseo",
+              name: "paseo",
+              nameWithOwner: "getpaseo/paseo",
+              description: "Development environment in your pocket",
+              visibility: "public",
+              updatedAt: "2026-07-15T10:00:00Z",
+              cloneUrl: "git@github.com:getpaseo/paseo.git",
+            },
+          ],
+          available: true,
+          error: null,
+        },
+      },
+    ]);
+  });
+
+  test.each([
+    {
+      error: new GitHubCliMissingError(),
+      expected: {
+        status: "unavailable",
+        requestId: "req-repositories-error",
+        reason: "gh_missing",
+        repositories: [],
+        available: false,
+        error: "GitHub CLI (gh) is not installed or not in PATH",
+      },
+    },
+    {
+      error: new GitHubAuthenticationError({ stderr: "gh auth login" }),
+      expected: {
+        status: "unauthenticated",
+        requestId: "req-repositories-error",
+        repositories: [],
+        available: false,
+        error: "GitHub CLI is not authenticated. Run gh auth login on the host.",
+      },
+    },
+    {
+      error: new GitHubCommandError({
+        args: ["search", "repos", "paseo"],
+        cwd: "/tmp",
+        exitCode: 1,
+        stderr: "GitHub API unavailable",
+      }),
+      expected: {
+        status: "error",
+        requestId: "req-repositories-error",
+        repositories: [],
+        available: true,
+        error: "GitHub API unavailable",
+      },
+    },
+  ])("maps GitHub runtime failures to $expected.status", async ({ error, expected }) => {
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForTest({
+      messages,
+      github: { searchRepositories: vi.fn().mockRejectedValue(error) },
+    });
+
+    await session.handleMessage({
+      type: "workspace.github.search_repositories.request",
+      query: "paseo",
+      requestId: "req-repositories-error",
+    });
+
+    expect(messages).toEqual([
+      {
+        type: "workspace.github.search_repositories.response",
+        payload: expected,
+      },
+    ]);
+  });
+
+  test("creates a directory and returns its normalized Project descriptor", async () => {
+    const parentDirectory = realpathSync(mkdtempSync(join(tmpdir(), "paseo-project-session-")));
+    const directoryPath = join(parentDirectory, "new-project");
+    const messages: SessionOutboundMessage[] = [];
+    const projectUpsert = vi.fn().mockResolvedValue(undefined);
+    const session = createSessionForTest({
+      messages,
+      projectRegistry: {
+        list: vi.fn().mockResolvedValue([]),
+        upsert: projectUpsert,
+      },
+      workspaceGitService: {
+        getCheckout: vi.fn(async (cwd: string) => ({
+          cwd,
+          isGit: false as const,
+          currentBranch: null,
+          remoteUrl: null,
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false as const,
+          mainRepoRoot: null,
+        })),
+      },
+    });
+
+    try {
+      await session.handleMessage({
+        type: "project.create_directory.request",
+        parentPath: parentDirectory,
+        name: "new-project",
+        requestId: "req-create-directory",
+      });
+
+      expect(existsSync(directoryPath)).toBe(true);
+      expect(projectUpsert).toHaveBeenCalledOnce();
+      expect(messages).toEqual([
+        {
+          type: "project.create_directory.response",
+          payload: {
+            requestId: "req-create-directory",
+            directoryPath,
+            project: {
+              projectId: directoryPath,
+              projectDisplayName: "new-project",
+              projectCustomName: null,
+              projectRootPath: directoryPath,
+              projectKind: "non_git",
+            },
+            error: null,
+            errorCode: null,
+          },
+        },
+      ]);
+    } finally {
+      rmSync(parentDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("rolls back the directory when Project registration fails", async () => {
+    const parentDirectory = realpathSync(mkdtempSync(join(tmpdir(), "paseo-project-session-")));
+    const directoryPath = join(parentDirectory, "unregistered");
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForTest({
+      messages,
+      projectRegistry: {
+        list: vi.fn().mockResolvedValue([]),
+        upsert: vi.fn().mockRejectedValue(new Error("registry unavailable")),
+      },
+      workspaceGitService: {
+        getCheckout: vi.fn(async (cwd: string) => ({
+          cwd,
+          isGit: false as const,
+          currentBranch: null,
+          remoteUrl: null,
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false as const,
+          mainRepoRoot: null,
+        })),
+      },
+    });
+
+    try {
+      await session.handleMessage({
+        type: "project.create_directory.request",
+        parentPath: parentDirectory,
+        name: "unregistered",
+        requestId: "req-registration-failure",
+      });
+
+      expect(existsSync(directoryPath)).toBe(false);
+      expect(messages).toEqual([
+        {
+          type: "project.create_directory.response",
+          payload: {
+            requestId: "req-registration-failure",
+            directoryPath,
+            project: null,
+            error: "Failed to register project: registry unavailable",
+            errorCode: "registration_failed",
+          },
+        },
+      ]);
+    } finally {
+      rmSync(parentDirectory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("file explorer binary responses", () => {
   const tempDirs: string[] = [];
@@ -1212,7 +1516,7 @@ describe("session provider refresh cwd routing", () => {
     expect(getSnapshot).toHaveBeenCalledWith(workspaceCwd);
   });
 
-  test("normalizes legacy model and mode list requests without cwd to home", async () => {
+  test("preserves legacy model and mode list requests without cwd as global", async () => {
     const messages: unknown[] = [];
     const {
       manager: providerSnapshotManager,
@@ -1239,9 +1543,9 @@ describe("session provider refresh cwd routing", () => {
       requestId: "modes-home",
     });
 
-    expect(getSnapshot).toHaveBeenCalledWith(homedir());
+    expect(getSnapshot).toHaveBeenCalledWith(undefined);
     expect(warmUpSnapshotForCwd).toHaveBeenCalledWith({
-      cwd: homedir(),
+      cwd: undefined,
       providers: ["codex"],
     });
   });
@@ -1343,7 +1647,7 @@ describe("session provider refresh cwd routing", () => {
     });
 
     expect(warmUpSnapshotForCwd).toHaveBeenCalledWith({
-      cwd: homedir(),
+      cwd: undefined,
       providers: ["codex"],
     });
     warmupDeferred.resolve();

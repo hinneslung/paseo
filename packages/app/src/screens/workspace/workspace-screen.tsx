@@ -35,7 +35,6 @@ import {
   SquareTerminal,
   X,
 } from "lucide-react-native";
-import { GestureDetector } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { Theme } from "@/styles/theme";
@@ -61,14 +60,15 @@ import {
   FloatingPanelPortalHostNameProvider,
 } from "@/components/ui/floating-panel-portal";
 import { ExplorerSidebar } from "@/components/explorer-sidebar";
-import { MountedTabActiveContext, SplitContainer } from "@/components/split-container";
+import { SplitContainer } from "@/components/split-container";
+import { RetainedPanel } from "@/components/retained-panel";
+import { WindowChromeRegion } from "@/utils/desktop-window";
 import { SourceControlPanelIcon } from "@/components/icons/source-control-panel-icon";
-import { WorkspaceGitActions } from "@/git/workspace-actions";
+import { WorkspaceActions } from "@/git/workspace-actions";
 import { WorkspaceOpenInEditorButton } from "@/screens/workspace/workspace-open-in-editor-button";
 import { WorkspaceScriptsButton } from "@/screens/workspace/workspace-scripts-button";
 import { ImportSessionSheet } from "@/components/import-session-sheet";
 import { useToast } from "@/contexts/toast-context";
-import { useExplorerOpenGesture } from "@/hooks/use-explorer-open-gesture";
 import { selectIsFileExplorerOpen, usePanelStore } from "@/stores/panel-store";
 import { type ExplorerCheckoutContext } from "@/stores/explorer-checkout-context";
 import {
@@ -108,6 +108,7 @@ import type { CheckoutStatusPayload } from "@/git/use-status-query";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { useArchiveAgent } from "@/hooks/use-archive-agent";
 import { useStableEvent } from "@/hooks/use-stable-event";
+import { removeResidentBrowserWebview } from "@/components/browser-webview-resident";
 import { createWorkspaceBrowser, useBrowserStore } from "@/stores/browser-store";
 import { getDesktopHost } from "@/desktop/host";
 import { openDesktopTarget } from "@/workspace/desktop-open-targets";
@@ -204,7 +205,6 @@ const EMPTY_UI_TABS: WorkspaceTab[] = [];
 const EMPTY_WORKSPACE_SCRIPTS: WorkspaceDescriptor["scripts"] = [];
 const EMPTY_PINNED_AGENT_IDS = new Set<string>();
 const EMPTY_SET = new Set<string>();
-const COMPACT_WEB_GESTURE_TOUCH_ACTION = isWeb ? "auto" : "pan-y";
 
 function getWorkspaceScripts(
   workspaceDescriptor: WorkspaceDescriptor | null | undefined,
@@ -345,19 +345,22 @@ function decodeSegment(value: string): string {
 function useSyncWorkspaceActiveBrowser(input: {
   workspaceLayout: WorkspaceLayout | null;
   isRouteFocused: boolean;
+  workspaceId: string;
 }) {
   const focusedBrowserId = useMemo(
     () => getFocusedBrowserId(input.workspaceLayout),
     [input.workspaceLayout],
   );
-  const desktopActiveBrowserId = input.isRouteFocused ? focusedBrowserId : null;
 
   useEffect(() => {
     if (!getIsElectron()) {
       return;
     }
-    void getDesktopHost()?.browser?.setWorkspaceActiveBrowser?.(desktopActiveBrowserId);
-  }, [desktopActiveBrowserId]);
+    void getDesktopHost()?.browser?.setWorkspaceActiveBrowser?.({
+      workspaceId: input.workspaceId,
+      browserId: focusedBrowserId,
+    });
+  }, [focusedBrowserId, input.workspaceId]);
 }
 
 function getFallbackTabOptionLabel(
@@ -412,6 +415,9 @@ function getFallbackTabOptionDescription(
   }
   if (tab.target.kind === "browser") {
     return labels.browser;
+  }
+  if (tab.target.kind === "provider_subagent") {
+    return labels.agent;
   }
   return tab.target.path;
 }
@@ -884,47 +890,18 @@ const MobileMountedTabSlot = memo(function MobileMountedTabSlot({
     [buildPaneContentModel, paneId, tabDescriptor],
   );
 
-  const slotStyle = isVisible
-    ? styles.mobileMountedTabSlotVisible
-    : styles.mobileMountedTabSlotHidden;
-
   return (
     <RenderProfile id={`MobileMountedTabSlot:${tabDescriptor.kind}:${tabDescriptor.tabId}`}>
-      <MountedTabActiveContext value={isVisible}>
-        <View style={slotStyle} pointerEvents={isVisible ? "auto" : "none"}>
-          <WorkspacePaneContent
-            content={content}
-            isWorkspaceFocused={isWorkspaceFocused}
-            isPaneFocused={isPaneFocused}
-          />
-        </View>
-      </MountedTabActiveContext>
+      <RetainedPanel active={isVisible} style={styles.mobileMountedTabSlot}>
+        <WorkspacePaneContent
+          content={content}
+          isWorkspaceFocused={isWorkspaceFocused}
+          isPaneFocused={isPaneFocused}
+        />
+      </RetainedPanel>
     </RenderProfile>
   );
 });
-
-interface MobileExplorerOpenGestureSurfaceProps {
-  children: ReactNode;
-  enabled: boolean;
-  onOpenExplorer: () => void;
-}
-
-function MobileExplorerOpenGestureSurface({
-  children,
-  enabled,
-  onOpenExplorer,
-}: MobileExplorerOpenGestureSurfaceProps) {
-  const explorerOpenGesture = useExplorerOpenGesture({
-    enabled,
-    onOpen: onOpenExplorer,
-  });
-
-  return (
-    <GestureDetector gesture={explorerOpenGesture} touchAction={COMPACT_WEB_GESTURE_TOUCH_ACTION}>
-      <View style={styles.content}>{children}</View>
-    </GestureDetector>
-  );
-}
 
 function useStableTabDescriptorMap(tabDescriptors: WorkspaceTabDescriptor[]) {
   const cacheRef = useRef(new Map<string, WorkspaceTabDescriptor>());
@@ -1685,41 +1662,37 @@ function renderWorkspaceHeaderSurfaceActions(input: WorkspaceHeaderSurfaceAction
     );
   }
 
-  if (!input.isGitCheckout) {
-    if (!input.showFileExplorer) return null;
-    return (
-      <HeaderToggleButton
-        testID="workspace-explorer-toggle"
-        onPress={input.handleToggleExplorer}
-        tooltipLabel={input.explorerToggleTooltipLabel}
-        tooltipKeys={EXPLORER_TOGGLE_KEYS}
-        tooltipSide="left"
-        style={styles.compactHeaderActionButton}
-        accessible
-        accessibilityRole="button"
-        accessibilityLabel={input.explorerToggleLabel}
-        accessibilityState={input.explorerToggleAccessibilityState}
-      >
-        {({ hovered }) => {
-          const colorMapping =
-            input.isExplorerOpen || hovered ? foregroundColorMapping : mutedColorMapping;
-          return <ThemedPanelRight size={16} uniProps={colorMapping} />;
-        }}
-      </HeaderToggleButton>
-    );
-  }
-
   if (!input.showGitChanges && !input.showFileExplorer) return null;
   return (
     <>
       {input.showGitChanges && input.workspaceDirectory ? (
-        <WorkspaceGitActions
+        <WorkspaceActions
           serverId={input.normalizedServerId}
           cwd={input.workspaceDirectory}
           hideLabels={input.showCompactButtonLabels}
         />
       ) : null}
-      {input.showFileExplorer ? (
+      {input.showFileExplorer && !input.isGitCheckout ? (
+        <HeaderToggleButton
+          testID="workspace-explorer-toggle"
+          onPress={input.handleToggleExplorer}
+          tooltipLabel={input.explorerToggleTooltipLabel}
+          tooltipKeys={EXPLORER_TOGGLE_KEYS}
+          tooltipSide="left"
+          style={styles.compactHeaderActionButton}
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel={input.explorerToggleLabel}
+          accessibilityState={input.explorerToggleAccessibilityState}
+        >
+          {({ hovered }) => {
+            const colorMapping =
+              input.isExplorerOpen || hovered ? foregroundColorMapping : mutedColorMapping;
+            return <ThemedPanelRight size={16} uniProps={colorMapping} />;
+          }}
+        </HeaderToggleButton>
+      ) : null}
+      {input.showFileExplorer && input.isGitCheckout ? (
         <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
           <TooltipTrigger asChild>
             <Pressable
@@ -1761,6 +1734,46 @@ function renderWorkspaceHeaderSurfaceActions(input: WorkspaceHeaderSurfaceAction
         </Tooltip>
       ) : null}
     </>
+  );
+}
+
+interface WorkspaceChromeRowProps extends Omit<
+  ComponentProps<typeof ExplorerSidebar>,
+  "workspaceRoot"
+> {
+  children: ReactNode;
+  explorerOpen: boolean;
+  portalHostName: string;
+  showExplorerSidebar: boolean;
+  workspaceRoot: string | null;
+}
+
+function WorkspaceChromeRow({
+  children,
+  explorerOpen,
+  portalHostName,
+  showExplorerSidebar,
+  workspaceRoot,
+  ...explorerProps
+}: WorkspaceChromeRowProps) {
+  const explorerRendered = showExplorerSidebar && explorerOpen && workspaceRoot !== null;
+
+  return (
+    <View style={styles.threePaneRow}>
+      <WindowChromeRegion corners={explorerRendered ? "top-left" : "both"}>
+        <FloatingPanelPortalHostNameProvider hostName={portalHostName}>
+          {children}
+        </FloatingPanelPortalHostNameProvider>
+      </WindowChromeRegion>
+
+      <FloatingPanelPortalHost name={portalHostName} />
+
+      {showExplorerSidebar && workspaceRoot ? (
+        <WindowChromeRegion corners="top-right">
+          <ExplorerSidebar {...explorerProps} workspaceRoot={workspaceRoot} />
+        </WindowChromeRegion>
+      ) : null}
+    </View>
   );
 }
 
@@ -1816,10 +1829,8 @@ interface WorkspaceExplorerActionsInput {
 }
 
 interface WorkspaceExplorerActions {
-  openExplorerForWorkspace: () => void;
   handleToggleExplorer: () => void;
   closeMobileExplorer: () => void;
-  canOpenExplorerWithGesture: boolean;
 }
 
 function useWorkspaceTerminalTabActions({
@@ -1921,22 +1932,10 @@ function useWorkspaceExplorerActions({
   isRouteFocused,
   showFileExplorer,
 }: WorkspaceExplorerActionsInput): WorkspaceExplorerActions {
-  const openFileExplorerForCheckout = usePanelStore((state) => state.openFileExplorerForCheckout);
   const toggleFileExplorerForCheckout = usePanelStore(
     (state) => state.toggleFileExplorerForCheckout,
   );
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
-  const canOpenExplorerWithGesture = showFileExplorer && Boolean(activeExplorerCheckout);
-
-  const openExplorerForWorkspace = useCallback(() => {
-    if (!showFileExplorer || !activeExplorerCheckout) {
-      return;
-    }
-    openFileExplorerForCheckout({
-      isCompact: isMobile,
-      checkout: activeExplorerCheckout,
-    });
-  }, [activeExplorerCheckout, isMobile, openFileExplorerForCheckout, showFileExplorer]);
 
   const handleToggleExplorer = useCallback(() => {
     if (!showFileExplorer || !activeExplorerCheckout) {
@@ -1971,10 +1970,8 @@ function useWorkspaceExplorerActions({
   }, [isExplorerOpen, isRouteFocused, showFileExplorer, showMobileAgent]);
 
   return {
-    openExplorerForWorkspace,
     handleToggleExplorer,
     closeMobileExplorer,
-    canOpenExplorerWithGesture,
   };
 }
 function WorkspaceScreenContent({
@@ -2158,12 +2155,7 @@ function WorkspaceScreenContent({
       isGit: isGitCheckout,
     };
   }, [isGitCheckout, normalizedServerId, workspaceDirectory]);
-  const {
-    openExplorerForWorkspace,
-    handleToggleExplorer,
-    closeMobileExplorer,
-    canOpenExplorerWithGesture,
-  } = useWorkspaceExplorerActions({
+  const { handleToggleExplorer, closeMobileExplorer } = useWorkspaceExplorerActions({
     activeExplorerCheckout,
     isExplorerOpen,
     isMobile,
@@ -2201,7 +2193,11 @@ function WorkspaceScreenContent({
     () => (workspaceLayout ? collectAllTabs(workspaceLayout.root) : EMPTY_UI_TABS),
     [workspaceLayout],
   );
-  useSyncWorkspaceActiveBrowser({ workspaceLayout, isRouteFocused });
+  useSyncWorkspaceActiveBrowser({
+    workspaceLayout,
+    isRouteFocused,
+    workspaceId: normalizedWorkspaceId,
+  });
   const openWorkspaceTabInBackground = useWorkspaceLayoutStore(
     (state) => state.openTabInBackground,
   );
@@ -2246,7 +2242,8 @@ function WorkspaceScreenContent({
       if (input.target?.kind === "browser") {
         const { browserId } = input.target;
         useBrowserStore.getState().removeBrowser(browserId);
-        void getDesktopHost()?.browser?.clearPartition?.(browserId);
+        removeResidentBrowserWebview(browserId);
+        void getDesktopHost()?.browser?.unregisterWorkspaceBrowser?.(browserId);
       }
       closeWorkspaceTab(persistenceKey, normalizedTabId);
     },
@@ -3832,12 +3829,7 @@ function WorkspaceScreenContent({
 
       <View style={styles.centerContent}>
         {isMobile ? (
-          <MobileExplorerOpenGestureSurface
-            enabled={canOpenExplorerWithGesture}
-            onOpenExplorer={openExplorerForWorkspace}
-          >
-            {content}
-          </MobileExplorerOpenGestureSurface>
+          <View style={styles.content}>{content}</View>
         ) : (
           <View style={styles.content}>{desktopContent}</View>
         )}
@@ -3856,23 +3848,18 @@ function WorkspaceScreenContent({
               workspaceId={normalizedWorkspaceId}
               isRouteFocused={isRouteFocused}
             />
-            <View style={styles.threePaneRow}>
-              <FloatingPanelPortalHostNameProvider hostName={workspaceFloatingPanelPortalHostName}>
-                {workspaceCenterColumn}
-              </FloatingPanelPortalHostNameProvider>
-
-              <FloatingPanelPortalHost name={workspaceFloatingPanelPortalHostName} />
-
-              {showExplorerSidebar && workspaceDirectory ? (
-                <ExplorerSidebar
-                  serverId={normalizedServerId}
-                  workspaceId={normalizedWorkspaceId}
-                  workspaceRoot={workspaceDirectory}
-                  isGit={isGitCheckout}
-                  onOpenFile={handleOpenFileFromExplorer}
-                />
-              ) : null}
-            </View>
+            <WorkspaceChromeRow
+              portalHostName={workspaceFloatingPanelPortalHostName}
+              showExplorerSidebar={showExplorerSidebar}
+              explorerOpen={isExplorerOpen}
+              serverId={normalizedServerId}
+              workspaceId={normalizedWorkspaceId}
+              workspaceRoot={workspaceDirectory}
+              isGit={isGitCheckout}
+              onOpenFile={handleOpenFileFromExplorer}
+            >
+              {workspaceCenterColumn}
+            </WorkspaceChromeRow>
             <ImportSessionSheet
               visible={isImportSheetVisible}
               client={client}
@@ -4195,13 +4182,8 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface0,
     position: "relative",
   },
-  mobileMountedTabSlotVisible: {
+  mobileMountedTabSlot: {
     ...StyleSheet.absoluteFillObject,
-    opacity: 1,
-  },
-  mobileMountedTabSlotHidden: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0,
   },
   contentPlaceholder: {
     flex: 1,

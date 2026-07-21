@@ -9,6 +9,7 @@ import {
 } from "@/attachments/service";
 import { useCreateFlowStore } from "@/stores/create-flow-store";
 import { useSessionStore, type SessionState } from "@/stores/session-store";
+import { useWorkspaceAttachmentsStore } from "@/attachments/workspace-attachments-store";
 import {
   applyClearDraftRecord,
   collectReferencedAttachmentIdsFromState,
@@ -25,6 +26,7 @@ import {
   type DraftStoreState,
 } from "./state";
 import { migrateDraftInput, migratePersistedState, type MigrateLegacyImages } from "./migration";
+import { createDraftPersistStorage } from "./persistence";
 
 export type { DraftInput, DraftLifecycleState } from "./state";
 
@@ -48,6 +50,13 @@ type DraftStore = DraftStoreState & DraftStoreActions;
 
 const draftGenerations = new Map<string, number>();
 let gcScheduled = false;
+const draftPersistStorage = createDraftPersistStorage(
+  createJSONStorage<DraftStoreState>(() => AsyncStorage),
+);
+
+export function flushDraftPersistStorage(): Promise<void> {
+  return draftPersistStorage?.flush() ?? Promise.resolve();
+}
 
 function createDraftRecord(input: {
   draft: DraftInput;
@@ -139,6 +148,18 @@ async function runAttachmentGc(): Promise<void> {
     collectQueuedMessageAttachmentIds(session, referencedIds);
     collectStreamUserImageIds(session.agentStreamTail, referencedIds);
     collectStreamUserImageIds(session.agentStreamHead, referencedIds);
+  }
+
+  // Browser-element screenshots live in the workspace attachment store, not in
+  // drafts, so collect their ids here to keep them from being garbage collected
+  // before the user sends the message.
+  const attachmentsByScope = useWorkspaceAttachmentsStore.getState().attachmentsByScope;
+  for (const attachments of Object.values(attachmentsByScope)) {
+    for (const attachment of attachments) {
+      if (attachment.kind === "browser_element" && attachment.attachment.screenshot) {
+        referencedIds.add(attachment.attachment.screenshot.id);
+      }
+    }
   }
 
   try {
@@ -365,7 +386,7 @@ export const useDraftStore = create<DraftStore>()(
     {
       name: "paseo-drafts",
       version: DRAFT_STORE_VERSION,
-      storage: createJSONStorage(() => AsyncStorage),
+      storage: draftPersistStorage,
       migrate: (persistedState) => {
         return migratePersistedState(persistedState, {
           migrateLegacyImages,

@@ -1,6 +1,16 @@
 import { Platform } from "react-native";
 import { getElectronHost } from "@/desktop/electron/host";
 import { getVscodeHost, isVscodeRuntime } from "@/desktop/vscode/host";
+import type { SessionInboundMessage, SessionOutboundMessage } from "@getpaseo/protocol/messages";
+
+type BrowserAutomationExecuteRequest = Extract<
+  SessionOutboundMessage,
+  { type: "browser.automation.execute.request" }
+>;
+type BrowserAutomationExecuteResponse = Extract<
+  SessionInboundMessage,
+  { type: "browser.automation.execute.response" }
+>;
 
 export type DesktopNotificationPermission = "granted" | "denied" | "default";
 
@@ -15,6 +25,7 @@ export interface DesktopDialogOpenOptions {
   title?: string;
   defaultPath?: string;
   directory?: boolean;
+  createDirectory?: boolean;
   multiple?: boolean;
   filters?: Array<{
     name: string;
@@ -85,6 +96,7 @@ export interface DesktopWebUtilsBridge {
 
 export interface DesktopMenuBridge {
   showContextMenu?: (input?: { kind?: "terminal"; hasSelection?: boolean }) => Promise<void>;
+  setCapturingShortcut?: (capturing: boolean) => Promise<void>;
 }
 
 export interface DesktopWindowControlsOverlayUpdate {
@@ -96,6 +108,7 @@ export interface DesktopWindowControlsOverlayUpdate {
 export interface DesktopWindowBridge {
   label?: string;
   toggleMaximize?: () => Promise<void>;
+  setFullscreen?: (fullscreen: boolean) => Promise<void>;
   isFullscreen?: () => Promise<boolean>;
   updateWindowControls?: (update: DesktopWindowControlsOverlayUpdate) => Promise<void>;
   onResized?: <TEvent = unknown>(
@@ -126,10 +139,32 @@ export interface DesktopBrowserNewTabRequestEvent {
   url: string;
 }
 
+export interface DesktopAttachedBrowserRegistration {
+  browserId: string;
+  workspaceId: string;
+  webContentsId: number;
+}
+
 export interface DesktopBrowserBridge {
-  setWorkspaceActiveBrowser?: (browserId: string | null) => Promise<void>;
+  readonly profilePartition?: string;
+  registerAttachedBrowser?: (input: DesktopAttachedBrowserRegistration) => Promise<void>;
+  unregisterWorkspaceBrowser?: (browserId: string) => Promise<void>;
+  setWorkspaceActiveBrowser?: (input: {
+    workspaceId: string;
+    browserId: string | null;
+  }) => Promise<void>;
   openDevTools?: (browserId: string) => Promise<unknown>;
-  clearPartition?: (browserId: string) => Promise<void>;
+  clearProfile?: (legacyBrowserIds: string[]) => Promise<void>;
+  executeAutomationCommand?: (
+    request: BrowserAutomationExecuteRequest,
+  ) => Promise<BrowserAutomationExecuteResponse["payload"]>;
+  /** Capture a PNG screenshot of the guest viewport cropped to `rect`. */
+  captureElement?: (
+    browserId: string,
+    rect: { x: number; y: number; width: number; height: number },
+  ) => Promise<string | null>;
+  /** Copy element text and/or an image to the system clipboard from main. */
+  copyElement?: (payload: { text?: string; imageDataUrl?: string }) => Promise<boolean>;
 }
 
 export interface DesktopInvokeBridge {

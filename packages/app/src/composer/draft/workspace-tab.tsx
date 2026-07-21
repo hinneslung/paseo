@@ -8,22 +8,13 @@ import { useKeyboardShiftStyle } from "@/hooks/use-keyboard-shift-style";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
 import invariant from "tiny-invariant";
 import { Composer } from "@/composer";
+import { FileDropZone } from "@/components/file-drop/file-drop-zone";
 import { DraftAgentModeControl } from "@/composer/agent-controls/mode-control";
 import { ComposerImportPill } from "@/composer/draft/import-pill";
-import { FileDropZone } from "@/components/file-drop-zone";
 import { AgentStreamView } from "@/agent-stream/view";
-import {
-  getMimeTypeFromPath,
-  isRasterImageFile,
-  isRasterImagePath,
-} from "@/attachments/file-types";
 import { composerWorkspaceAttachment } from "@/composer/attachments/workspace";
-import { uploadFileAttachments } from "@/composer/actions";
-import type { ImageAttachment } from "@/composer/types";
 import { useAgentInputDraft } from "@/composer/draft/input-draft";
 import type { CreateAgentInitialValues } from "@/hooks/use-agent-form-state";
-import { readDesktopFileBytes } from "@/hooks/use-file-picker";
-import type { DroppedItem } from "@/hooks/use-file-drop-zone";
 import { useDraftAgentCreateFlow, type DraftCreateAttempt } from "@/composer/draft/create-flow";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { buildWorkspaceDraftAgentConfig } from "@/screens/workspace/workspace-draft-agent-config";
@@ -36,14 +27,18 @@ import { useWorkspaceDraftSubmissionStore } from "@/stores/workspace-draft-submi
 import { encodeImages } from "@/utils/encode-images";
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { shouldAutoFocusWorkspaceDraftComposer } from "@/screens/workspace/workspace-draft-pane-focus";
-import { validateDraftSubmission } from "@/composer/draft/workspace-tab-core";
+import {
+  shouldAllowEmptyDraftText,
+  validateDraftSubmission,
+} from "@/composer/draft/workspace-tab-core";
 import type { AgentCapabilityFlags } from "@getpaseo/protocol/agent-types";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import type { UserComposerAttachment, WorkspaceComposerAttachment } from "@/attachments/types";
+import type { WorkspaceComposerAttachment } from "@/attachments/types";
 import {
-  useWorkspaceAttachments,
+  useDraftWorkspaceAttachmentScopeKey,
   useWorkspaceAttachmentScopeKey,
+  useWorkspaceAttachmentsStore,
 } from "@/attachments/workspace-attachments-store";
 import type { UserMessageImageAttachment } from "@/types/stream";
 import {
@@ -53,7 +48,6 @@ import {
 } from "@/constants/layout";
 import { isWeb } from "@/constants/platform";
 import type { WorkspaceDraftTabSetup } from "@/stores/workspace-tabs-store";
-import { resolveDroppedFileMentionPath } from "@/workspace/file-drop-mentions";
 import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 const EMPTY_PENDING_PERMISSIONS = new Map();
@@ -94,32 +88,46 @@ function resolveAutoSubmitConfig(
   };
 }
 
+// Reconcile the form's selected mode against the currently discovered modes.
+// The mode picker displays modeOptions[0] when the stored mode isn't in the
+// list (e.g. a globally-remembered "plan" that this workspace's OpenCode config
+// no longer defines), so the submitted mode must match that display — otherwise
+// we'd send a stale mode the provider rejects while the UI showed a valid one.
+function reconcileSelectedMode(modeOptionIds: readonly string[], selectedMode: string): string {
+  if (modeOptionIds.length === 0) {
+    return "";
+  }
+  return modeOptionIds.includes(selectedMode) ? selectedMode : (modeOptionIds[0] ?? "");
+}
+
 function resolveDraftModeIdOverride(input: {
   autoSubmitConfig: AutoSubmitConfig | null;
-  modeOptionsCount: number;
+  modeOptionIds: readonly string[];
   selectedMode: string;
 }): { modeId: string } | Record<string, never> {
-  const { autoSubmitConfig, modeOptionsCount, selectedMode } = input;
+  const { autoSubmitConfig, modeOptionIds, selectedMode } = input;
   if (autoSubmitConfig?.modeId) {
     return { modeId: autoSubmitConfig.modeId };
   }
-  if (modeOptionsCount > 0 && selectedMode !== "") {
-    return { modeId: selectedMode };
+  const reconciled = reconcileSelectedMode(modeOptionIds, selectedMode);
+  if (reconciled !== "") {
+    return { modeId: reconciled };
   }
   return {};
 }
 
 function resolveDraftModeId(input: {
   autoSubmitConfig: AutoSubmitConfig | null;
-  modeOptionsCount: number;
+  modeOptionIds: readonly string[];
   selectedMode: string;
 }): string | null {
-  const { autoSubmitConfig, modeOptionsCount, selectedMode } = input;
+  const { autoSubmitConfig, modeOptionIds, selectedMode } = input;
   if (autoSubmitConfig?.modeId !== undefined) {
     return autoSubmitConfig.modeId;
   }
-  if (modeOptionsCount > 0 && selectedMode !== "") {
-    return selectedMode;
+  const reconciled = reconcileSelectedMode(modeOptionIds, selectedMode);
+  if (reconciled !== "") {
+    return reconciled;
   }
   return null;
 }
@@ -129,6 +137,7 @@ async function submitDraftCreateRequest(input: {
   text: string;
   images?: UserMessageImageAttachment[];
   attachments?: unknown;
+  cwd: string;
   client: DaemonClient | null;
   workspaceDirectory: string | null;
   workspaceId: string | null;
@@ -136,7 +145,7 @@ async function submitDraftCreateRequest(input: {
   composerState: {
     selectedProvider: string | null;
     selectedMode: string;
-    modeOptions: unknown[];
+    modeOptions: readonly { id: string }[];
     effectiveModelId: string | null;
     effectiveThinkingOptionId: string | null;
     featureValues: Record<string, unknown> | undefined;
@@ -149,6 +158,7 @@ async function submitDraftCreateRequest(input: {
     text,
     images,
     attachments,
+    cwd,
     client,
     workspaceDirectory,
     workspaceId,
@@ -168,12 +178,12 @@ async function submitDraftCreateRequest(input: {
   }
   const modeIdOverride = resolveDraftModeIdOverride({
     autoSubmitConfig,
-    modeOptionsCount: composerState.modeOptions.length,
+    modeOptionIds: composerState.modeOptions.map((mode) => mode.id),
     selectedMode: composerState.selectedMode,
   });
   const config = buildWorkspaceDraftAgentConfig({
     provider,
-    cwd: workspaceDirectory,
+    cwd,
     ...modeIdOverride,
     model: autoSubmitConfig?.model ?? (composerState.effectiveModelId || undefined),
     thinkingOptionId:
@@ -207,7 +217,7 @@ function buildDraftAgentSnapshot(input: {
   composerState: {
     effectiveModelId: string | null;
     effectiveThinkingOptionId: string | null;
-    modeOptions: unknown[];
+    modeOptions: readonly { id: string }[];
     selectedMode: string;
     selectedProvider: string | null;
     agentControls: { features?: Agent["features"] };
@@ -222,7 +232,7 @@ function buildDraftAgentSnapshot(input: {
     autoSubmitConfig?.thinkingOptionId ?? (composerState.effectiveThinkingOptionId || null);
   const modeId = resolveDraftModeId({
     autoSubmitConfig,
-    modeOptionsCount: composerState.modeOptions.length,
+    modeOptionIds: composerState.modeOptions.map((mode) => mode.id),
     selectedMode: composerState.selectedMode,
   });
   const provider = autoSubmitConfig?.provider ?? composerState.selectedProvider;
@@ -290,28 +300,6 @@ function resolveOnlineServerIds(input: { isConnected: boolean; serverId: string 
   return [input.serverId];
 }
 
-function splitDroppedItemsForMentions(input: { items: DroppedItem[]; cwd: string }): {
-  mentionPaths: string[];
-  uploadItems: DroppedItem[];
-} {
-  const mentionPaths: string[] = [];
-  const uploadItems: DroppedItem[] = [];
-  for (const item of input.items) {
-    if (item.kind !== "file-uri") {
-      uploadItems.push(item);
-      continue;
-    }
-
-    const relativePath = resolveDroppedFileMentionPath({ path: item.path, cwd: input.cwd });
-    if (relativePath) {
-      mentionPaths.push(relativePath);
-      continue;
-    }
-    uploadItems.push({ kind: "desktop-path", path: item.path });
-  }
-  return { mentionPaths, uploadItems };
-}
-
 interface WorkspaceDraftAgentTabProps {
   serverId: string;
   workspaceId: string;
@@ -364,9 +352,6 @@ export function WorkspaceDraftAgentTab({
     initialSetup: draftSetup,
   });
   const onlineServerIds = resolveOnlineServerIds({ isConnected, serverId });
-  const addImagesRef = useRef<((images: ImageAttachment[]) => void) | null>(null);
-  const addFilesRef = useRef<((files: UserComposerAttachment[]) => void) | null>(null);
-  const addFileMentionsRef = useRef<((relativePaths: string[]) => void) | null>(null);
   const draftStoreKey = useMemo(
     () =>
       buildDraftStoreKey({
@@ -436,7 +421,14 @@ export function WorkspaceDraftAgentTab({
     cwd: composerState.workingDir,
     workspaceId,
   });
-  const workspaceAttachments = useWorkspaceAttachments(workspaceAttachmentScopeKey);
+  const draftAttachmentScopeKey = useDraftWorkspaceAttachmentScopeKey(draftId);
+  const attachmentScopeKeys = useMemo(
+    () => [draftAttachmentScopeKey, workspaceAttachmentScopeKey].filter(Boolean),
+    [draftAttachmentScopeKey, workspaceAttachmentScopeKey],
+  );
+  const clearWorkspaceAttachments = useWorkspaceAttachmentsStore(
+    (state) => state.clearWorkspaceAttachments,
+  );
   const openFileExplorerForCheckout = usePanelStore((state) => state.openFileExplorerForCheckout);
   const setExplorerTabForCheckout = usePanelStore((state) => state.setExplorerTabForCheckout);
   const handleOpenWorkspaceAttachment = useCallback(
@@ -473,15 +465,20 @@ export function WorkspaceDraftAgentTab({
     getPendingServerId: () => serverId,
     initialAttempt: initialCreateAttempt,
     allowEmptyText: allowsEmptyAutoSubmit,
-    validateBeforeSubmit: ({ text }) =>
-      validateDraftSubmission({
-        text,
+    validateBeforeSubmit: ({ text, attachments }) => {
+      const allowsEmptyDraftText = shouldAllowEmptyDraftText({
         allowsEmptyAutoSubmit,
+        attachments,
+      });
+      return validateDraftSubmission({
+        text,
+        allowsEmptyAutoSubmit: allowsEmptyDraftText,
         composerState,
         autoSubmitConfig,
         workspaceDirectory: draftWorkingDirectory,
         hasClient: Boolean(client),
-      }),
+      });
+    },
     onBeforeSubmit: async () => {
       await composerState.persistFormPreferences();
       if (isWeb) {
@@ -499,12 +496,13 @@ export function WorkspaceDraftAgentTab({
         composerState,
         selectModelMessage: t("workspaceSetup.errors.selectModel"),
       }),
-    createRequest: async ({ attempt, text, images, attachments }) =>
+    createRequest: async ({ attempt, text, images, attachments, cwd }) =>
       submitDraftCreateRequest({
         attempt,
         text,
         images,
         attachments,
+        cwd,
         client,
         workspaceDirectory: draftWorkingDirectory,
         workspaceId: workspaceFields?.id ?? null,
@@ -515,6 +513,8 @@ export function WorkspaceDraftAgentTab({
       }),
     onCreateSuccess: ({ result }) => {
       clearDraftInput("sent");
+      clearWorkspaceAttachments({ scopeKey: draftAttachmentScopeKey });
+      useWorkspaceDraftSubmissionStore.getState().clearDraftSetup({ draftId });
       onCreated(result);
     },
   });
@@ -573,67 +573,6 @@ export function WorkspaceDraftAgentTab({
     setDraftText,
     workspaceId,
   ]);
-
-  const handleFilesDropped = useCallback((files: ImageAttachment[]) => {
-    addImagesRef.current?.(files);
-  }, []);
-
-  const handleAddImagesCallback = useCallback((addImages: (images: ImageAttachment[]) => void) => {
-    addImagesRef.current = addImages;
-  }, []);
-
-  const handleAddFilesCallback = useCallback(
-    (addFiles: (files: UserComposerAttachment[]) => void) => {
-      addFilesRef.current = addFiles;
-    },
-    [],
-  );
-
-  const handleAddFileMentionsCallback = useCallback(
-    (addFileMentions: (relativePaths: string[]) => void) => {
-      addFileMentionsRef.current = addFileMentions;
-    },
-    [],
-  );
-
-  const handleGenericFilesDropped = useCallback(
-    async (items: DroppedItem[]) => {
-      const { mentionPaths, uploadItems } = splitDroppedItemsForMentions({
-        items,
-        cwd: composerState.workingDir,
-      });
-      if (mentionPaths.length > 0) {
-        addFileMentionsRef.current?.(mentionPaths);
-      }
-      if (!client || !isConnected) return;
-      const nonImageItems = uploadItems.filter((item) => {
-        if (item.kind === "web-file") return !isRasterImageFile(item.file);
-        return !isRasterImagePath(item.path);
-      });
-      if (nonImageItems.length === 0) return;
-      try {
-        const files = await Promise.all(
-          nonImageItems.map(async (item) => {
-            if (item.kind === "web-file") {
-              return {
-                fileName: item.file.name,
-                mimeType: item.file.type || getMimeTypeFromPath(item.file.name),
-                bytes: new Uint8Array(await item.file.arrayBuffer()),
-              };
-            }
-            const fileName = item.path.split("/").pop() ?? item.path.split("\\").pop() ?? item.path;
-            const bytes = await readDesktopFileBytes(item.path);
-            return { fileName, mimeType: getMimeTypeFromPath(item.path), bytes };
-          }),
-        );
-        const uploaded = await uploadFileAttachments({ client, files });
-        addFilesRef.current?.(uploaded);
-      } catch (error) {
-        console.error("[WorkspaceDraftAgentTab] Failed to upload dropped files:", error);
-      }
-    },
-    [client, composerState.workingDir, isConnected],
-  );
 
   const focusInputRef = useRef<(() => void) | null>(null);
 
@@ -742,75 +681,64 @@ export function WorkspaceDraftAgentTab({
   );
 
   return (
-    <FileDropZone
-      onFilesDropped={handleFilesDropped}
-      onGenericFilesDropped={handleGenericFilesDropped}
-    >
-      <View style={styles.container}>
-        <View style={styles.contentContainer}>
-          {isSubmitting && draftAgent ? (
-            <View style={styles.streamContainer}>
-              <AgentStreamView
-                agentId={tabId}
-                serverId={serverId}
-                agent={draftAgent}
-                streamItems={optimisticStreamItems}
-                pendingPermissions={EMPTY_PENDING_PERMISSIONS}
-                onOpenWorkspaceFile={onOpenWorkspaceFile}
-              />
+    <FileDropZone style={styles.container}>
+      <View style={styles.contentContainer}>
+        {isSubmitting && draftAgent ? (
+          <View style={styles.streamContainer}>
+            <AgentStreamView
+              agentId={tabId}
+              serverId={serverId}
+              context={draftAgent}
+              streamItems={optimisticStreamItems}
+              pendingPermissions={EMPTY_PENDING_PERMISSIONS}
+              onOpenWorkspaceFile={onOpenWorkspaceFile}
+            />
+          </View>
+        ) : (
+          <ScrollView style={styles.scrollView} contentContainerStyle={styles.configScrollContent}>
+            <View style={styles.configSection}>
+              {formErrorMessage ? (
+                <View style={styles.errorContainer}>
+                  <Text style={styles.errorText}>{formErrorMessage}</Text>
+                </View>
+              ) : null}
             </View>
-          ) : (
-            <ScrollView
-              style={styles.scrollView}
-              contentContainerStyle={styles.configScrollContent}
-            >
-              <View style={styles.configSection}>
-                {formErrorMessage ? (
-                  <View style={styles.errorContainer}>
-                    <Text style={styles.errorText}>{formErrorMessage}</Text>
-                  </View>
-                ) : null}
-              </View>
-            </ScrollView>
-          )}
-        </View>
-
-        <ReanimatedAnimated.View style={inputAreaWrapperStyle} onLayout={onInputAreaLayout}>
-          {importPillPress ? (
-            <View style={styles.importPillRow}>
-              <View style={styles.importPillContent}>
-                <ComposerImportPill onPress={importPillPress} />
-              </View>
-            </View>
-          ) : null}
-          <Composer
-            agentId={tabId}
-            serverId={serverId}
-            externalKeyboardShift
-            isPaneFocused={isPaneFocused}
-            onSubmitMessage={handleCreateFromInput}
-            isSubmitLoading={isSubmitting}
-            blurOnSubmit={true}
-            value={draftInput.text}
-            onChangeText={draftInput.setText}
-            attachments={draftInput.attachments}
-            workspaceAttachments={workspaceAttachments}
-            onOpenWorkspaceAttachment={handleOpenWorkspaceAttachment}
-            onChangeAttachments={draftInput.setAttachments}
-            cwd={composerState.workingDir}
-            clearDraft={draftInput.clear}
-            autoFocus={shouldAutoFocusWorkspaceDraftComposer({ isPaneFocused, isSubmitting })}
-            onAddImages={handleAddImagesCallback}
-            onAddFiles={handleAddFilesCallback}
-            onAddFileMentions={handleAddFileMentionsCallback}
-            onFocusInput={handleFocusInputCallback}
-            commandDraftConfig={composerState.commandDraftConfig}
-            agentControls={composerAgentControls}
-            footer={composerFooter}
-            isCompactLayout={isCompactComposerLayout}
-          />
-        </ReanimatedAnimated.View>
+          </ScrollView>
+        )}
       </View>
+
+      <ReanimatedAnimated.View style={inputAreaWrapperStyle} onLayout={onInputAreaLayout}>
+        {importPillPress ? (
+          <View style={styles.importPillRow}>
+            <View style={styles.importPillContent}>
+              <ComposerImportPill onPress={importPillPress} />
+            </View>
+          </View>
+        ) : null}
+        <Composer
+          agentId={tabId}
+          serverId={serverId}
+          externalKeyboardShift
+          isPaneFocused={isPaneFocused}
+          onSubmitMessage={handleCreateFromInput}
+          isSubmitLoading={isSubmitting}
+          blurOnSubmit={true}
+          value={draftInput.text}
+          onChangeText={draftInput.setText}
+          attachments={draftInput.attachments}
+          attachmentScopeKeys={attachmentScopeKeys}
+          onOpenWorkspaceAttachment={handleOpenWorkspaceAttachment}
+          onChangeAttachments={draftInput.setAttachments}
+          cwd={composerState.workingDir}
+          clearDraft={draftInput.clear}
+          autoFocus={shouldAutoFocusWorkspaceDraftComposer({ isPaneFocused, isSubmitting })}
+          onFocusInput={handleFocusInputCallback}
+          commandDraftConfig={composerState.commandDraftConfig}
+          agentControls={composerAgentControls}
+          footer={composerFooter}
+          isCompactLayout={isCompactComposerLayout}
+        />
+      </ReanimatedAnimated.View>
     </FileDropZone>
   );
 }

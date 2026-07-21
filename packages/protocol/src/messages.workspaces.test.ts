@@ -286,6 +286,76 @@ describe("workspace message schemas", () => {
     expect(parsed.type).toBe("open_project_request");
   });
 
+  test("parses a GitHub clone response that registers a project without a workspace", () => {
+    const request = SessionInboundMessageSchema.parse({
+      type: "project.github.clone.request",
+      repo: "a/b",
+      cloneProtocol: "https",
+      targetDirectory: "~/workspace",
+      requestId: "req-clone",
+    });
+    const response = SessionOutboundMessageSchema.parse({
+      type: "project.github.clone.response",
+      payload: {
+        requestId: "req-clone",
+        repo: "a/b",
+        checkoutPath: "/tmp/b",
+        project: {
+          projectId: "project-b",
+          projectDisplayName: "b",
+          projectRootPath: "/tmp/b",
+          projectKind: "git",
+        },
+        error: null,
+      },
+    });
+
+    expect(request.type).toBe("project.github.clone.request");
+    if (request.type !== "project.github.clone.request") {
+      throw new Error("expected project.github.clone.request");
+    }
+    expect(request.cloneProtocol).toBe("https");
+    expect(response.type).toBe("project.github.clone.response");
+    if (response.type !== "project.github.clone.response") {
+      throw new Error("expected project.github.clone.response");
+    }
+    expect(response.payload.project?.projectId).toBe("project-b");
+  });
+
+  test("rejects invalid project GitHub clone protocols", () => {
+    const request = SessionInboundMessageSchema.safeParse({
+      type: "project.github.clone.request",
+      repo: "a/b",
+      cloneProtocol: "ftp",
+      targetDirectory: "~/workspace",
+      requestId: "req-clone",
+    });
+
+    expect(request.success).toBe(false);
+  });
+
+  test("rejects project GitHub clone repo paths shorter than owner slash repo", () => {
+    const request = SessionInboundMessageSchema.safeParse({
+      type: "project.github.clone.request",
+      repo: "ab",
+      targetDirectory: "~/workspace",
+      requestId: "req-clone",
+    });
+    const response = SessionOutboundMessageSchema.safeParse({
+      type: "project.github.clone.response",
+      payload: {
+        requestId: "req-clone",
+        repo: "ab",
+        checkoutPath: null,
+        project: null,
+        error: "failed",
+      },
+    });
+
+    expect(request.success).toBe(false);
+    expect(response.success).toBe(false);
+  });
+
   test("parses legacy editor RPC messages for compatibility", () => {
     const listRequest = SessionInboundMessageSchema.parse({
       type: "list_available_editors_request",

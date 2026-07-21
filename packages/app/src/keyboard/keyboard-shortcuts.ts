@@ -121,8 +121,7 @@ const SHORTCUT_HELP_SECTION_LABEL_KEYS: Record<ShortcutSectionId, string> = {
 const SHORTCUT_HELP_LABEL_KEYS: Record<string, string> = {
   "new-agent": "settings.shortcuts.help.openProject",
   "new-workspace": "settings.shortcuts.help.newWorkspace",
-  "new-worktree": "settings.shortcuts.help.newWorktree",
-  "archive-worktree": "settings.shortcuts.help.archiveWorktree",
+  "archive-workspace": "settings.shortcuts.help.archiveWorkspace",
   "workspace-tab-new": "settings.shortcuts.help.newTab",
   "workspace-tab-close-current": "settings.shortcuts.help.closeCurrentTab",
   "workspace-jump-index": "settings.shortcuts.help.jumpToWorkspace",
@@ -166,29 +165,33 @@ const SHORTCUT_HELP_NOTE_KEYS: Record<string, string> = {
 // --- Binding definitions ---
 
 const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
-  // --- New agent ---
+  // --- Open project ---
+  // Open project moved from Cmd+Shift+O to Cmd+O. The binding ids intentionally
+  // keep their original "cmd-shift-o" / "ctrl-shift-o" names: user shortcut
+  // overrides are keyed by binding id, so renaming them would silently drop a
+  // user's customized Open project shortcut on upgrade.
   {
     id: "agent-new-cmd-shift-o-mac",
     action: "agent.new",
-    combo: "Cmd+Shift+O",
+    combo: "Cmd+O",
     when: { mac: true },
     help: {
       id: "new-agent",
       section: "projects",
       label: "Open project",
-      keys: ["mod", "shift", "O"],
+      keys: ["mod", "O"],
     },
   },
   {
     id: "agent-new-ctrl-shift-o-non-mac",
     action: "agent.new",
-    combo: "Ctrl+Shift+O",
+    combo: "Ctrl+O",
     when: { mac: false, terminal: false },
     help: {
       id: "new-agent",
       section: "projects",
       label: "Open project",
-      keys: ["mod", "shift", "O"],
+      keys: ["mod", "O"],
     },
   },
 
@@ -218,55 +221,59 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     },
   },
 
-  // --- New worktree ---
+  // --- Archive workspace ---
   {
-    id: "worktree-new-cmd-o-mac",
-    action: "worktree.new",
-    combo: "Cmd+O",
-    when: { mac: true, commandCenter: false },
-    help: {
-      id: "new-worktree",
-      section: "projects",
-      label: "New worktree",
-      keys: ["mod", "O"],
-    },
-  },
-  {
-    id: "worktree-new-ctrl-o-non-mac",
-    action: "worktree.new",
-    combo: "Ctrl+O",
-    when: { mac: false, commandCenter: false, terminal: false },
-    help: {
-      id: "new-worktree",
-      section: "projects",
-      label: "New worktree",
-      keys: ["mod", "O"],
-    },
-  },
-
-  // --- Archive worktree ---
-  {
+    // COMPAT(workspaceArchiveShortcutOverride): added in v0.1.106; remove after
+    // 2027-01-11 with a stored-override migration. Keeps existing custom chords.
     id: "worktree-archive-cmd-shift-backspace-mac",
-    action: "worktree.archive",
+    action: "workspace.archive",
     combo: "Cmd+Shift+Backspace",
     when: { mac: true, commandCenter: false },
     help: {
-      id: "archive-worktree",
+      id: "archive-workspace",
       section: "projects",
-      label: "Archive worktree",
+      label: "Archive workspace",
       keys: ["mod", "shift", "Backspace"],
     },
   },
   {
+    // COMPAT(workspaceArchiveShortcutOverride): added in v0.1.106; remove after
+    // 2027-01-11 with a stored-override migration. Keeps existing custom chords.
     id: "worktree-archive-ctrl-shift-backspace-non-mac",
-    action: "worktree.archive",
+    action: "workspace.archive",
     combo: "Ctrl+Shift+Backspace",
     when: { mac: false, commandCenter: false, terminal: false },
     help: {
-      id: "archive-worktree",
+      id: "archive-workspace",
       section: "projects",
-      label: "Archive worktree",
+      label: "Archive workspace",
       keys: ["mod", "shift", "Backspace"],
+    },
+  },
+
+  // --- Pin workspace ---
+  {
+    id: "workspace-pin-cmd-shift-p-mac",
+    action: "workspace.pin",
+    combo: "Cmd+Shift+P",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "pin-workspace",
+      section: "projects",
+      label: "Pin chat",
+      keys: ["mod", "shift", "P"],
+    },
+  },
+  {
+    id: "workspace-pin-ctrl-shift-p-non-mac",
+    action: "workspace.pin",
+    combo: "Ctrl+Shift+P",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "pin-workspace",
+      section: "projects",
+      label: "Pin chat",
+      keys: ["mod", "shift", "P"],
     },
   },
 

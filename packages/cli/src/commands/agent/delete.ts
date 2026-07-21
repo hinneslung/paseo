@@ -76,7 +76,7 @@ export async function runDeleteCommand(
         return isSameOrDescendantPath(options.cwd!, a.cwd);
       });
     } else if (id) {
-      const fetchResult = await client.fetchAgent(id);
+      const fetchResult = await client.fetchAgent({ agentId: id });
       if (!fetchResult) {
         const error: CommandError = {
           code: "AGENT_NOT_FOUND",
@@ -92,7 +92,7 @@ export async function runDeleteCommand(
       agents.map(async (agent) => {
         try {
           if (agent.status === "running") {
-            await client.cancelAgent(agent.id);
+            await client.cancelAgent(agent.id).catch(() => {});
           }
           await client.deleteAgent(agent.id);
           return { ok: true as const, id: agent.id };

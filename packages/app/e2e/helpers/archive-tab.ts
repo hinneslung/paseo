@@ -3,11 +3,12 @@ import { expect, type Page } from "@playwright/test";
 import { buildCreateAgentPreferences, buildSeededHost } from "./daemon-registry";
 import { getE2EDaemonPort } from "./daemon-port";
 import { getServerId } from "./server-id";
+import { expectAppRoute } from "./route-assertions";
 import { waitForWorkspaceTabsVisible } from "./workspace-tabs";
 import {
   buildHostAgentDetailRoute,
-  buildHostSessionsRoute,
   buildHostWorkspaceRoute,
+  buildSessionsRoute,
 } from "@/utils/host-routes";
 
 export interface ArchiveTabAgent {
@@ -39,6 +40,7 @@ export interface IdleAgentSeedClient {
     provider: string;
     model: string;
     modeId: string;
+    featureValues?: Record<string, unknown>;
     cwd: string;
     workspaceId: string;
     title: string;
@@ -57,7 +59,11 @@ export async function createIdleAgent(
   const created = await client.createAgent({
     provider: "opencode",
     model: "opencode/gpt-5-nano",
-    modeId: "bypassPermissions",
+    // OpenCode has no "bypassPermissions" mode (that's Claude's). Use build with
+    // auto_accept for unattended full access — mode validation now rejects modes
+    // the provider doesn't define.
+    modeId: "build",
+    featureValues: { auto_accept: true },
     cwd: input.cwd,
     workspaceId: input.workspaceId,
     title: input.title,
@@ -87,11 +93,13 @@ export async function archiveAgentFromDaemon(
 
 export async function fetchAgentArchivedAt(
   client: {
-    fetchAgent(agentId: string): Promise<{ agent: { archivedAt?: string | null } } | null>;
+    fetchAgent(options: {
+      agentId: string;
+    }): Promise<{ agent: { archivedAt?: string | null } } | null>;
   },
   agentId: string,
 ): Promise<string | null> {
-  const result = await client.fetchAgent(agentId);
+  const result = await client.fetchAgent({ agentId });
   return result?.agent.archivedAt ?? null;
 }
 
@@ -219,9 +227,7 @@ export async function openSessions(page: Page): Promise<void> {
   const sessionsButton = page.getByTestId("sidebar-sessions");
   await expect(sessionsButton).toBeVisible({ timeout: 30_000 });
   await sessionsButton.click();
-  await expect(page).toHaveURL(new RegExp(`${buildHostSessionsRoute(getServerId())}$`), {
-    timeout: 30_000,
-  });
+  await expectAppRoute(page, buildSessionsRoute(), { timeout: 30_000 });
   await expect(page.getByText("History", { exact: true }).last()).toBeVisible({
     timeout: 30_000,
   });

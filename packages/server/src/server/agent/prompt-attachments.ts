@@ -1,6 +1,40 @@
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
+import type { AgentPromptContentBlock, AgentPromptInput } from "./agent-sdk-types.js";
 
 const REVIEW_LINE_MARKERS = { add: "+", remove: "-", context: " " } as const;
+
+export function buildAgentPrompt(
+  text: string,
+  images?: Array<{ data: string; mimeType: string }>,
+  attachments?: AgentAttachment[],
+): AgentPromptInput {
+  const normalized = text.trim();
+  const hasImages = (images?.length ?? 0) > 0;
+  const hasAttachments = (attachments?.length ?? 0) > 0;
+  if (!hasImages && !hasAttachments) {
+    return normalized;
+  }
+
+  const chatHistoryAttachments: AgentAttachment[] = [];
+  const otherAttachments: AgentAttachment[] = [];
+  for (const attachment of attachments ?? []) {
+    if (attachment.type === "text" && attachment.contextKind === "chat_history") {
+      chatHistoryAttachments.push(attachment);
+    } else {
+      otherAttachments.push(attachment);
+    }
+  }
+
+  const blocks: AgentPromptContentBlock[] = [...chatHistoryAttachments];
+  if (normalized.length > 0) {
+    blocks.push({ type: "text", text: normalized });
+  }
+  for (const image of images ?? []) {
+    blocks.push({ type: "image", data: image.data, mimeType: image.mimeType });
+  }
+  blocks.push(...otherAttachments);
+  return blocks;
+}
 
 export function renderPromptAttachmentAsText(attachment: AgentAttachment): string {
   switch (attachment.type) {

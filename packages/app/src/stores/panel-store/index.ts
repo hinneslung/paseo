@@ -27,10 +27,12 @@ import {
   resolveDefaultAgentListOpen,
   selectIsAgentListOpen,
   selectIsFileExplorerOpen,
+  setMobilePanelTarget,
   selectPanelVisibility,
   type DesktopSidebarState,
   type ExplorerPanelIntent,
   type MobilePanelView,
+  type MobilePanelSelection,
   type PanelLayoutInput,
   type PanelVisibilityState,
   type SortOption,
@@ -42,6 +44,7 @@ export type {
   DesktopSidebarState,
   ExplorerPanelIntent,
   MobilePanelView,
+  MobilePanelSelection,
   PanelLayoutInput,
   PanelVisibilityState,
   SortOption,
@@ -62,8 +65,8 @@ export {
 };
 
 export interface PanelState {
-  // Mobile: which panel is currently shown
-  mobileView: MobilePanelView;
+  // Mobile: React's durable target plus the generation that owns it.
+  mobilePanel: MobilePanelSelection;
 
   // Desktop: independent sidebar toggles
   desktop: DesktopSidebarState;
@@ -73,6 +76,11 @@ export interface PanelState {
   explorerTabByCheckout: Record<string, ExplorerTab>;
   expandedPathsByWorkspace: Record<string, string[]>;
   diffExpandedPathsByWorkspace: Record<string, string[]>;
+  // Changes-view folder tree. Inverted semantics vs the fields above:
+  // this stores COLLAPSED directory paths (empty = all folders expanded), keyed
+  // by full uncompressed dir path, so folders default to expanded and new
+  // folders stay expanded as the diff changes.
+  diffCollapsedFoldersByWorkspace: Record<string, string[]>;
   sidebarWidth: number;
   explorerWidth: number;
   explorerSortOption: SortOption;
@@ -99,6 +107,7 @@ export interface PanelState {
   setExplorerTabForCheckout: (params: ExplorerCheckoutContext & { tab: ExplorerTab }) => void;
   setExpandedPathsForWorkspace: (workspaceKey: string, paths: string[]) => void;
   setDiffExpandedPathsForWorkspace: (workspaceKey: string, paths: string[]) => void;
+  setDiffCollapsedFoldersForWorkspace: (workspaceKey: string, dirPaths: string[]) => void;
   activateExplorerTabForCheckout: (checkout: ExplorerCheckoutContext) => void;
   setSidebarWidth: (width: number) => void;
   setExplorerWidth: (width: number) => void;
@@ -107,11 +116,19 @@ export interface PanelState {
   setExplorerFilesSplitRatio: (ratio: number) => void;
 }
 
+function setMobilePanelTargetPatch(
+  state: PanelState,
+  target: MobilePanelView,
+): PanelState | Pick<PanelState, "mobilePanel"> {
+  const mobilePanel = setMobilePanelTarget(state.mobilePanel, target);
+  return mobilePanel === state.mobilePanel ? state : { mobilePanel };
+}
+
 export const usePanelStore = create<PanelState>()(
   persist(
     (set) => ({
       // Mobile always starts at agent view
-      mobileView: "agent",
+      mobilePanel: { target: "agent", revision: 0 },
 
       // Desktop defaults based on platform
       desktop: {
@@ -125,6 +142,7 @@ export const usePanelStore = create<PanelState>()(
       explorerTabByCheckout: {},
       expandedPathsByWorkspace: {},
       diffExpandedPathsByWorkspace: {},
+      diffCollapsedFoldersByWorkspace: {},
       sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
       explorerWidth: DEFAULT_EXPLORER_SIDEBAR_WIDTH,
       explorerSortOption: "name",
@@ -136,26 +154,17 @@ export const usePanelStore = create<PanelState>()(
           desktop: { ...state.desktop, focusModeEnabled: !state.desktop.focusModeEnabled },
         })),
 
-      showMobileAgent: () =>
-        set((state) => {
-          if (state.mobileView === "agent") {
-            return state;
-          }
-          return { mobileView: "agent" as const };
-        }),
+      showMobileAgent: () => set((state) => setMobilePanelTargetPatch(state, "agent")),
 
-      showMobileAgentList: () =>
-        set((state) => {
-          if (state.mobileView === "agent-list") {
-            return state;
-          }
-          return { mobileView: "agent-list" as const };
-        }),
+      showMobileAgentList: () => set((state) => setMobilePanelTargetPatch(state, "agent-list")),
 
       toggleMobileAgentList: () =>
-        set((state) => ({
-          mobileView: state.mobileView === "agent-list" ? "agent" : "agent-list",
-        })),
+        set((state) =>
+          setMobilePanelTargetPatch(
+            state,
+            state.mobilePanel.target === "agent-list" ? "agent" : "agent-list",
+          ),
+        ),
 
       openDesktopAgentList: () =>
         set((state) => {
@@ -189,9 +198,7 @@ export const usePanelStore = create<PanelState>()(
       openAgentListForLayout: ({ isCompact }) =>
         set((state) => {
           if (isCompact) {
-            return state.mobileView === "agent-list"
-              ? state
-              : { mobileView: "agent-list" as const };
+            return setMobilePanelTargetPatch(state, "agent-list");
           }
           return state.desktop.agentListOpen
             ? state
@@ -201,7 +208,7 @@ export const usePanelStore = create<PanelState>()(
       closeAgentListForLayout: ({ isCompact }) =>
         set((state) => {
           if (isCompact) {
-            return state.mobileView === "agent" ? state : { mobileView: "agent" as const };
+            return setMobilePanelTargetPatch(state, "agent");
           }
           return state.desktop.agentListOpen
             ? { desktop: { ...state.desktop, agentListOpen: false } }
@@ -211,7 +218,10 @@ export const usePanelStore = create<PanelState>()(
       toggleAgentListForLayout: ({ isCompact }) =>
         set((state) => {
           if (isCompact) {
-            return { mobileView: state.mobileView === "agent-list" ? "agent" : "agent-list" };
+            return setMobilePanelTargetPatch(
+              state,
+              state.mobilePanel.target === "agent-list" ? "agent" : "agent-list",
+            );
           }
           return {
             desktop: { ...state.desktop, agentListOpen: !state.desktop.agentListOpen },
@@ -252,6 +262,13 @@ export const usePanelStore = create<PanelState>()(
             [workspaceKey]: paths,
           },
         })),
+      setDiffCollapsedFoldersForWorkspace: (workspaceKey, dirPaths) =>
+        set((state) => ({
+          diffCollapsedFoldersByWorkspace: {
+            ...state.diffCollapsedFoldersByWorkspace,
+            [workspaceKey]: dirPaths,
+          },
+        })),
       activateExplorerTabForCheckout: (checkout) =>
         set((state) => ({
           explorerTab: resolveExplorerTabForCheckout({
@@ -275,17 +292,17 @@ export const usePanelStore = create<PanelState>()(
     }),
     {
       name: "panel-state",
-      version: 11,
+      version: 12,
       storage: createJSONStorage(() => AsyncStorage),
       migrate: (persistedState, version) =>
         migratePanelState(persistedState, version, { isWeb }) as unknown as PanelState,
       partialize: (state) => ({
-        mobileView: state.mobileView,
         desktop: state.desktop,
         explorerTab: state.explorerTab,
         explorerTabByCheckout: state.explorerTabByCheckout,
         expandedPathsByWorkspace: state.expandedPathsByWorkspace,
         diffExpandedPathsByWorkspace: state.diffExpandedPathsByWorkspace,
+        diffCollapsedFoldersByWorkspace: state.diffCollapsedFoldersByWorkspace,
         sidebarWidth: state.sidebarWidth,
         explorerWidth: state.explorerWidth,
         explorerSortOption: state.explorerSortOption,
@@ -299,7 +316,7 @@ export const usePanelStore = create<PanelState>()(
 /**
  * Hook that provides platform-aware panel state.
  *
- * On mobile, uses the state machine (mobileView).
+ * On mobile, uses the revisioned mobile panel target.
  * On desktop, uses independent booleans (desktop.agentListOpen, desktop.fileExplorerOpen).
  *
  * @param isMobile - Whether the current breakpoint is mobile

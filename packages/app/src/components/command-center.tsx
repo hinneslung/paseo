@@ -9,12 +9,15 @@ import {
 } from "react-native";
 import { memo, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Home, Plus, Settings } from "lucide-react-native";
+import { Folder, Home, Plus, Settings } from "lucide-react-native";
 import { StyleSheet, useUnistyles, withUnistyles } from "react-native-unistyles";
-import { useCommandCenter } from "@/hooks/use-command-center";
-import type { AggregatedAgent } from "@/hooks/use-aggregated-agents";
-import { formatTimeAgo } from "@/utils/time";
-import { shortenPath } from "@/utils/shorten-path";
+import {
+  useCommandCenter,
+  type CommandCenterActionItem,
+  type CommandCenterAgentItem,
+  type CommandCenterItem,
+  type CommandCenterWorkspaceItem,
+} from "@/hooks/use-command-center";
 import { AgentStatusDot } from "@/components/agent-status-dot";
 import { Shortcut } from "@/components/ui/shortcut";
 import { isNative, isWeb } from "@/constants/platform";
@@ -29,12 +32,11 @@ import {
   BottomSheetTextInput,
 } from "@gorhom/bottom-sheet";
 
-function agentKey(agent: Pick<AggregatedAgent, "serverId" | "id">): string {
-  return `${agent.serverId}:${agent.id}`;
-}
-
 const ThemedBottomSheetTextInput = withUnistyles(BottomSheetTextInput, (theme) => ({
   placeholderTextColor: theme.colors.foregroundMuted,
+}));
+const ThemedFolder = withUnistyles(Folder, (theme) => ({
+  color: theme.colors.foregroundMuted,
 }));
 
 interface CommandCenterRowProps {
@@ -72,22 +74,25 @@ const CommandCenterRow = memo(function CommandCenterRow({
 });
 
 interface CommandCenterRowContainerProps {
+  item: CommandCenterItem;
   rowIndex: number;
   active: boolean;
   rowRefs: React.MutableRefObject<Map<number, View>>;
-  onPress: () => void;
+  onSelect: (item: CommandCenterItem) => void;
   onLayout?: (event: { nativeEvent: { layout: { y: number; height: number } } }) => void;
   children: ReactNode;
 }
 
 function CommandCenterRowContainer({
+  item,
   rowIndex,
   active,
   rowRefs,
-  onPress,
+  onSelect,
   onLayout,
   children,
 }: CommandCenterRowContainerProps) {
+  const handlePress = useCallback(() => onSelect(item), [onSelect, item]);
   const registerRow = useCallback(
     (el: View | null) => {
       if (el) rowRefs.current.set(rowIndex, el);
@@ -99,7 +104,7 @@ function CommandCenterRowContainer({
     <CommandCenterRow
       active={active}
       registerRow={registerRow}
-      onPress={onPress}
+      onPress={handlePress}
       onLayout={onLayout}
     >
       {children}
@@ -108,12 +113,12 @@ function CommandCenterRowContainer({
 }
 
 interface CommandCenterActionRowProps {
-  item: Extract<ReturnType<typeof useCommandCenter>["items"][number], { kind: "action" }>;
+  item: CommandCenterActionItem;
   rowIndex: number;
   active: boolean;
   rowRefs: React.MutableRefObject<Map<number, View>>;
   onLayout?: (event: { nativeEvent: { layout: { y: number; height: number } } }) => void;
-  onSelect: (item: ReturnType<typeof useCommandCenter>["items"][number]) => void;
+  onSelect: (item: CommandCenterItem) => void;
 }
 
 function CommandCenterActionRow({
@@ -125,14 +130,12 @@ function CommandCenterActionRow({
   onSelect,
 }: CommandCenterActionRowProps) {
   const { theme } = useUnistyles();
-  const handlePress = useCallback(() => onSelect(item), [onSelect, item]);
-  const action = item.action;
   let actionIcon: React.ReactNode = null;
-  if (action.icon === "plus") {
+  if (item.icon === "plus") {
     actionIcon = <Plus size={16} strokeWidth={2.4} color={theme.colors.foregroundMuted} />;
-  } else if (action.icon === "settings") {
+  } else if (item.icon === "settings") {
     actionIcon = <Settings size={16} strokeWidth={2.2} color={theme.colors.foregroundMuted} />;
-  } else if (action.icon === "home") {
+  } else if (item.icon === "home") {
     actionIcon = <Home size={16} strokeWidth={2.2} color={theme.colors.foregroundMuted} />;
   }
   const titleStyle = useMemo(
@@ -141,10 +144,11 @@ function CommandCenterActionRow({
   );
   return (
     <CommandCenterRowContainer
+      item={item}
       rowIndex={rowIndex}
       active={active}
       rowRefs={rowRefs}
-      onPress={handlePress}
+      onSelect={onSelect}
       onLayout={onLayout}
     >
       <View style={styles.rowContent}>
@@ -152,58 +156,25 @@ function CommandCenterActionRow({
           {actionIcon ? <View style={styles.iconSlot}>{actionIcon}</View> : null}
           <View style={styles.textContent}>
             <Text style={titleStyle} numberOfLines={1}>
-              {action.title}
+              {item.title}
             </Text>
           </View>
         </View>
-        {action.shortcutKeys ? (
-          <Shortcut chord={action.shortcutKeys} style={styles.rowShortcut} />
+        {item.shortcutKeys ? (
+          <Shortcut chord={item.shortcutKeys} style={styles.rowShortcut} />
         ) : null}
       </View>
     </CommandCenterRowContainer>
   );
 }
 
-interface CommandCenterAgentRowProps {
-  item: Extract<ReturnType<typeof useCommandCenter>["items"][number], { kind: "agent" }>;
-  rowIndex: number;
-  active: boolean;
-  rowRefs: React.MutableRefObject<Map<number, View>>;
-  onLayout?: (event: { nativeEvent: { layout: { y: number; height: number } } }) => void;
-  onSelect: (item: ReturnType<typeof useCommandCenter>["items"][number]) => void;
-  children: ReactNode;
-}
-
-function CommandCenterAgentRow({
-  rowIndex,
-  active,
-  rowRefs,
-  onLayout,
-  onSelect,
-  item,
-  children,
-}: CommandCenterAgentRowProps) {
-  const handlePress = useCallback(() => onSelect(item), [onSelect, item]);
-  return (
-    <CommandCenterRowContainer
-      rowIndex={rowIndex}
-      active={active}
-      rowRefs={rowRefs}
-      onPress={handlePress}
-      onLayout={onLayout}
-    >
-      {children}
-    </CommandCenterRowContainer>
-  );
-}
-
 interface CommandCenterAgentRowContentProps {
-  agent: AggregatedAgent;
+  item: CommandCenterAgentItem;
 }
 
-function CommandCenterAgentRowContent({ agent }: CommandCenterAgentRowContentProps) {
+function CommandCenterAgentRowContent({ item }: CommandCenterAgentRowContentProps) {
   const { theme } = useUnistyles();
-  const { t } = useTranslation();
+  const agent = item.agent;
   const titleStyle = useMemo(
     () => [styles.title, { color: theme.colors.foreground }],
     [theme.colors.foreground],
@@ -213,7 +184,7 @@ function CommandCenterAgentRowContent({ agent }: CommandCenterAgentRowContentPro
     [theme.colors.foregroundMuted],
   );
   return (
-    <View style={styles.rowContent}>
+    <View style={styles.rowContent} testID={`command-center-agent-${agent.serverId}:${agent.id}`}>
       <View style={styles.rowMain}>
         <View style={styles.iconSlot}>
           <AgentStatusDot
@@ -224,10 +195,10 @@ function CommandCenterAgentRowContent({ agent }: CommandCenterAgentRowContentPro
         </View>
         <View style={styles.textContent}>
           <Text style={titleStyle} numberOfLines={1}>
-            {agent.title || t("shell.commandCenter.newAgent")}
+            {item.title}
           </Text>
-          <Text style={subtitleStyle} numberOfLines={1}>
-            {shortenPath(agent.cwd)} · {formatTimeAgo(agent.lastActivityAt)}
+          <Text style={subtitleStyle} numberOfLines={1} testID="command-center-agent-subtitle">
+            {item.subtitle}
           </Text>
         </View>
       </View>
@@ -236,21 +207,21 @@ function CommandCenterAgentRowContent({ agent }: CommandCenterAgentRowContentPro
 }
 
 interface AgentItemsSectionProps {
-  agentItems: Extract<ReturnType<typeof useCommandCenter>["items"][number], { kind: "agent" }>[];
-  actionItemsLength: number;
+  agentItems: CommandCenterAgentItem[];
+  startIndex: number;
   activeIndex: number;
   rowRefs: React.MutableRefObject<Map<number, View>>;
   onRowLayout: (
     rowIndex: number,
   ) => (event: { nativeEvent: { layout: { y: number; height: number } } }) => void;
-  onSelect: (item: ReturnType<typeof useCommandCenter>["items"][number]) => void;
+  onSelect: (item: CommandCenterItem) => void;
   sectionDividerStyle: React.ComponentProps<typeof View>["style"];
   sectionLabelStyle: React.ComponentProps<typeof Text>["style"];
 }
 
 function AgentItemsSection({
   agentItems,
-  actionItemsLength,
+  startIndex,
   activeIndex,
   rowRefs,
   onRowLayout,
@@ -262,14 +233,14 @@ function AgentItemsSection({
 
   return (
     <>
-      {actionItemsLength > 0 ? <View style={sectionDividerStyle} /> : null}
+      {startIndex > 0 ? <View style={sectionDividerStyle} /> : null}
       <Text style={sectionLabelStyle}>{t("shell.commandCenter.agents")}</Text>
       {agentItems.map((item, index) => {
-        const rowIndex = actionItemsLength + index;
+        const rowIndex = startIndex + index;
         const agent = item.agent;
         return (
-          <CommandCenterAgentRow
-            key={agentKey(agent)}
+          <CommandCenterRowContainer
+            key={`${agent.serverId}:${agent.id}`}
             item={item}
             rowIndex={rowIndex}
             active={rowIndex === activeIndex}
@@ -277,8 +248,74 @@ function AgentItemsSection({
             onLayout={onRowLayout(rowIndex)}
             onSelect={onSelect}
           >
-            <CommandCenterAgentRowContent agent={agent} />
-          </CommandCenterAgentRow>
+            <CommandCenterAgentRowContent item={item} />
+          </CommandCenterRowContainer>
+        );
+      })}
+    </>
+  );
+}
+
+interface WorkspaceItemsSectionProps {
+  workspaceItems: CommandCenterWorkspaceItem[];
+  startIndex: number;
+  activeIndex: number;
+  rowRefs: React.MutableRefObject<Map<number, View>>;
+  onRowLayout: (
+    rowIndex: number,
+  ) => (event: { nativeEvent: { layout: { y: number; height: number } } }) => void;
+  onSelect: (item: CommandCenterItem) => void;
+  sectionDividerStyle: React.ComponentProps<typeof View>["style"];
+  sectionLabelStyle: React.ComponentProps<typeof Text>["style"];
+}
+
+function WorkspaceItemsSection({
+  workspaceItems,
+  startIndex,
+  activeIndex,
+  rowRefs,
+  onRowLayout,
+  onSelect,
+  sectionDividerStyle,
+  sectionLabelStyle,
+}: WorkspaceItemsSectionProps) {
+  const { t } = useTranslation();
+
+  return (
+    <>
+      {startIndex > 0 ? <View style={sectionDividerStyle} /> : null}
+      <Text style={sectionLabelStyle}>{t("shell.commandCenter.workspaces")}</Text>
+      {workspaceItems.map((item, index) => {
+        const rowIndex = startIndex + index;
+        return (
+          <CommandCenterRowContainer
+            key={`${item.serverId}:${item.workspaceId}`}
+            item={item}
+            rowIndex={rowIndex}
+            active={rowIndex === activeIndex}
+            rowRefs={rowRefs}
+            onSelect={onSelect}
+            onLayout={onRowLayout(rowIndex)}
+          >
+            <View
+              style={styles.rowContent}
+              testID={`command-center-workspace-${item.serverId}:${item.workspaceId}`}
+            >
+              <View style={styles.rowMain}>
+                <View style={styles.iconSlot}>
+                  <ThemedFolder size={16} strokeWidth={2.2} />
+                </View>
+                <View style={styles.textContent}>
+                  <Text style={styles.title} numberOfLines={1}>
+                    {item.title}
+                  </Text>
+                  <Text style={styles.subtitle} numberOfLines={1}>
+                    {item.subtitle}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </CommandCenterRowContainer>
         );
       })}
     </>
@@ -299,10 +336,8 @@ export function CommandCenter() {
     handleSelectItem,
     handleKeyEvent,
   } = useCommandCenter();
-
   const isCompact = useIsCompactFormFactor();
   const showBottomSheet = isCompact && isNative;
-
   const rowRefs = useRef<Map<number, View>>(new Map());
   const rowLayouts = useRef<Map<number, { y: number; height: number }>>(new Map());
   const resultsRef = useRef<ScrollView>(null);
@@ -402,6 +437,7 @@ export function CommandCenter() {
   );
 
   const actionItems = useMemo(() => items.filter((item) => item.kind === "action"), [items]);
+  const workspaceItems = useMemo(() => items.filter((item) => item.kind === "workspace"), [items]);
   const agentItems = useMemo(() => items.filter((item) => item.kind === "agent"), [items]);
 
   const panelStyle = useMemo(
@@ -431,6 +467,14 @@ export function CommandCenter() {
     () => [styles.sectionDivider, { backgroundColor: theme.colors.border }],
     [theme.colors.border],
   );
+  const sheetBackgroundStyle = useMemo(
+    () => ({ backgroundColor: theme.colors.surface0 }),
+    [theme.colors.surface0],
+  );
+  const sheetHandleStyle = useMemo(
+    () => ({ backgroundColor: theme.colors.palette.zinc[600] }),
+    [theme.colors.palette.zinc],
+  );
 
   const handleKeyPress = useCallback(
     ({ nativeEvent: { key } }: { nativeEvent: { key: string } }) => {
@@ -455,7 +499,7 @@ export function CommandCenter() {
             <Text style={sectionLabelStyle}>{t("shell.commandCenter.actions")}</Text>
             {actionItems.map((item, index) => (
               <CommandCenterActionRow
-                key={`action:${item.action.id}`}
+                key={`action:${item.id}`}
                 item={item}
                 rowIndex={index}
                 active={index === activeIndex}
@@ -467,10 +511,23 @@ export function CommandCenter() {
           </>
         ) : null}
 
+        {workspaceItems.length > 0 ? (
+          <WorkspaceItemsSection
+            workspaceItems={workspaceItems}
+            startIndex={actionItems.length}
+            activeIndex={activeIndex}
+            rowRefs={rowRefs}
+            onRowLayout={handleRowLayout}
+            onSelect={handleSelectItem}
+            sectionDividerStyle={sectionDividerStyle}
+            sectionLabelStyle={sectionLabelStyle}
+          />
+        ) : null}
+
         {agentItems.length > 0 ? (
           <AgentItemsSection
             agentItems={agentItems}
-            actionItemsLength={actionItems.length}
+            startIndex={actionItems.length + workspaceItems.length}
             activeIndex={activeIndex}
             rowRefs={rowRefs}
             onRowLayout={handleRowLayout}
@@ -494,6 +551,8 @@ export function CommandCenter() {
         onDismiss={handleSheetDismiss}
         backdropComponent={renderBackdrop}
         enablePanDownToClose
+        backgroundStyle={sheetBackgroundStyle}
+        handleIndicatorStyle={sheetHandleStyle}
         keyboardBehavior="extend"
         keyboardBlurBehavior="restore"
         accessible={false}
@@ -595,7 +654,7 @@ const styles = StyleSheet.create((theme) => ({
     borderBottomWidth: 1,
   },
   input: {
-    fontSize: theme.fontSize.lg,
+    fontSize: theme.fontSize.base,
     paddingVertical: theme.spacing[1],
     outlineStyle: "none",
   } as object,
@@ -649,13 +708,15 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 0,
   },
   title: {
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
     fontWeight: "400",
     lineHeight: 20,
+    color: theme.colors.foreground,
   },
   subtitle: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.xs,
     lineHeight: 18,
+    color: theme.colors.foregroundMuted,
   },
   emptyText: {
     paddingHorizontal: theme.spacing[4],

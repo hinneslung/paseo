@@ -123,8 +123,8 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
   const updatePendingAgentId = useCreateFlowStore((state) => state.updateAgentId);
   const markPendingCreateLifecycle = useCreateFlowStore((state) => state.markLifecycle);
   const clearPendingCreateAttempt = useCreateFlowStore((state) => state.clear);
-  const appendOptimisticUserMessageToAgentStream = useSessionStore(
-    (state) => state.appendOptimisticUserMessageToAgentStream,
+  const handoffCreatedAgentUserMessage = useSessionStore(
+    (state) => state.handoffCreatedAgentUserMessage,
   );
 
   const formErrorMessage = machine.tag === "draft" ? machine.errorMessage : "";
@@ -189,7 +189,7 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
 
         if (createResult.agentId) {
           updatePendingAgentId({ draftId, agentId: createResult.agentId });
-          appendOptimisticUserMessageToAgentStream(
+          handoffCreatedAgentUserMessage(
             pendingServerId,
             createResult.agentId,
             buildOptimisticUserMessage({
@@ -199,7 +199,6 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
               images: attempt.images,
               attachments: attempt.attachments,
             }),
-            { placement: "tail", skipIfUserMessageExists: true },
           );
           markPendingCreateLifecycle({ draftId, lifecycle: "sent" });
         }
@@ -216,7 +215,7 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
       }
     },
     [
-      appendOptimisticUserMessageToAgentStream,
+      handoffCreatedAgentUserMessage,
       clearPendingCreateAttempt,
       createRequest,
       draftId,
@@ -241,7 +240,8 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
       const images = wirePayload.images;
 
       const trimmedPrompt = text.trim();
-      if (!trimmedPrompt && !allowEmptyText) {
+      const hasAttachmentContent = images.length > 0 || wirePayload.attachments.length > 0;
+      if (!trimmedPrompt && !hasAttachmentContent && !allowEmptyText) {
         const error = new Error(t("composer.errors.initialPromptRequired"));
         dispatch({ type: "DRAFT_SET_ERROR", message: error.message });
         throw error;

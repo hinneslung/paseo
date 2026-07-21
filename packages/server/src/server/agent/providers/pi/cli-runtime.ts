@@ -15,6 +15,7 @@ import type {
   PiAgentMessage,
   PiCommandsRpcType,
   PiModel,
+  PiPromptAck,
   PiRpcCommand,
   PiRpcResponse,
   PiRpcSlashCommand,
@@ -136,8 +137,19 @@ class PiCliRuntimeSession implements PiRuntimeSession {
   async prompt(
     message: string,
     images?: Array<{ type: "image"; data: string; mimeType: string }>,
-  ): Promise<void> {
-    await this.request({ type: "prompt", message, ...(images?.length ? { images } : {}) });
+  ): Promise<PiPromptAck> {
+    const data = await this.request({
+      type: "prompt",
+      message,
+      ...(images?.length ? { images } : {}),
+    });
+    if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+      const { agentInvoked } = data as Record<string, unknown>;
+      if (typeof agentInvoked === "boolean") {
+        return { agentInvoked };
+      }
+    }
+    return {};
   }
 
   async compact(customInstructions?: string): Promise<void> {
@@ -180,7 +192,35 @@ class PiCliRuntimeSession implements PiRuntimeSession {
   }
 
   async getSessionStats(): Promise<PiSessionStats> {
-    return (await this.request({ type: "get_session_stats" })) as PiSessionStats;
+    // COMPAT(piGetStateFallback): added in v0.1.105 — older Oh My Pi binaries
+    // lack the `get_session_stats` RPC command; fall back to extracting
+    // context window usage from `get_state`. Remove after 2027-01-10 once the
+    // supported Oh My Pi floor includes `get_session_stats`.
+    let stats: PiSessionStats | undefined;
+    try {
+      stats = (await this.request({ type: "get_session_stats" })) as PiSessionStats;
+    } catch {
+      // get_session_stats not supported by this binary — will try get_state below
+    }
+    if (stats?.tokens == null && stats?.cost == null && stats?.contextUsage == null) {
+      try {
+        const state = (await this.request({ type: "get_state" })) as Record<string, unknown>;
+        const ctx = state.contextUsage as
+          | { tokens?: number | null; contextWindow?: number | null }
+          | undefined;
+        if (ctx) {
+          return {
+            contextUsage: {
+              tokens: typeof ctx.tokens === "number" ? ctx.tokens : undefined,
+              contextWindow: typeof ctx.contextWindow === "number" ? ctx.contextWindow : undefined,
+            },
+          };
+        }
+      } catch {
+        // get_state also failed — nothing we can do
+      }
+    }
+    return stats ?? {};
   }
 
   async getCommands(): Promise<PiRpcSlashCommand[]> {

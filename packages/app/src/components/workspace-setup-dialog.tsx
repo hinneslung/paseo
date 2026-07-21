@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Image, Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { createNameId } from "mnemonic-id";
 import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
+import { FileDropZone } from "@/components/file-drop/file-drop-zone";
 import { Composer } from "@/composer";
 import { DraftAgentModeControl } from "@/composer/agent-controls/mode-control";
 import { useToast } from "@/contexts/toast-context";
@@ -25,8 +26,8 @@ import type {
 import { projectIconPlaceholderLabelFromDisplayName } from "@/utils/project-display-name";
 import { requireWorkspaceDirectory } from "@/utils/workspace-directory";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
-import { navigateToPreparedWorkspaceTab } from "@/utils/workspace-navigation";
-import type { ImageAttachment, MessagePayload } from "@/composer/types";
+import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
+import type { MessagePayload } from "@/composer/types";
 
 function toProjectIconDataUri(icon: { mimeType: string; data: string } | null): string | null {
   if (!icon) {
@@ -131,13 +132,20 @@ function buildCreateAgentOptions({
   workspaceId: string;
   provider: CreateAgentRequestOptions["provider"];
 }): CreateAgentRequestOptions {
+  // Reconcile the selected mode against the discovered modes. The mode picker
+  // shows modeOptions[0] when the stored mode isn't in the list (e.g. a stale
+  // globally-remembered mode this workspace's provider config no longer
+  // defines), so the submitted mode must match that display rather than send a
+  // stale mode the provider would reject.
+  const modeOptionIds = composerState.modeOptions.map((mode) => mode.id);
+  const reconciledMode = modeOptionIds.includes(composerState.selectedMode)
+    ? composerState.selectedMode
+    : (modeOptionIds[0] ?? "");
   return {
     provider,
     cwd: workspaceDirectory,
     workspaceId,
-    ...(composerState.modeOptions.length > 0 && composerState.selectedMode !== ""
-      ? { modeId: composerState.selectedMode }
-      : {}),
+    ...(reconciledMode !== "" ? { modeId: reconciledMode } : {}),
     ...(composerState.effectiveModelId ? { model: composerState.effectiveModelId } : {}),
     ...(composerState.effectiveThinkingOptionId
       ? { thinkingOptionId: composerState.effectiveThinkingOptionId }
@@ -217,7 +225,7 @@ export function WorkspaceSetupDialog() {
         return;
       }
 
-      navigateToPreparedWorkspaceTab({
+      navigateToWorkspace({
         serverId: pendingWorkspaceSetup.serverId,
         workspaceId,
         target,
@@ -363,14 +371,6 @@ export function WorkspaceSetupDialog() {
   const placeholderLabel = projectIconPlaceholderLabelFromDisplayName(workspaceTitle);
   const placeholderInitial = placeholderLabel.charAt(0).toUpperCase();
 
-  const addImagesRef = useRef<((images: ImageAttachment[]) => void) | null>(null);
-  const handleFilesDropped = useCallback((files: ImageAttachment[]) => {
-    addImagesRef.current?.(files);
-  }, []);
-  const handleAddImagesCallback = useCallback((addImages: (images: ImageAttachment[]) => void) => {
-    addImagesRef.current = addImages;
-  }, []);
-
   const isCompact = useIsCompactFormFactor();
   const iconSource = useMemo(() => (iconDataUri ? { uri: iconDataUri } : null), [iconDataUri]);
   const agentControlsWithDisabled = useMemo(
@@ -427,9 +427,8 @@ export function WorkspaceSetupDialog() {
       snapPoints={SNAP_POINTS}
       testID="workspace-setup-dialog"
       desktopMaxWidth={640}
-      onFilesDropped={handleFilesDropped}
     >
-      <View style={styles.section}>
+      <FileDropZone style={styles.section}>
         <Composer
           agentId={`workspace-setup:${serverId}:${sourceDirectory}`}
           serverId={serverId}
@@ -447,10 +446,9 @@ export function WorkspaceSetupDialog() {
           commandDraftConfig={composerState?.commandDraftConfig}
           agentControls={agentControlsWithDisabled}
           inputWrapperStyle={styles.composerInputWrapper}
-          onAddImages={handleAddImagesCallback}
           footer={composerFooter}
         />
-      </View>
+      </FileDropZone>
 
       {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
     </AdaptiveModalSheet>

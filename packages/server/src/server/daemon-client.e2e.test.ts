@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import path from "node:path";
@@ -197,12 +197,12 @@ test("createAgent with background initialPrompt returns a running snapshot befor
 
     expect(agent.status).toBe("running");
 
-    const fetchedWhileRunning = await client.fetchAgent(agent.id);
+    const fetchedWhileRunning = await client.fetchAgent({ agentId: agent.id });
     expect(fetchedWhileRunning?.agent.status).toBe("running");
 
     await new Promise((resolve) => setTimeout(resolve, 350));
 
-    const fetchedAfterCompletion = await client.fetchAgent(agent.id);
+    const fetchedAfterCompletion = await client.fetchAgent({ agentId: agent.id });
     expect(fetchedAfterCompletion?.agent.status).toBe("idle");
   } finally {
     await client.close();
@@ -210,105 +210,120 @@ test("createAgent with background initialPrompt returns a running snapshot befor
   }
 });
 
+interface StubAgentOptions {
+  sessionId: string;
+  supportsStreaming: boolean;
+  startError?: string;
+  interruptError?: string;
+}
+
+class StubAgentSession implements AgentSession {
+  readonly provider = "codex" as const;
+  readonly capabilities;
+  private activeTurnId: string | null = null;
+
+  constructor(private readonly options: StubAgentOptions) {
+    this.capabilities = {
+      supportsStreaming: options.supportsStreaming,
+      supportsSessionPersistence: true,
+      supportsDynamicModes: false,
+      supportsMcpServers: false,
+      supportsReasoningStream: false,
+      supportsToolInvocations: false,
+      supportsRewindConversation: false,
+      supportsRewindFiles: false,
+      supportsRewindBoth: false,
+    } as const;
+  }
+
+  get id(): string {
+    return this.options.sessionId;
+  }
+
+  async run(): Promise<AgentRunResult> {
+    return { sessionId: this.id, finalText: "", timeline: [] };
+  }
+
+  async startTurn(): Promise<{ turnId: string }> {
+    if (this.options.startError) throw new Error(this.options.startError);
+    if (this.activeTurnId) throw new Error("A foreground turn is already active");
+    this.activeTurnId = "provider-owned-turn";
+    return { turnId: this.activeTurnId };
+  }
+
+  subscribe(): () => void {
+    return () => undefined;
+  }
+
+  async *streamHistory(): AsyncGenerator<AgentStreamEvent> {}
+
+  async getRuntimeInfo() {
+    return {
+      provider: this.provider,
+      sessionId: this.id,
+      model: "gpt-5.4-mini",
+      modeId: "full-access",
+    };
+  }
+
+  async getAvailableModes() {
+    return [{ id: "full-access", label: "Full access", description: "No prompts" }];
+  }
+
+  async getCurrentMode(): Promise<string> {
+    return "full-access";
+  }
+
+  async setMode(): Promise<void> {}
+  getPendingPermissions() {
+    return [];
+  }
+  async respondToPermission(): Promise<void> {}
+  describePersistence(): AgentPersistenceHandle {
+    return { provider: this.provider, sessionId: this.id };
+  }
+  async interrupt(): Promise<void> {
+    if (this.options.interruptError) throw new Error(this.options.interruptError);
+  }
+  async close(): Promise<void> {
+    this.activeTurnId = null;
+  }
+}
+
+class StubAgentClient implements AgentClient {
+  readonly provider = "codex" as const;
+  readonly capabilities;
+
+  constructor(private readonly options: StubAgentOptions) {
+    this.capabilities = new StubAgentSession(options).capabilities;
+  }
+
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+  async createSession(): Promise<AgentSession> {
+    return new StubAgentSession(this.options);
+  }
+  async resumeSession(): Promise<AgentSession> {
+    return new StubAgentSession(this.options);
+  }
+  async fetchCatalog() {
+    return {
+      models: [{ id: "gpt-5.4-mini", label: "GPT-5.4 mini", provider: this.provider }],
+      modes: [{ id: "full-access", label: "Full access", description: "No prompts" }],
+    };
+  }
+}
+
 test("createAgent fails when the initial turn cannot start", async () => {
-  class StartTurnFailureSession implements AgentSession {
-    readonly provider = "codex" as const;
-    readonly id = "start-turn-failure-session";
-    readonly capabilities = {
-      supportsStreaming: false,
-      supportsSessionPersistence: true,
-      supportsDynamicModes: false,
-      supportsMcpServers: false,
-      supportsReasoningStream: false,
-      supportsToolInvocations: false,
-      supportsRewindConversation: false,
-      supportsRewindFiles: false,
-      supportsRewindBoth: false,
-    } as const;
-
-    async run(): Promise<AgentRunResult> {
-      return {
-        sessionId: this.id,
-        finalText: "",
-        timeline: [],
-      };
-    }
-
-    async startTurn(): Promise<{ turnId: string }> {
-      throw new Error("Initial turn failed to start");
-    }
-
-    subscribe(): () => void {
-      return () => undefined;
-    }
-
-    async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
-      yield* [];
-    }
-
-    async getRuntimeInfo() {
-      return {
-        provider: "codex" as const,
-        sessionId: this.id,
-        model: "gpt-5.4-mini",
-        modeId: "full-access",
-      };
-    }
-
-    async getAvailableModes(): Promise<Array<{ id: string; label: string; description: string }>> {
-      return [{ id: "full-access", label: "Full access", description: "No prompts" }];
-    }
-
-    async getCurrentMode(): Promise<string | null> {
-      return "full-access";
-    }
-
-    async setMode(): Promise<void> {}
-
-    getPendingPermissions() {
-      return [];
-    }
-
-    async respondToPermission(): Promise<void> {}
-
-    describePersistence(): AgentPersistenceHandle | null {
-      return { provider: "codex", sessionId: this.id };
-    }
-
-    async interrupt(): Promise<void> {}
-
-    async close(): Promise<void> {}
-  }
-
-  class StartTurnFailureClient implements AgentClient {
-    readonly provider = "codex" as const;
-    readonly capabilities = {
-      supportsStreaming: false,
-      supportsSessionPersistence: true,
-      supportsDynamicModes: false,
-      supportsMcpServers: false,
-      supportsReasoningStream: false,
-      supportsToolInvocations: false,
-      supportsRewindConversation: false,
-      supportsRewindFiles: false,
-      supportsRewindBoth: false,
-    } as const;
-
-    async isAvailable(): Promise<boolean> {
-      return true;
-    }
-
-    async createSession(_config: AgentSessionConfig): Promise<AgentSession> {
-      return new StartTurnFailureSession();
-    }
-
-    async resumeSession(): Promise<AgentSession> {
-      return new StartTurnFailureSession();
-    }
-  }
+  const testAgent = new StubAgentClient({
+    sessionId: "start-turn-failure-session",
+    supportsStreaming: false,
+    startError: "Initial turn failed to start",
+  });
 
   const daemon = await createTestPaseoDaemon({
-    agentClients: { codex: new StartTurnFailureClient() },
+    agentClients: { codex: testAgent },
   });
   const client = new DaemonClient({
     url: `ws://127.0.0.1:${daemon.port}/ws`,
@@ -334,6 +349,58 @@ test("createAgent fails when the initial turn cannot start", async () => {
     await daemon.close();
   }
 });
+
+function createUninterruptibleClient(): AgentClient {
+  return new StubAgentClient({
+    sessionId: "uninterruptible-session",
+    supportsStreaming: true,
+    interruptError: "Provider did not acknowledge cancellation",
+  });
+}
+
+test("DaemonClient rejects a replacement prompt when cancellation is not acknowledged", async () => {
+  const cwd = tmpCwd();
+  const daemon = await createTestPaseoDaemon({
+    agentClients: { codex: createUninterruptibleClient() },
+  });
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+
+  try {
+    await client.connect();
+    const agent = await client.createAgent({ provider: "codex", cwd });
+    await client.sendMessage(agent.id, "Keep working on the first prompt.");
+
+    await expect(client.sendMessage(agent.id, "Replace it with this prompt.")).rejects.toThrow(
+      `Cannot replace agent ${agent.id} because its active run cancellation was not acknowledged`,
+    );
+  } finally {
+    await client.close();
+    await daemon.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("DaemonClient rejects Stop when cancellation is not acknowledged", async () => {
+  const cwd = tmpCwd();
+  const daemon = await createTestPaseoDaemon({
+    agentClients: { codex: createUninterruptibleClient() },
+  });
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+
+  try {
+    await client.connect();
+    const agent = await client.createAgent({ provider: "codex", cwd });
+    await client.sendMessage(agent.id, "Keep working until stopped.");
+
+    await expect(client.cancelAgent(agent.id)).rejects.toThrow(
+      `Cannot stop agent ${agent.id} because its active run cancellation was not acknowledged`,
+    );
+  } finally {
+    await client.close();
+    await daemon.close();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}, 30_000);
 
 function waitForSignal<T>(
   timeoutMs: number,
@@ -547,7 +614,9 @@ beforeAll(async () => {
 
   ctx = await createDaemonTestContext({
     dictationFinalTimeoutMs: 5000,
-    ...(openaiApiKey ? { openai: { apiKey: openaiApiKey } } : {}),
+    ...(openaiApiKey
+      ? { openai: { stt: { apiKey: openaiApiKey }, tts: { apiKey: openaiApiKey } } }
+      : {}),
     ...(speechConfig ? { speech: speechConfig } : {}),
   });
 }, 60000);
@@ -638,7 +707,7 @@ test("interrupts a running agent before archiving", async () => {
     const result = await ctx.client.archiveAgent(created.id);
     expect(result.archivedAt).toBeTruthy();
 
-    const archivedResult = await ctx.client.fetchAgent(created.id);
+    const archivedResult = await ctx.client.fetchAgent({ agentId: created.id });
     expect(archivedResult).not.toBeNull();
     expect(archivedResult?.agent.archivedAt).toBeTruthy();
     expect(archivedResult?.agent.status).not.toBe("running");
@@ -671,7 +740,7 @@ test("send_agent_message auto-unarchives archived agents", async () => {
     const finalState = await ctx.client.waitForFinish(created.id, 120000);
     expect(finalState.status).toBe("idle");
 
-    const refreshed = await ctx.client.fetchAgent(created.id);
+    const refreshed = await ctx.client.fetchAgent({ agentId: created.id });
     expect(refreshed).not.toBeNull();
     expect(refreshed?.agent.archivedAt).toBeNull();
   } finally {
@@ -691,7 +760,7 @@ test("refresh_agent auto-unarchives archived agents", async () => {
     await ctx.client.archiveAgent(created.id);
     await ctx.client.refreshAgent(created.id);
 
-    const refreshed = await ctx.client.fetchAgent(created.id);
+    const refreshed = await ctx.client.fetchAgent({ agentId: created.id });
     expect(refreshed).not.toBeNull();
     expect(refreshed?.agent.archivedAt).toBeNull();
   } finally {
@@ -770,7 +839,7 @@ test("resume_agent auto-unarchives archived agents", async () => {
         cwd,
       },
     });
-    const agentBeforeArchive = await ctx.client.fetchAgent(created.id);
+    const agentBeforeArchive = await ctx.client.fetchAgent({ agentId: created.id });
     expect(agentBeforeArchive?.agent.persistence).toBeTruthy();
     await ctx.client.archiveAgent(created.id);
 
@@ -779,7 +848,7 @@ test("resume_agent auto-unarchives archived agents", async () => {
       throw new Error("Expected persistence handle for resume test");
     }
     const resumed = await ctx.client.resumeAgent(handle);
-    const resumedDetails = await ctx.client.fetchAgent(resumed.id);
+    const resumedDetails = await ctx.client.fetchAgent({ agentId: resumed.id });
     expect(resumedDetails).not.toBeNull();
     expect(resumedDetails?.agent.archivedAt).toBeNull();
 
@@ -807,7 +876,7 @@ test("update_agent persists unloaded title and labels across auto-unarchive", as
       labels: { lane: "phase-1a" },
     });
 
-    const archived = await ctx.client.fetchAgent(created.id);
+    const archived = await ctx.client.fetchAgent({ agentId: created.id });
     expect(archived).not.toBeNull();
     expect(archived?.agent.archivedAt).toBeTruthy();
     expect(archived?.agent.title).toBe("Pinned Title");
@@ -817,7 +886,7 @@ test("update_agent persists unloaded title and labels across auto-unarchive", as
     const finalState = await ctx.client.waitForFinish(created.id, 120000);
     expect(finalState.status).toBe("idle");
 
-    const unarchived = await ctx.client.fetchAgent(created.id);
+    const unarchived = await ctx.client.fetchAgent({ agentId: created.id });
     expect(unarchived).not.toBeNull();
     expect(unarchived?.agent.archivedAt).toBeNull();
     expect(unarchived?.agent.title).toBe("Pinned Title");
@@ -829,6 +898,7 @@ test("update_agent persists unloaded title and labels across auto-unarchive", as
 
 test("returns home-scoped directory suggestions", async () => {
   const insideHomeDir = mkdtempSync(path.join(homedir(), "paseo-dir-suggestion-"));
+  const rootBrowseDir = mkdtempSync(path.join(homedir(), "000-paseo-root-browse-"));
   const outsideHomeDir = mkdtempSync(path.join(tmpdir(), "paseo-dir-suggestion-outside-"));
 
   try {
@@ -840,6 +910,17 @@ test("returns home-scoped directory suggestions", async () => {
     expect(insideResult.error).toBeNull();
     expect(insideResult.directories).toContain(insideHomeDir);
 
+    const rootBrowseResult = await ctx.client.getDirectorySuggestions({
+      query: "~",
+      limit: 100,
+    });
+    expect(rootBrowseResult.error).toBeNull();
+    expect(rootBrowseResult.directories).toContain(rootBrowseDir);
+
+    const blankResult = await ctx.client.getDirectorySuggestions({ query: "", limit: 100 });
+    expect(blankResult.error).toBeNull();
+    expect(blankResult.entries).toEqual([]);
+
     const outsideQuery = path.basename(outsideHomeDir);
     const outsideResult = await ctx.client.getDirectorySuggestions({
       query: outsideQuery,
@@ -849,7 +930,68 @@ test("returns home-scoped directory suggestions", async () => {
     expect(outsideResult.directories).not.toContain(outsideHomeDir);
   } finally {
     rmSync(insideHomeDir, { recursive: true, force: true });
+    rmSync(rootBrowseDir, { recursive: true, force: true });
     rmSync(outsideHomeDir, { recursive: true, force: true });
+  }
+}, 30000);
+
+test("returns typed relative suggestions within a requested directory", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "paseo-workspace-suggestion-"));
+  const target = path.join(cwd, "src", "components", "message-renderer.tsx");
+
+  try {
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, "");
+
+    const result = await ctx.client.getDirectorySuggestions({
+      cwd,
+      query: "msgrndr",
+      includeFiles: true,
+      includeDirectories: false,
+      limit: 20,
+    });
+
+    expect(result.error).toBeNull();
+    expect(result.directories).toEqual([]);
+    expect(result.entries).toEqual([{ path: "src/components/message-renderer.tsx", kind: "file" }]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}, 30000);
+
+test("finds workspace files inside the OpenCode directory", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "paseo-opencode-suggestion-"));
+  const target = path.join(
+    cwd,
+    ".opencode",
+    "command",
+    "workflow",
+    "00-kickoff",
+    "00-user-stories.md",
+  );
+
+  try {
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, "");
+
+    const result = await ctx.client.getDirectorySuggestions({
+      cwd,
+      query: "00-user-stories.md",
+      includeFiles: true,
+      includeDirectories: false,
+      limit: 20,
+    });
+
+    expect(result.error).toBeNull();
+    expect(result.directories).toEqual([]);
+    expect(result.entries).toEqual([
+      {
+        path: ".opencode/command/workflow/00-kickoff/00-user-stories.md",
+        kind: "file",
+      },
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
 }, 30000);
 
@@ -974,7 +1116,7 @@ test("creates agent and exercises lifecycle", async () => {
 
   expect(agent.id).toBeTruthy();
   expect(agent.status).toBe("idle");
-  const fetchedResult = await ctx.client.fetchAgent(agent.id);
+  const fetchedResult = await ctx.client.fetchAgent({ agentId: agent.id });
   expect(fetchedResult?.agent.id).toBe(agent.id);
 
   const agentUpdate = await agentUpdatePromise;
@@ -1149,7 +1291,10 @@ test("creates agent and exercises lifecycle", async () => {
     return unsubscribeCommands;
   });
 
-  const commands = await ctx.client.listCommands(agent.id, commandsRequestId);
+  const commands = await ctx.client.listCommands({
+    agentId: agent.id,
+    requestId: commandsRequestId,
+  });
   const commandsMessage = await commandsResponsePromise;
   expect(commands.agentId).toBe(agent.id);
   expect(Array.isArray(commands.commands)).toBe(true);

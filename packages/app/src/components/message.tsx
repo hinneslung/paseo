@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { useTranslation } from "react-i18next";
 import { MarkdownParagraphView, MarkdownTextSpan } from "@/components/markdown-text";
+import { MarkdownTableCellText } from "@/components/markdown-text-selection";
 import * as React from "react";
 import {
   useState,
@@ -32,7 +33,6 @@ import { useQuery } from "@tanstack/react-query";
 import MaskedView from "@react-native-masked-view/masked-view";
 import {
   Circle,
-  CircleDot,
   Info,
   CheckCircle,
   XCircle,
@@ -42,15 +42,13 @@ import {
   Check,
   CheckSquare,
   Copy,
-  GitPullRequest,
-  MessageSquareCode,
   TriangleAlertIcon,
   Scissors,
   MicVocal,
   FileSymlink,
 } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { ICON_SIZE, type Theme } from "@/styles/theme";
+import type { Theme } from "@/styles/theme";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import Animated, {
   Easing,
@@ -62,6 +60,7 @@ import Animated, {
 } from "react-native-reanimated";
 import Svg, { Defs, LinearGradient as SvgLinearGradient, Rect, Stop } from "react-native-svg";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
+import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { MarkdownRenderer, type MarkdownStyles } from "@/components/markdown/renderer";
 import type { TodoEntry, UserMessageImageAttachment } from "@/types/stream";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
@@ -89,6 +88,7 @@ import {
   getFileNameFromPath,
   parseImageDataUrl,
 } from "@/attachments/utils";
+import { getAgentAttachmentPillContent } from "@/attachments/attachment-pill-content";
 import { PlanCard } from "./plan-card";
 import { useToolCallSheet } from "./tool-call-sheet";
 import { ToolCallDetailsContent } from "./tool-call-details";
@@ -104,7 +104,6 @@ import {
 import { getCompactionMarkerLabel } from "./message-compaction-label";
 import { useAttachmentPreviewUrl } from "@/attachments/use-attachment-preview-url";
 import { persistAttachmentFromBytes, persistAttachmentFromDataUrl } from "@/attachments/service";
-import { getFileTypeLabel } from "@/attachments/file-types";
 import {
   AttachmentFrame,
   AttachmentLabel,
@@ -116,7 +115,10 @@ import { isWeb, isNative } from "@/constants/platform";
 import type { AgentCapabilityFlags } from "@getpaseo/protocol/agent-types";
 import { RewindMenu, type RewindMode } from "@/components/rewind/rewind-menu";
 import { useRewindAgentMutation } from "@/components/rewind/use-rewind-agent-mutation";
+import { AssistantForkMenu, type AssistantForkTarget } from "@/components/assistant-fork-menu";
+import { useRetainedPanelActive } from "@/components/retained-panel";
 export type { InlinePathTarget } from "@/assistant-file-links";
+export type { AssistantForkTarget };
 
 interface UserMessageProps {
   serverId?: string;
@@ -170,10 +172,6 @@ const ThemedTodoCheckIcon = withUnistyles(Check);
 const ThemedFileSymlinkIcon = withUnistyles(FileSymlink);
 const ThemedTriangleAlertIcon = withUnistyles(TriangleAlertIcon);
 const ThemedChevronRightIcon = withUnistyles(ChevronRight);
-const ThemedAttachmentFileText = withUnistyles(FileText);
-const ThemedGitPullRequest = withUnistyles(GitPullRequest);
-const ThemedCircleDot = withUnistyles(CircleDot);
-const ThemedMessageSquareCode = withUnistyles(MessageSquareCode);
 
 const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const foregroundMutedColorMapping = (theme: Theme) => ({
@@ -361,8 +359,7 @@ const userMessageStylesheet = StyleSheet.create((theme) => ({
   text: {
     color: theme.colors.foreground,
     fontSize: theme.fontSize.base,
-    lineHeight: 22,
-    overflowWrap: "anywhere",
+    ...(isWeb ? { lineHeight: 22, overflowWrap: "anywhere" as const } : {}),
   },
   imagePreviewContainer: {
     flexDirection: "row",
@@ -403,19 +400,6 @@ const userMessageStylesheet = StyleSheet.create((theme) => ({
   },
 }));
 
-const attachmentReviewIcon = (
-  <ThemedMessageSquareCode size={ICON_SIZE.sm} uniProps={foregroundMutedColorMapping} />
-);
-const attachmentGithubPrIcon = (
-  <ThemedGitPullRequest size={ICON_SIZE.sm} uniProps={foregroundMutedColorMapping} />
-);
-const attachmentGithubIssueIcon = (
-  <ThemedCircleDot size={ICON_SIZE.sm} uniProps={foregroundMutedColorMapping} />
-);
-const attachmentFileIcon = (
-  <ThemedAttachmentFileText size={ICON_SIZE.sm} uniProps={foregroundMutedColorMapping} />
-);
-
 interface UserMessageImagePillProps {
   image: UserMessageImageAttachment;
   onOpen: (image: UserMessageImageAttachment) => void;
@@ -431,55 +415,6 @@ function UserMessageImagePill({ image, onOpen, accessibilityLabel }: UserMessage
       <AttachmentThumbnail metadata={image} />
     </AttachmentFrame>
   );
-}
-
-interface UserMessageAttachmentContent {
-  icon: ReactNode;
-  title: string;
-  subtitle: string;
-}
-
-function getUserMessageAttachmentContent(
-  attachment: AgentAttachment,
-  t: ReturnType<typeof useTranslation>["t"],
-): UserMessageAttachmentContent {
-  switch (attachment.type) {
-    case "review": {
-      const count = attachment.comments.length;
-      return {
-        icon: attachmentReviewIcon,
-        title: t("message.attachments.review"),
-        subtitle:
-          count === 1
-            ? t("message.attachments.commentsOne")
-            : t("message.attachments.commentsMany", { count }),
-      };
-    }
-    case "github_pr":
-      return {
-        icon: attachmentGithubPrIcon,
-        title: attachment.title,
-        subtitle: `PR #${attachment.number}`,
-      };
-    case "github_issue":
-      return {
-        icon: attachmentGithubIssueIcon,
-        title: attachment.title,
-        subtitle: `Issue #${attachment.number}`,
-      };
-    case "text":
-      return {
-        icon: attachmentFileIcon,
-        title: attachment.title ?? t("message.attachments.textAttachment"),
-        subtitle: t("message.attachments.text"),
-      };
-    case "uploaded_file":
-      return {
-        icon: attachmentFileIcon,
-        title: attachment.fileName,
-        subtitle: getFileTypeLabel(attachment.fileName) ?? t("message.attachments.file"),
-      };
-  }
 }
 
 export const UserMessage = memo(function UserMessage({
@@ -580,7 +515,7 @@ export const UserMessage = memo(function UserMessage({
           {hasAttachments ? (
             <View style={attachmentPreviewContainerStyle}>
               {attachments.map((attachment, index) => {
-                const content = getUserMessageAttachmentContent(attachment, t);
+                const content = getAgentAttachmentPillContent(attachment, t);
                 return (
                   <AttachmentFrame
                     key={`${attachment.type}:${"number" in attachment ? attachment.number : index}`}
@@ -629,6 +564,7 @@ interface AssistantTurnFooterProps {
   getContent: () => string;
   completedAt?: Date;
   durationMs?: number;
+  onFork?: (target: AssistantForkTarget) => Promise<void> | void;
 }
 
 const assistantTurnFooterStylesheet = StyleSheet.create((theme) => ({
@@ -673,6 +609,7 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
   getContent,
   completedAt,
   durationMs,
+  onFork,
 }: AssistantTurnFooterProps) {
   const [hovered, setHovered] = useState(false);
   const [pressedReveal, setPressedReveal] = useState(false);
@@ -712,6 +649,13 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
       revealTimerRef.current = null;
     }, TIMESTAMP_REVEAL_MS);
   }, [canSwap]);
+  const handleFork = useCallback(
+    (target: AssistantForkTarget) => {
+      return onFork?.(target);
+    },
+    [onFork],
+  );
+  const canFork = Boolean(onFork);
 
   return (
     <View style={assistantTurnFooterStylesheet.container}>
@@ -719,6 +663,7 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
         getContent={getContent}
         containerStyle={assistantTurnFooterStylesheet.copyButton}
       />
+      {canFork ? <AssistantForkMenu onFork={handleFork} /> : null}
       {durationLabel ? (
         <Pressable
           onPress={handlePress}
@@ -745,33 +690,39 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
 
 interface LiveElapsedProps {
   startedAt: Date;
+  active?: boolean;
   style?: StyleProp<TextStyle>;
   testID?: string;
 }
 
 /**
- * Ticks every 100ms to render an elapsed duration. Isolated from parents so
+ * Ticks every second to render an elapsed duration. Isolated from parents so
  * only this component re-renders on each tick.
  */
 export const LiveElapsed = memo(function LiveElapsed({
   startedAt,
+  active = true,
   style,
   testID,
 }: LiveElapsedProps) {
   const startedAtMs = startedAt.getTime();
   const [elapsedMs, setElapsedMs] = useState(() => Math.max(0, Date.now() - startedAtMs));
+  const visibleElapsedMs = active ? Math.max(0, Date.now() - startedAtMs) : elapsedMs;
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
     setElapsedMs(Math.max(0, Date.now() - startedAtMs));
     const handle = setInterval(() => {
       setElapsedMs(Math.max(0, Date.now() - startedAtMs));
-    }, 100);
+    }, 1000);
     return () => clearInterval(handle);
-  }, [startedAtMs]);
+  }, [active, startedAtMs]);
 
   return (
     <Text style={style} testID={testID}>
-      {formatDuration(elapsedMs)}
+      {formatDuration(visibleElapsedMs)}
     </Text>
   );
 });
@@ -1319,7 +1270,6 @@ const expandableBadgeStylesheet = StyleSheet.create((theme) => ({
   },
   chevron: {
     flexShrink: 0,
-    transform: [{ scale: 1.3 }],
   },
   openFileButton: {
     marginLeft: theme.spacing[1],
@@ -1330,9 +1280,6 @@ const expandableBadgeStylesheet = StyleSheet.create((theme) => ({
   openFileButtonPlaceholderIcon: {
     width: 14,
     height: 14,
-  },
-  chevronExpanded: {
-    transform: [{ scale: 1.3 }, { rotate: "90deg" }],
   },
   detailWrapper: {
     borderBottomLeftRadius: theme.borderRadius.lg,
@@ -1348,10 +1295,15 @@ const expandableBadgeStylesheet = StyleSheet.create((theme) => ({
     ...(isWeb ? { cursor: "auto" as const, userSelect: "text" as const } : {}),
   },
   pressableExpanded: {
-    borderColor: theme.colors.border,
     backgroundColor: theme.colors.surface1,
+  },
+  pressableExpandedAttached: {
+    borderColor: theme.colors.border,
     borderBottomLeftRadius: 0,
     borderBottomRightRadius: 0,
+  },
+  detailWrapperBorderless: {
+    borderWidth: 0,
   },
   shimmerOverlay: {
     position: "absolute",
@@ -1404,9 +1356,14 @@ const NativeExpandableBadgeShimmer = memo(function NativeExpandableBadgeShimmer(
   durationSeconds,
   gradientId,
 }: NativeExpandableBadgeShimmerProps) {
+  const isPanelActive = useRetainedPanelActive();
   const shimmerTranslateX = useSharedValue(0);
 
   useEffect(() => {
+    if (!isPanelActive) {
+      cancelAnimation(shimmerTranslateX);
+      return;
+    }
     const startPosition = -peakWidth;
     const endPosition = rowWidth + peakWidth;
     shimmerTranslateX.value = startPosition;
@@ -1421,7 +1378,7 @@ const NativeExpandableBadgeShimmer = memo(function NativeExpandableBadgeShimmer(
     return () => {
       cancelAnimation(shimmerTranslateX);
     };
-  }, [durationSeconds, peakWidth, rowWidth, shimmerTranslateX]);
+  }, [durationSeconds, isPanelActive, peakWidth, rowWidth, shimmerTranslateX]);
 
   const nativeShimmerPeakStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: shimmerTranslateX.value }],
@@ -1872,6 +1829,16 @@ export const AssistantMessage = memo(function AssistantMessage({
           </View>
         );
       },
+      th: (node: ASTNode, children: ReactNode[], _parent: ASTNode[], styles: MarkdownStyles) => (
+        <MarkdownTableCellText key={node.key}>
+          <View style={styles._VIEW_SAFE_th}>{children}</View>
+        </MarkdownTableCellText>
+      ),
+      td: (node: ASTNode, children: ReactNode[], _parent: ASTNode[], styles: MarkdownStyles) => (
+        <MarkdownTableCellText key={node.key}>
+          <View style={styles._VIEW_SAFE_td}>{children}</View>
+        </MarkdownTableCellText>
+      ),
       paragraph: (
         node: ASTNode,
         children: ReactNode[],
@@ -2402,6 +2369,7 @@ interface ExpandableBadgeProps {
   isError?: boolean;
   isLastInSequence?: boolean;
   disableOuterSpacing?: boolean;
+  borderlessWhenExpanded?: boolean;
   testID?: string;
 }
 
@@ -2640,7 +2608,9 @@ function renderExpandableBadgeIconSlot({
 }): ReactNode {
   if (showChevron) {
     return (
-      <ThemedChevronRightIcon size={12} style={chevronStyle} uniProps={foregroundColorMapping} />
+      <View style={chevronStyle}>
+        <ThemedChevronRightIcon size={12} uniProps={foregroundColorMapping} />
+      </View>
     );
   }
   return iconNode;
@@ -2731,7 +2701,7 @@ function buildShimmerTextStyle(input: {
   offsetX: number;
 }): object | null {
   if (!input.isWebShimmer) return null;
-  return {
+  return inlineUnistylesStyle({
     opacity: 1,
     color: "transparent",
     backgroundImage: SHIMMER_GRADIENT,
@@ -2743,10 +2713,10 @@ function buildShimmerTextStyle(input: {
     animation: `${WEB_TOOLCALL_SHIMMER_ANIMATION_NAME} ${input.shimmerDuration}s linear infinite`,
     "--paseo-shimmer-start": `${input.webShimmerTrackStart - input.offsetX}px`,
     "--paseo-shimmer-end": `${input.webShimmerTrackEnd - input.offsetX}px`,
-  };
+  });
 }
 
-const ExpandableBadge = memo(function ExpandableBadge({
+export const ExpandableBadge = memo(function ExpandableBadge({
   label,
   style,
   secondaryLabel,
@@ -2760,6 +2730,7 @@ const ExpandableBadge = memo(function ExpandableBadge({
   isError = false,
   isLastInSequence = false,
   disableOuterSpacing,
+  borderlessWhenExpanded = false,
   testID,
 }: ExpandableBadgeProps) {
   const resolvedDisableOuterSpacing = useDisableOuterSpacing(disableOuterSpacing);
@@ -2930,8 +2901,17 @@ const ExpandableBadge = memo(function ExpandableBadge({
       expandableBadgeStylesheet.pressable,
       isPressed && isInteractive ? expandableBadgeStylesheet.pressablePressed : null,
       isExpanded && expandableBadgeStylesheet.pressableExpanded,
+      isExpanded && !borderlessWhenExpanded && expandableBadgeStylesheet.pressableExpandedAttached,
     ],
-    [isExpanded, isInteractive, isPressed],
+    [borderlessWhenExpanded, isExpanded, isInteractive, isPressed],
+  );
+
+  const detailWrapperStyle = useMemo(
+    () => [
+      expandableBadgeStylesheet.detailWrapper,
+      borderlessWhenExpanded && expandableBadgeStylesheet.detailWrapperBorderless,
+    ],
+    [borderlessWhenExpanded],
   );
 
   const accessibilityState = useMemo(
@@ -2980,8 +2960,10 @@ const ExpandableBadge = memo(function ExpandableBadge({
   const chevronStyle = useMemo(
     () => [
       expandableBadgeStylesheet.chevron,
-      isExpanded && expandableBadgeStylesheet.chevronExpanded,
       LUCIDE_CHEVRON_NUDGE_LEFT,
+      inlineUnistylesStyle({
+        transform: isExpanded ? [{ scale: 1.3 }, { rotate: "90deg" }] : [{ scale: 1.3 }],
+      }),
     ],
     [isExpanded],
   );
@@ -2989,7 +2971,7 @@ const ExpandableBadge = memo(function ExpandableBadge({
   const ThemedIcon = useMemo(() => (icon ? withUnistyles(icon) : null), [icon]);
   const iconNode = renderExpandableBadgeIcon({ isError, isActive, ThemedIcon });
   const iconSlotNode = renderExpandableBadgeIconSlot({
-    showChevron: isInteractive && isHovered,
+    showChevron: isInteractive && (isHovered || isExpanded),
     chevronStyle,
     iconNode,
   });
@@ -3048,7 +3030,7 @@ const ExpandableBadge = memo(function ExpandableBadge({
       {detailContent ? (
         <Pressable
           ref={detailWrapperRef}
-          style={expandableBadgeStylesheet.detailWrapper}
+          style={detailWrapperStyle}
           onHoverIn={handleDetailHoverIn}
           onHoverOut={handleDetailHoverOut}
         >
@@ -3069,6 +3051,7 @@ function areExpandableBadgePropsEqual(previous: ExpandableBadgeProps, next: Expa
   if (previous.isError !== next.isError) return false;
   if (previous.isLastInSequence !== next.isLastInSequence) return false;
   if (previous.disableOuterSpacing !== next.disableOuterSpacing) return false;
+  if (previous.borderlessWhenExpanded !== next.borderlessWhenExpanded) return false;
   if (previous.testID !== next.testID) return false;
   if (previous.onToggle !== next.onToggle) return false;
   if (previous.onOpenFile !== next.onOpenFile) return false;
@@ -3091,6 +3074,9 @@ interface ToolCallProps {
   onInlineDetailsHoverChange?: (hovered: boolean) => void;
   onInlineDetailsExpandedChange?: (expanded: boolean) => void;
   onOpenFilePath?: (filePath: string) => void;
+  defaultExpanded?: boolean;
+  forceInline?: boolean;
+  maxDetailHeight?: number;
 }
 
 export const ToolCall = memo(function ToolCall({
@@ -3107,11 +3093,15 @@ export const ToolCall = memo(function ToolCall({
   onInlineDetailsHoverChange,
   onInlineDetailsExpandedChange,
   onOpenFilePath,
+  defaultExpanded,
+  forceInline = false,
+  maxDetailHeight = 400,
 }: ToolCallProps) {
   const { openToolCall } = useToolCallSheet();
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded ?? false);
 
   const isMobile = useIsCompactFormFactor();
+  const shouldRenderInline = !isMobile || forceInline;
 
   const effectiveDetail = useMemo<ToolCallDetail | undefined>(() => {
     if (detail) {
@@ -3149,7 +3139,7 @@ export const ToolCall = memo(function ToolCall({
   }, [presentation.openFilePath, onOpenFilePath]);
 
   const handleToggle = useCallback(() => {
-    if (isMobile) {
+    if (!shouldRenderInline) {
       openToolCall({
         displayName: presentation.displayName,
         summary: presentation.summary,
@@ -3162,7 +3152,7 @@ export const ToolCall = memo(function ToolCall({
       setIsExpanded((prev) => !prev);
     }
   }, [
-    isMobile,
+    shouldRenderInline,
     openToolCall,
     presentation.displayName,
     presentation.summary,
@@ -3173,22 +3163,22 @@ export const ToolCall = memo(function ToolCall({
   ]);
 
   useEffect(() => {
-    if (!onInlineDetailsHoverChange || isMobile || isExpanded) {
+    if (!onInlineDetailsHoverChange || !shouldRenderInline || isExpanded) {
       return;
     }
     onInlineDetailsHoverChange(false);
-  }, [isExpanded, isMobile, onInlineDetailsHoverChange]);
+  }, [isExpanded, shouldRenderInline, onInlineDetailsHoverChange]);
 
   useEffect(() => {
     if (!onInlineDetailsExpandedChange) {
       return;
     }
-    if (isMobile) {
+    if (!shouldRenderInline) {
       onInlineDetailsExpandedChange(false);
       return;
     }
     onInlineDetailsExpandedChange(isExpanded);
-  }, [isExpanded, isMobile, onInlineDetailsExpandedChange]);
+  }, [isExpanded, shouldRenderInline, onInlineDetailsExpandedChange]);
 
   useEffect(() => {
     if (!onInlineDetailsExpandedChange) {
@@ -3201,16 +3191,22 @@ export const ToolCall = memo(function ToolCall({
 
   // Render inline details for desktop
   const renderDetails = useCallback(() => {
-    if (isMobile) return null;
+    if (!shouldRenderInline) return null;
     return (
       <ToolCallDetailsContent
         detail={effectiveDetail}
         errorText={presentation.errorText}
-        maxHeight={400}
+        maxHeight={maxDetailHeight}
         showLoadingSkeleton={presentation.isLoadingDetails}
       />
     );
-  }, [isMobile, effectiveDetail, presentation.errorText, presentation.isLoadingDetails]);
+  }, [
+    shouldRenderInline,
+    effectiveDetail,
+    presentation.errorText,
+    presentation.isLoadingDetails,
+    maxDetailHeight,
+  ]);
 
   if (presentation.isPlan && effectiveDetail?.type === "plan") {
     return (
@@ -3228,10 +3224,10 @@ export const ToolCall = memo(function ToolCall({
       label={presentation.displayName}
       secondaryLabel={presentation.summary}
       icon={presentation.icon}
-      isExpanded={!isMobile && isExpanded}
+      isExpanded={shouldRenderInline && isExpanded}
       onToggle={presentation.canOpenDetails ? handleToggle : undefined}
       onOpenFile={handleOpenFile}
-      renderDetails={presentation.canOpenDetails && !isMobile ? renderDetails : undefined}
+      renderDetails={presentation.canOpenDetails && shouldRenderInline ? renderDetails : undefined}
       isLoading={status === "running" || status === "executing"}
       isError={status === "failed"}
       isLastInSequence={isLastInSequence}
@@ -3253,5 +3249,8 @@ function areToolCallPropsEqual(previous: ToolCallProps, next: ToolCallProps) {
   if (previous.isLastInSequence !== next.isLastInSequence) return false;
   if (previous.disableOuterSpacing !== next.disableOuterSpacing) return false;
   if (previous.onOpenFilePath !== next.onOpenFilePath) return false;
+  if (previous.defaultExpanded !== next.defaultExpanded) return false;
+  if (previous.forceInline !== next.forceInline) return false;
+  if (previous.maxDetailHeight !== next.maxDetailHeight) return false;
   return true;
 }

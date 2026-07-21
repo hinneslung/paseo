@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { useClientActivity } from "@/hooks/use-client-activity";
 import { usePushTokenRegistration } from "@/hooks/use-push-token-registration";
 import { clearArchiveAgentPending } from "@/hooks/use-archive-agent";
+import { refreshAgentInitializationTimeout } from "@/hooks/use-agent-initialization";
 import { prefetchProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { generateMessageId, type StreamItem } from "@/types/stream";
 import {
@@ -77,6 +78,7 @@ import {
   applyLegacyDaemonWorkspaceOwnership,
   backfillLegacyDaemonWorkspaceDirectoryIfEmpty,
 } from "@/workspace/legacy-daemon-workspaces";
+import { useProviderSubagentStore } from "@/subagents/provider-store";
 
 // Re-export types from session-store and draft-store for backward compatibility
 export type { DraftInput } from "@/stores/draft-store";
@@ -472,6 +474,15 @@ function applyToolErrorToMessages(
         ? { ...msg, error, status: "failed" as const }
         : msg,
     );
+}
+
+function notifyVoiceAbortFailure(
+  data: Extract<SessionOutboundMessage, { type: "activity_log" }>["payload"],
+  notifyError: (message: string) => void,
+): void {
+  if (data.type === "error" && data.metadata?.voiceAbortFailed === true) {
+    notifyError(data.content);
+  }
 }
 
 interface SessionProviderSharedProps {
@@ -1210,6 +1221,16 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         error: payload.error,
       });
       if (followUp?.direction === "after") {
+        refreshAgentInitializationTimeout({
+          key: initKey,
+          agentId,
+          setAgentInitializing: (id, initializing) => {
+            if (initializing) {
+              return;
+            }
+            clearAgentInitializingFlag(setInitializingAgents, serverId, id);
+          },
+        });
         requestCanonicalCatchUp(agentId, {
           epoch: followUp.cursor.epoch,
           endSeq: followUp.cursor.seq,
@@ -1336,6 +1357,11 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       if (message.type !== "fetch_agent_timeline_response") return;
       agentStreamReducerQueue.flushAgent(message.payload.agentId);
       applyTimelineResponse(message.payload);
+    });
+
+    const unsubProviderSubagentUpdate = client.on("agent.provider_subagents.update", (message) => {
+      if (message.type !== "agent.provider_subagents.update") return;
+      useProviderSubagentStore.getState().applyUpdate(serverId, message.payload);
     });
 
     const unsubWorkspaceUpdate = client.on("workspace_update", (message) => {
@@ -1553,6 +1579,8 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         setMessages(serverId, applyToolError);
       }
 
+      notifyVoiceAbortFailure(data, toast.error);
+
       let activityType: "system" | "info" | "success" | "error" = "info";
       if (data.type === "error") activityType = "error";
 
@@ -1739,6 +1767,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       unsubAgentUpdate();
       unsubAgentStream();
       unsubAgentTimeline();
+      unsubProviderSubagentUpdate();
       unsubWorkspaceUpdate();
       unsubScriptStatusUpdate();
       unsubCheckoutStatusUpdate();
@@ -1787,6 +1816,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
     applyWorkspaceSetupProgress,
     applyTimelineResponse,
     updateSessionServerInfo,
+    toast,
     voiceRuntime,
     voiceAudioEngine,
   ]);

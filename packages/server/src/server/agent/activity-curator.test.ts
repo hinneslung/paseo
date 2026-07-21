@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { curateAgentActivity } from "./activity-curator.js";
+import { buildAgentForkContextAttachment, curateAgentActivity } from "./activity-curator.js";
 import type { AgentTimelineItem } from "./agent-sdk-types.js";
+import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
 
 function toolCallItem(params: {
   callId: string;
@@ -26,6 +27,14 @@ function toolCallItem(params: {
     detail,
     error: status === "failed" ? (params.error ?? { message: "failed" }) : null,
     metadata: params.metadata,
+  };
+}
+
+function row(seq: number, item: AgentTimelineItem): AgentTimelineRow {
+  return {
+    seq,
+    timestamp: `2026-06-28T00:00:${String(seq).padStart(2, "0")}.000Z`,
+    item,
   };
 }
 
@@ -176,6 +185,46 @@ second line'`,
     ]);
   });
 
+  it("keeps nested sub-agent logs beside the sub-agent that produced them", () => {
+    const timeline: AgentTimelineItem[] = [
+      { type: "assistant_message", text: "Before first child." },
+      toolCallItem({
+        callId: "child-1",
+        name: "Sub-agent",
+        detail: {
+          type: "sub_agent",
+          subAgentType: "Child one",
+          description: "First investigation",
+          log: "[Assistant] First child result.",
+        },
+      }),
+      { type: "assistant_message", text: "Between children." },
+      toolCallItem({
+        callId: "child-2",
+        name: "Sub-agent",
+        detail: {
+          type: "sub_agent",
+          subAgentType: "Child two",
+          description: "Second investigation",
+          log: "[Assistant] Second child result.",
+        },
+      }),
+      { type: "assistant_message", text: "After second child." },
+    ];
+
+    const result = curateAgentActivity(timeline, { labelAssistantMessages: true });
+
+    expect(result.split("\n")).toEqual([
+      "[Assistant] Before first child.",
+      "[Child one] First investigation",
+      "[Assistant] First child result.",
+      "[Assistant] Between children.",
+      "[Child two] Second investigation",
+      "[Assistant] Second child result.",
+      "[Assistant] After second child.",
+    ]);
+  });
+
   it("renders todo/error/compaction entries", () => {
     const timeline: AgentTimelineItem[] = [
       {
@@ -216,5 +265,178 @@ second line'`,
 
   it("returns a default message when timeline is empty", () => {
     expect(curateAgentActivity([])).toBe("No activity to display.");
+  });
+
+  it("builds fork context from user messages, assistant messages, and tool summaries", () => {
+    const result = buildAgentForkContextAttachment({
+      agentTitle: "Source Agent",
+      cwd: "/repo",
+      boundaryMessageId: "assistant-1",
+      rows: [
+        row(1, { type: "user_message", text: "Ship the thing", messageId: "user-1" }),
+        row(2, { type: "reasoning", text: "private chain of thought" }),
+        row(
+          3,
+          toolCallItem({
+            callId: "read-1",
+            name: "read_file",
+            detail: {
+              type: "read",
+              filePath: "src/index.ts",
+              content: "console.log('hi')",
+            },
+          }),
+        ),
+        row(
+          4,
+          toolCallItem({
+            callId: "external-1",
+            name: "paseo__create_agent",
+            input: { initialPrompt: "do not include raw external tool input" },
+          }),
+        ),
+        row(5, {
+          type: "assistant_message",
+          text: "Done.",
+          messageId: "assistant-1",
+        }),
+        row(6, {
+          type: "assistant_message",
+          text: "Later answer.",
+          messageId: "assistant-2",
+        }),
+      ],
+    });
+
+    expect(result.boundaryMessageId).toBe("assistant-1");
+    expect(result.attachment).toMatchObject({
+      type: "text",
+      mimeType: "text/plain",
+      contextKind: "chat_history",
+      title: "Chat history",
+    });
+    expect(result.attachment.text).toMatch(/^<chat-history-summary>\n/);
+    expect(result.attachment.text).toMatch(/\n<\/chat-history-summary>$/);
+    expect(result.attachment.text).toContain("Source agent: Source Agent");
+    expect(result.attachment.text).toContain("Source directory: /repo");
+    expect(result.attachment.text).toContain("[User] Ship the thing");
+    expect(result.attachment.text).toContain("[Read] src/index.ts");
+    expect(result.attachment.text).toContain("[paseo__create_agent]");
+    expect(result.attachment.text).toContain("[Assistant] Done.");
+    expect(result.attachment.text).not.toContain("private chain of thought");
+    expect(result.attachment.text).not.toContain("do not include raw external tool input");
+    expect(result.attachment.text).not.toContain("Later answer.");
+  });
+
+  it("does not cap fork context to the generic recent activity limit", () => {
+    const messageRows = Array.from({ length: 25 }, (_, index) =>
+      row(index + 1, {
+        type: "user_message",
+        text: `Message ${index + 1}`,
+        messageId: `user-${index + 1}`,
+      }),
+    );
+    const result = buildAgentForkContextAttachment({
+      boundaryMessageId: "assistant-1",
+      rows: [
+        ...messageRows,
+        row(26, {
+          type: "assistant_message",
+          text: "Done.",
+          messageId: "assistant-1",
+        }),
+      ],
+    });
+
+    expect(result.itemCount).toBe(26);
+    expect(result.attachment.text).toContain("[User] Message 1");
+    expect(result.attachment.text).toContain("[User] Message 25");
+    expect(result.attachment.text).toContain("[Assistant] Done.");
+  });
+
+  it("selects the fork boundary before collapsing later tool updates", () => {
+    const result = buildAgentForkContextAttachment({
+      boundaryMessageId: "assistant-1",
+      rows: [
+        row(1, { type: "user_message", text: "Run it", messageId: "user-1" }),
+        row(
+          2,
+          toolCallItem({
+            callId: "terminal-1",
+            name: "terminal",
+            status: "running",
+            detail: {
+              type: "plain_text",
+              label: "before boundary",
+            },
+          }),
+        ),
+        row(3, {
+          type: "assistant_message",
+          text: "Partial result.",
+          messageId: "assistant-1",
+        }),
+        row(
+          4,
+          toolCallItem({
+            callId: "terminal-1",
+            name: "terminal",
+            status: "completed",
+            detail: {
+              type: "plain_text",
+              label: "after boundary",
+            },
+          }),
+        ),
+      ],
+    });
+
+    expect(result.attachment.text).toContain("[Terminal] before boundary");
+    expect(result.attachment.text).toContain("[Assistant] Partial result.");
+    expect(result.attachment.text).not.toContain("after boundary");
+  });
+
+  it("selects a synthetic assistant error by its timeline cursor", () => {
+    const result = buildAgentForkContextAttachment({
+      cursorBoundary: {
+        timelineEpoch: "timeline-1",
+        cursor: { epoch: "timeline-1", seq: 2 },
+      },
+      rows: [
+        row(1, { type: "user_message", text: "Try the task", messageId: "user-1" }),
+        row(2, { type: "assistant_message", text: "[System Error] provider failed" }),
+        row(3, {
+          type: "assistant_message",
+          text: "This belongs to a later turn.",
+          messageId: "assistant-2",
+        }),
+      ],
+    });
+
+    expect(result.boundaryCursor).toEqual({ epoch: "timeline-1", seq: 2 });
+    expect(result.boundaryMessageId).toBeNull();
+    expect(result.attachment.text).toContain("[System Error] provider failed");
+    expect(result.attachment.text).not.toContain("This belongs to a later turn.");
+  });
+
+  it("rejects a cursor from a previous timeline epoch", () => {
+    expect(() =>
+      buildAgentForkContextAttachment({
+        cursorBoundary: {
+          timelineEpoch: "timeline-2",
+          cursor: { epoch: "timeline-1", seq: 2 },
+        },
+        rows: [row(2, { type: "assistant_message", text: "Stale result." })],
+      }),
+    ).toThrow("Selected timeline position is no longer available.");
+  });
+
+  it("rejects missing assistant boundaries instead of silently using the wrong context", () => {
+    expect(() =>
+      buildAgentForkContextAttachment({
+        boundaryMessageId: "missing",
+        rows: [row(1, { type: "assistant_message", text: "Done.", messageId: "assistant-1" })],
+      }),
+    ).toThrow("Selected assistant message is no longer available.");
   });
 });

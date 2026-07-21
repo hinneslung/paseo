@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { promises } from "node:fs";
@@ -28,7 +29,12 @@ import {
   mapTaskNotificationSystemRecordToToolCall,
   mapTaskNotificationUserContentToToolCall,
 } from "./task-notification-tool-call.js";
-import { getClaudeModelsWithSettings, normalizeClaudeRuntimeModelId } from "./models.js";
+import {
+  findClaudeModel,
+  getClaudeModelsWithSettings,
+  normalizeClaudeRuntimeModelId,
+} from "./models.js";
+import { CLAUDE_ULTRACODE_THINKING_OPTION_ID } from "./model-manifest.js";
 import { parsePartialJsonObject } from "./partial-json.js";
 import { ClaudeSidechainTracker } from "./sidechain-tracker.js";
 import { buildClaudeFeatures, claudeModelSupportsFastMode } from "./feature-definitions.js";
@@ -96,6 +102,7 @@ import {
   type ResolvedProviderLaunch,
 } from "../../provider-launch-config.js";
 import { withTimeout } from "../../../../utils/promise-timeout.js";
+import { terminateWithTreeKill } from "../../../../utils/tree-kill.js";
 import { execCommand } from "../../../../utils/spawn.js";
 import { composeSystemPromptParts } from "../../system-prompt.js";
 
@@ -274,14 +281,14 @@ const CLAUDE_CAPABILITIES: AgentCapabilityFlags = {
 
 const DEFAULT_MODES: AgentMode[] = [
   {
+    id: "plan",
+    label: "Plan Mode",
+    description: "Analyze the codebase without executing tools or edits",
+  },
+  {
     id: "default",
     label: "Always Ask",
     description: "Prompts for permission the first time a tool is used",
-  },
-  {
-    id: "auto",
-    label: "Auto mode",
-    description: "Uses a model classifier to review permission prompts automatically",
   },
   {
     id: "acceptEdits",
@@ -289,9 +296,9 @@ const DEFAULT_MODES: AgentMode[] = [
     description: "Automatically approves edit-focused tools without prompting",
   },
   {
-    id: "plan",
-    label: "Plan Mode",
-    description: "Analyze the codebase without executing tools or edits",
+    id: "auto",
+    label: "Auto mode",
+    description: "Uses a model classifier to review permission prompts automatically",
   },
   {
     id: "bypassPermissions",
@@ -367,7 +374,7 @@ interface ClaudeAgentSessionOptions {
 }
 
 type ClaudeThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
-type ClaudeThinkingOption = ClaudeThinkingEffort | "ultracode";
+type ClaudeThinkingOption = ClaudeThinkingEffort | typeof CLAUDE_ULTRACODE_THINKING_OPTION_ID;
 
 function resolvePathEnvKey(): "Path" | "PATH" | null {
   if (process.env["Path"] !== undefined) return "Path";
@@ -415,7 +422,7 @@ function isClaudeThinkingEffort(value: string | null | undefined): value is Clau
 }
 
 function isClaudeThinkingOption(value: string | null | undefined): value is ClaudeThinkingOption {
-  return value === "ultracode" || isClaudeThinkingEffort(value);
+  return value === CLAUDE_ULTRACODE_THINKING_OPTION_ID || isClaudeThinkingEffort(value);
 }
 
 interface ClaudeOptionsLogSummary {
@@ -1624,23 +1631,6 @@ function extractContextWindowSize(modelUsage: unknown): number | undefined {
   return maxContextWindow;
 }
 
-function resolveInitialContextWindowSize(modelId: string | null | undefined): number | undefined {
-  const normalized = typeof modelId === "string" ? modelId.trim().toLowerCase() : "";
-  if (!normalized) {
-    return undefined;
-  }
-  if (normalized.includes("[1m]") || normalized.includes("context-1m")) {
-    return 1_000_000;
-  }
-  if (normalized.includes("claude-fable-5")) {
-    return 1_000_000;
-  }
-  if (/(?:^|[~/_-])(?:claude[-_ ]*)?(opus|sonnet|haiku)(?:$|[-_ ./])/.test(normalized)) {
-    return 200_000;
-  }
-  return undefined;
-}
-
 function readStreamRequestInputTokens(event: Record<string, unknown>): number | undefined {
   const messageUsage = toObjectRecord(toObjectRecord(event.message)?.usage);
   if (!messageUsage) {
@@ -1727,6 +1717,14 @@ function readLegacyResultUsageTokens(usage: unknown): number | undefined {
 
 function isClaudeSubagentToolName(name: string | undefined): boolean {
   return name === "Task" || name === "Agent";
+}
+
+function readClaudeParentToolUseId(message: SDKMessage): string | null {
+  if (!("parent_tool_use_id" in message)) {
+    return null;
+  }
+  const parentToolUseId = (message as { parent_tool_use_id?: unknown }).parent_tool_use_id;
+  return typeof parentToolUseId === "string" && parentToolUseId.length > 0 ? parentToolUseId : null;
 }
 
 class ClaudeContextUsageState {
@@ -1880,6 +1878,7 @@ class ClaudeAgentSession implements AgentSession {
   private readonly queryFactory?: ClaudeQueryFactory;
   private readonly resolveBinary: () => Promise<string>;
   private query: Query | null = null;
+  private childProcess: ChildProcess | null = null;
   private input: AsyncMessageInput<SDKUserMessage> | null = null;
   private claudeSessionId: string | null;
   private persistence: AgentPersistenceHandle | null;
@@ -1898,6 +1897,10 @@ class ClaudeAgentSession implements AgentSession {
     getToolInput: (toolUseId) => this.toolUseCache.get(toolUseId)?.input ?? null,
   });
   private persistedHistory: PersistedTimelineEntry[] = [];
+  private persistedProviderSubagentEvents: Extract<
+    AgentStreamEvent,
+    { type: "provider_subagent" }
+  >[] = [];
   private historyPending = false;
   private turnState: TurnState = "idle";
   private nextTurnOrdinal = 1;
@@ -1930,7 +1933,7 @@ class ClaudeAgentSession implements AgentSession {
     this.queryFactory = options.queryFactory;
     this.resolveBinary = options.resolveBinary;
     this.contextUsage = new ClaudeContextUsageState(
-      resolveInitialContextWindowSize(this.config.model),
+      findClaudeModel(this.config.model)?.contextWindowMaxTokens,
     );
     const handle = options.handle;
 
@@ -2118,11 +2121,16 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
-    if (!this.historyPending || this.persistedHistory.length === 0) {
+    if (
+      !this.historyPending ||
+      (this.persistedHistory.length === 0 && this.persistedProviderSubagentEvents.length === 0)
+    ) {
       return;
     }
     const history = this.persistedHistory;
+    const providerSubagentEvents = this.persistedProviderSubagentEvents;
     this.persistedHistory = [];
+    this.persistedProviderSubagentEvents = [];
     this.historyPending = false;
     for (const entry of history) {
       yield {
@@ -2132,6 +2140,7 @@ class ClaudeAgentSession implements AgentSession {
         timestamp: entry.timestamp,
       };
     }
+    yield* providerSubagentEvents;
   }
 
   async getAvailableModes(): Promise<AgentMode[]> {
@@ -2176,7 +2185,7 @@ class ClaudeAgentSession implements AgentSession {
       await this.applyFastModeFeature(false, activeQuery);
     }
     this.contextUsage.setInitialContextWindowMaxTokens(
-      resolveInitialContextWindowSize(this.config.model),
+      findClaudeModel(this.config.model)?.contextWindowMaxTokens,
     );
     this.lastOptionsModel = normalizedModelId ?? this.lastOptionsModel;
     this.lastRuntimeModel = null;
@@ -2353,6 +2362,22 @@ class ClaudeAgentSession implements AgentSession {
     await this.awaitWithTimeout(this.query?.return?.(), "close query return");
     this.query = null;
     this.input = null;
+    // Terminate the entire process tree (claude + MCP children) to prevent
+    // orphan accumulation. The SDK's internal cleanup may only kill the
+    // direct child process.
+    if (this.childProcess) {
+      const result = await terminateWithTreeKill(this.childProcess, {
+        gracefulTimeoutMs: 2_000,
+        forceTimeoutMs: 2_000,
+      });
+      if (result === "kill-timeout") {
+        this.logger.warn(
+          { pid: this.childProcess.pid, agentId: this.agentId },
+          "Claude process tree did not report exit after SIGKILL",
+        );
+      }
+      this.childProcess = null;
+    }
     if (this.persistSession === false && this.claudeSessionId) {
       // Claude Code currently ignores --no-session-persistence outside --print mode
       // (see `claude --help`), so the SDK's persistSession=false is silently dropped
@@ -2598,6 +2623,7 @@ class ClaudeAgentSession implements AgentSession {
     this.cachedRuntimeInfo = null;
     this.queryRestartNeeded = true;
     this.persistedHistory = [];
+    this.persistedProviderSubagentEvents = [];
     this.historyPending = false;
     this.userMessageIds = [];
     this.emittedUserMessageIds.clear();
@@ -2627,6 +2653,7 @@ class ClaudeAgentSession implements AgentSession {
     this.cachedRuntimeInfo = null;
     this.queryRestartNeeded = true;
     this.persistedHistory = [];
+    this.persistedProviderSubagentEvents = [];
     this.historyPending = false;
     this.userMessageIds = [];
     this.emittedUserMessageIds.clear();
@@ -2751,6 +2778,18 @@ class ClaudeAgentSession implements AgentSession {
       } catch {
         /* ignore */
       }
+      // Tree-kill the old process tree now that the SDK has cleaned up.
+      // If we skip this, MCP children of the previous claude process can
+      // survive as orphans when the session spawns a replacement query.
+      if (this.childProcess) {
+        await terminateWithTreeKill(this.childProcess, {
+          gracefulTimeoutMs: 2_000,
+          forceTimeoutMs: 2_000,
+        }).catch(() => {
+          /* process may already be dead */
+        });
+        this.childProcess = null;
+      }
     }
 
     // Preserve claudeSessionId across query recreation so buildOptions() passes
@@ -2767,6 +2806,9 @@ class ClaudeAgentSession implements AgentSession {
         runtimeSettings: this.runtimeSettings,
         launchEnv: this.launchEnv,
         queryFactory: this.queryFactory,
+        onChildProcess: (child) => {
+          this.childProcess = child;
+        },
       },
     );
     const fastMode = this.resolveFastModeSetting();
@@ -2835,7 +2877,7 @@ class ClaudeAgentSession implements AgentSession {
       this.config.thinkingOptionId && this.config.thinkingOptionId !== "default"
         ? this.config.thinkingOptionId
         : undefined;
-    if (thinkingOptionId === "ultracode") {
+    if (thinkingOptionId === CLAUDE_ULTRACODE_THINKING_OPTION_ID) {
       return { thinking: { type: "adaptive" }, effort: "xhigh", ultracode: true };
     }
     if (thinkingOptionId && isClaudeThinkingEffort(thinkingOptionId)) {
@@ -3461,20 +3503,22 @@ class ClaudeAgentSession implements AgentSession {
       suppressAssistantText: true,
       suppressReasoning: true,
     });
-    const assistantTimelineEvents = this.timelineAssembler
-      .consume({
-        message,
-        runId: turnId,
-        messageIdHint,
-      })
-      .map(
-        (item) =>
-          ({
-            type: "timeline",
-            item,
-            provider: "claude",
-          }) satisfies AgentStreamEvent,
-      );
+    const assistantTimelineEvents = readClaudeParentToolUseId(message)
+      ? []
+      : this.timelineAssembler
+          .consume({
+            message,
+            runId: turnId,
+            messageIdHint,
+          })
+          .map(
+            (item) =>
+              ({
+                type: "timeline",
+                item,
+                provider: "claude",
+              }) satisfies AgentStreamEvent,
+          );
 
     return [...messageEvents, ...assistantTimelineEvents];
   }
@@ -3507,6 +3551,7 @@ class ClaudeAgentSession implements AgentSession {
     }
     this.persistence = null;
     this.persistedHistory = [];
+    this.persistedProviderSubagentEvents = [];
     this.historyPending = false;
     this.cachedRuntimeInfo = null;
     this.queryRestartNeeded = false;
@@ -3548,10 +3593,7 @@ class ClaudeAgentSession implements AgentSession {
       suppressReasoning?: boolean;
     },
   ): AgentStreamEvent[] {
-    const parentToolUseId =
-      "parent_tool_use_id" in message
-        ? (message as { parent_tool_use_id: string | null }).parent_tool_use_id
-        : null;
+    const parentToolUseId = readClaudeParentToolUseId(message);
     if (parentToolUseId) {
       return this.sidechainTracker.handleMessage(message, parentToolUseId);
     }
@@ -3581,6 +3623,7 @@ class ClaudeAgentSession implements AgentSession {
         break;
       case "user":
         this.appendUserMessageEvents(message, events);
+        this.appendSidechainResultEvents(message, events);
         break;
       case "assistant": {
         const timelineItems = this.mapBlocksToTimeline(message.message.content, {
@@ -3590,6 +3633,7 @@ class ClaudeAgentSession implements AgentSession {
         for (const item of timelineItems) {
           events.push({ type: "timeline", item, provider: "claude" });
         }
+        this.appendSidechainResultEvents(message, events);
         break;
       }
       case "stream_event":
@@ -3603,6 +3647,18 @@ class ClaudeAgentSession implements AgentSession {
     }
 
     return events;
+  }
+
+  private appendSidechainResultEvents(message: SDKMessage, events: AgentStreamEvent[]): void {
+    const content = toObjectRecord(toObjectRecord(message)?.message)?.content;
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      const chunk = toObjectRecord(block);
+      if (chunk?.type !== "tool_result" || typeof chunk.tool_use_id !== "string") continue;
+      events.push(
+        ...this.sidechainTracker.finish(chunk.tool_use_id, chunk.is_error ? "failed" : "completed"),
+      );
+    }
   }
 
   private emitSubmittedUserMessage(
@@ -3801,6 +3857,7 @@ class ClaudeAgentSession implements AgentSession {
   ): void {
     const usage = this.convertUsage(message, message.modelUsage);
     if (message.subtype === "success") {
+      events.push(...this.sidechainTracker.finishAll("completed"));
       // Built-in slash commands (e.g. /voice, /usage, "Unknown command: …")
       // run client-side in the Claude CLI with no model turn — output_tokens
       // is 0 and the user-visible text is carried in `result`. Surface it only
@@ -3826,6 +3883,7 @@ class ClaudeAgentSession implements AgentSession {
       "errors" in message && Array.isArray(message.errors) && message.errors.length > 0
         ? message.errors.join("\n")
         : "Claude run failed";
+    events.push(...this.sidechainTracker.finishAll("failed"));
     events.push(this.buildTurnFailedEvent(errorMessage));
   }
 
@@ -4137,7 +4195,9 @@ class ClaudeAgentSession implements AgentSession {
       if (!historyPath || !fs.existsSync(historyPath)) {
         return;
       }
-      this.ingestPersistedHistory(fs.readFileSync(historyPath, "utf8"));
+      const content = fs.readFileSync(historyPath, "utf8");
+      this.ingestPersistedHistory(content);
+      this.ingestPersistedSidechains(content, readClaudeSidechainHistory(historyPath));
     } catch {
       // ignore history load failures
     }
@@ -4157,6 +4217,24 @@ class ClaudeAgentSession implements AgentSession {
       this.persistedHistory = [...this.persistedHistory, ...timeline];
       this.historyPending = true;
     }
+  }
+
+  private ingestPersistedSidechains(parentContent: string, sidechainContents: string[]): void {
+    const parentEntries = parseClaudeHistoryRecords(parentContent).filter(
+      (entry) => entry.isSidechain !== true,
+    );
+    const sidechainEntries = [parentContent, ...sidechainContents]
+      .flatMap(parseClaudeHistoryRecords)
+      .filter((entry) => entry.isSidechain === true && typeof entry.agentId === "string");
+    if (sidechainEntries.length === 0) {
+      return;
+    }
+    this.persistedProviderSubagentEvents.push(
+      ...buildClaudePersistedSidechainEvents(parentEntries, sidechainEntries, (entry) =>
+        this.convertHistoryEntry(entry),
+      ),
+    );
+    this.historyPending = true;
   }
 
   private ingestPersistedHistoryLine(line: string, timeline: PersistedTimelineEntry[]): void {
@@ -4436,7 +4514,6 @@ class ClaudeAgentSession implements AgentSession {
 
     if (typeof block.tool_use_id === "string") {
       this.toolUseCache.delete(block.tool_use_id);
-      this.sidechainTracker.delete(block.tool_use_id);
     }
   }
 
@@ -4918,11 +4995,203 @@ function normalizeHistoryBlocks(content: unknown): ClaudeContentChunk[] | null {
   return null;
 }
 
+function parseClaudeHistoryRecords(content: string): ClaudeHistoryEntry[] {
+  const entries: ClaudeHistoryEntry[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const entry = toObjectRecord(JSON.parse(trimmed));
+      if (entry) entries.push(entry);
+    } catch {
+      // Ignore individual corrupt history rows, matching the parent history replay behavior.
+    }
+  }
+  return entries;
+}
+
+function readClaudeSidechainHistory(historyPath: string): string[] {
+  const sessionDirectory = path.join(
+    path.dirname(historyPath),
+    path.basename(historyPath, ".jsonl"),
+  );
+  const sidechainDirectory = path.join(sessionDirectory, "subagents");
+  if (!fs.existsSync(sidechainDirectory)) return [];
+
+  const contents: string[] = [];
+  const directories = [sidechainDirectory];
+  while (directories.length > 0) {
+    const directory = directories.pop();
+    if (!directory) continue;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        directories.push(entryPath);
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        contents.push(fs.readFileSync(entryPath, "utf8"));
+      }
+    }
+  }
+  return contents;
+}
+
+interface ClaudeHistoricalSubagentToolCall {
+  name?: string;
+  subagentType?: string;
+  description?: string;
+}
+
+function readClaudeHistoricalSubagentToolCalls(
+  entries: ClaudeHistoryEntry[],
+): Map<string, ClaudeHistoricalSubagentToolCall> {
+  const toolCalls = new Map<string, ClaudeHistoricalSubagentToolCall>();
+  for (const entry of entries) {
+    const content = toObjectRecord(entry.message)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const value of content) {
+      const block = toObjectRecord(value);
+      if (
+        block?.type !== "tool_use" ||
+        (block.name !== "Task" && block.name !== "Agent") ||
+        typeof block.id !== "string"
+      ) {
+        continue;
+      }
+      const input = toObjectRecord(block.input);
+      const name = readNonEmptyString(input?.name);
+      const subagentType = readNonEmptyString(input?.subagent_type);
+      const description = readNonEmptyString(input?.description);
+      toolCalls.set(block.id, {
+        ...(name ? { name } : {}),
+        ...(subagentType ? { subagentType } : {}),
+        ...(description ? { description } : {}),
+      });
+    }
+  }
+  return toolCalls;
+}
+
+function readClaudeHistoricalSubagentToolResults(
+  entries: ClaudeHistoryEntry[],
+): Map<string, { toolCallId: string; failed: boolean }> {
+  const results = new Map<string, { toolCallId: string; failed: boolean }>();
+  for (const entry of entries) {
+    const content = toObjectRecord(entry.message)?.content;
+    if (!Array.isArray(content)) continue;
+    for (const value of content) {
+      const block = toObjectRecord(value);
+      if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+      const match = /agentId:\s*([\w-]+)/.exec(JSON.stringify(block.content));
+      if (!match?.[1]) continue;
+      results.set(match[1], { toolCallId: block.tool_use_id, failed: block.is_error === true });
+    }
+  }
+  return results;
+}
+
+function groupClaudeSidechainEntries(
+  entries: ClaudeHistoryEntry[],
+): Map<string, ClaudeHistoryEntry[]> {
+  const entriesByAgentId = new Map<string, ClaudeHistoryEntry[]>();
+  for (const entry of entries) {
+    if (typeof entry.agentId !== "string") continue;
+    const grouped = entriesByAgentId.get(entry.agentId) ?? [];
+    grouped.push(entry);
+    entriesByAgentId.set(entry.agentId, grouped);
+  }
+  return entriesByAgentId;
+}
+
+function buildClaudePersistedSidechainEvents(
+  parentEntries: ClaudeHistoryEntry[],
+  sidechainEntries: ClaudeHistoryEntry[],
+  convertEntry: (entry: ClaudeHistoryEntry) => AgentTimelineItem[],
+): Extract<AgentStreamEvent, { type: "provider_subagent" }>[] {
+  const events: Extract<AgentStreamEvent, { type: "provider_subagent" }>[] = [];
+  const toolCalls = readClaudeHistoricalSubagentToolCalls(parentEntries);
+  const toolResults = readClaudeHistoricalSubagentToolResults(parentEntries);
+  for (const [agentId, entries] of groupClaudeSidechainEntries(sidechainEntries)) {
+    events.push(
+      ...buildClaudePersistedSidechainAgentEvents(
+        agentId,
+        entries,
+        toolCalls,
+        toolResults,
+        convertEntry,
+      ),
+    );
+  }
+  return events;
+}
+
+function resolveClaudeHistoricalSubagentTitle(
+  toolCall: ClaudeHistoricalSubagentToolCall | undefined,
+): string {
+  return toolCall?.name ?? toolCall?.subagentType ?? "Claude subagent";
+}
+
+function buildClaudePersistedSidechainAgentEvents(
+  agentId: string,
+  entries: ClaudeHistoryEntry[],
+  toolCalls: ReadonlyMap<string, ClaudeHistoricalSubagentToolCall>,
+  toolResults: ReadonlyMap<string, { toolCallId: string; failed: boolean }>,
+  convertEntry: (entry: ClaudeHistoryEntry) => AgentTimelineItem[],
+): Extract<AgentStreamEvent, { type: "provider_subagent" }>[] {
+  const result = toolResults.get(agentId);
+  const id = result?.toolCallId ?? agentId;
+  const toolCall = result ? toolCalls.get(result.toolCallId) : undefined;
+  const firstTimestamp = normalizeProviderReplayTimestamp(entries[0]?.timestamp);
+  const events: Extract<AgentStreamEvent, { type: "provider_subagent" }>[] = [
+    {
+      type: "provider_subagent",
+      provider: "claude",
+      event: {
+        type: "upsert",
+        id,
+        title: resolveClaudeHistoricalSubagentTitle(toolCall),
+        description: toolCall?.description ?? null,
+        status: "running",
+        toolCallId: result?.toolCallId ?? null,
+        ...(firstTimestamp ? { timestamp: firstTimestamp } : {}),
+      },
+    },
+  ];
+  for (const entry of entries) {
+    const timestamp = normalizeProviderReplayTimestamp(entry.timestamp);
+    for (const item of convertEntry(entry)) {
+      events.push({
+        type: "provider_subagent",
+        provider: "claude",
+        event: {
+          type: "timeline",
+          id,
+          item,
+          ...(timestamp ? { timestamp } : {}),
+        },
+      });
+    }
+  }
+  const lastTimestamp = normalizeProviderReplayTimestamp(entries.at(-1)?.timestamp);
+  events.push({
+    type: "provider_subagent",
+    provider: "claude",
+    event: {
+      type: "upsert",
+      id,
+      status: result?.failed ? "failed" : "completed",
+      ...(lastTimestamp ? { timestamp: lastTimestamp } : {}),
+    },
+  });
+  return events;
+}
+
 interface ClaudeHistoryEntry {
   type?: unknown;
   subtype?: unknown;
   isCompactSummary?: unknown;
   isSidechain?: unknown;
+  agentId?: unknown;
+  timestamp?: unknown;
   uuid?: unknown;
   message?: { content?: unknown; [key: string]: unknown };
   [key: string]: unknown;

@@ -48,8 +48,9 @@ The heart of Paseo. A Node.js process that:
 - Listens for WebSocket connections from clients
 - Manages agent lifecycle (create, run, stop, resume, archive)
 - Streams agent output in real time via a timeline model
-- Exposes an MCP server for agent-to-agent control
+- Provides agent-to-agent tools through a transport-neutral tool catalog, with MCP as one adapter
 - Optionally connects outbound to a relay for remote access
+- Optionally serves the browser web client from the same HTTP server (self-hosting guide: [public-docs/web-ui.md](../public-docs/web-ui.md))
 
 All paths are under `packages/server/src/`.
 
@@ -62,7 +63,8 @@ All paths are under `packages/server/src/`.
 | `server/session.ts`             | Per-client session state, timeline subscriptions, terminal operations        |
 | `server/agent/agent-manager.ts` | Agent lifecycle state machine, timeline tracking, subscriber management      |
 | `server/agent/agent-storage.ts` | File-backed JSON persistence at `$PASEO_HOME/agents/`                        |
-| `server/agent/mcp-server.ts`    | MCP server for sub-agent creation, permissions, timeouts                     |
+| `server/agent/tools/`           | Transport-neutral Paseo tool catalog for subagents, permissions, worktrees   |
+| `server/agent/mcp-server.ts`    | Thin MCP adapter that registers the Paseo tool catalog with the MCP SDK      |
 | `server/agent/providers/`       | Provider adapters (see "Agent providers" below)                              |
 | `server/relay-transport.ts`     | Outbound relay connection with E2E encryption                                |
 | `server/schedule/`              | Cron-based scheduled agents                                                  |
@@ -136,7 +138,9 @@ Electron wrapper for macOS, Linux, and Windows.
 
 > **Window-state v1 limitation:** only the _first_ window of a session restores and persists saved geometry (size/position/maximized). Windows opened via ⌘⇧N / second-instance / "Open in new window" open at the default size, OS-cascaded, and do not persist — this avoids every window stacking on the same restored bounds and fighting over the single window-state store. Lifting this needs per-window state keys.
 >
-> **In-app browser panes are not yet per-window.** The active-browser id (`features/browser-webviews.ts`) and the webview registration queue (`pendingBrowserWebviewIds` in `main.ts`) are process-global. With browser panes open in two windows, a menu Reload can target the other window's webview, and near-simultaneous webview attach across windows can register under the wrong browser id. Multi-window v1 ships windows; making the browser-webview subsystem window-scoped is a follow-up.
+> **In-app browser profile.** Every browser guest uses one stable persistent Electron session, so cookies, authentication, cache, and site storage are shared across tabs, workspaces, and desktop windows and survive tab or app closure. Browser identity is independent of that storage partition: after `did-attach`, the renderer explicitly registers its browser id, workspace id, and guest `WebContents` id, and main accepts the registration only when that guest belongs to the calling renderer and the shared profile. Settings > General > Clear browser data is the sole profile-deletion path; it clears the shared session and reloads live guests without deleting saved tabs or URLs.
+
+> **In-app browser targets are not yet per-window.** Browser webviews are still tracked by one process-global registry that keeps a single current `WebContents` per browser id. Human focus records the workspace-active browser for UI state and `list_tabs` reporting, while agent automation targets explicit browser ids returned by `browser_new_tab` or `browser_list_tabs`. Explicit attached-guest registration prevents concurrent windows from swapping different browser ids, but rendering the same saved browser tab in multiple windows can still make menu actions target the most recently registered guest. Making the registry window-scoped remains a follow-up.
 
 ### `packages/website` — Marketing site
 
@@ -167,6 +171,8 @@ There is no dedicated welcome message; the server emits a `status` session messa
 
 Client liveness checks use the top-level JSON `ping`/`pong` envelope, not a session RPC and not RFC6455 protocol ping. The app runs through browser and React Native WebSocket APIs, which do not expose protocol ping, so this envelope is the portable way to test the direct or relay data path. Session RPC timeouts are operation failures and must not be treated as proof that the socket is dead.
 
+Client session RPC waits default to 60s so slow relay or mobile networks do not turn a live but delayed daemon response into a false operation failure. Keep connect timeouts, app-level grace windows, explicit diagnostic latency probes, liveness ping timers, and genuinely long-running RPCs separate from this default.
+
 New session RPCs use dotted names with `.request` and `.response` suffixes, such as `checkout.github.set_auto_merge.request` and `checkout.github.set_auto_merge.response`. See [rpc-namespacing.md](rpc-namespacing.md) for the convention and migration rules for older flat RPC names.
 
 **Notable session message types:**
@@ -180,6 +186,15 @@ New session RPCs use dotted names with `.request` and `.response` suffixes, such
 - Terminal subscribe/input/capture commands
 - Voice/dictation streaming events (`dictation_stream_*`, `assistant_chunk`, `audio_output`, `transcription_result`)
 - Request/response pairs for fetch, list, create, etc., correlated by `requestId`; failures use `rpc_error`
+
+`directory_suggestions_request` is one daemon-owned filesystem search capability. The daemon
+configures the same `searchDirectoryEntries` engine with a root, output format, path-query policy,
+entry-kind filters, match mode, blank-query behavior, and hidden-directory traversal policy. A
+request without `cwd` searches the host home for absolute project paths; a request with `cwd`
+searches that workspace and returns relative entries. Clients may prepend their small host-scoped
+recent-project list for bare queries, but must not parse filesystem query syntax or re-filter a
+correlated daemon response. The legacy `directories` response field remains a projection of the
+typed `entries` list.
 
 **Binary frames (terminal stream protocol):**
 
@@ -288,6 +303,8 @@ All providers:
 - Support session resume via persistence handles
 - Map tool calls to a normalized `ToolCallDetail` type
 - Expose provider-specific modes (plan, default, full-access)
+
+Providers that can accept native tool definitions should set `supportsNativePaseoTools` and read `launchContext.paseoTools`. The daemon then passes the shared Paseo tool catalog directly and removes the internal Paseo MCP server from that provider launch config. Providers that only support MCP continue to receive the same tools through the MCP fallback at `/mcp/agents`.
 
 ## Data flow: running an agent
 

@@ -82,7 +82,7 @@ You need at least one agent CLI installed and configured with your credentials:
 
 Download it from [paseo.sh/download](https://paseo.sh/download) or the [GitHub releases page](https://github.com/getpaseo/paseo/releases). Open the app and the daemon starts automatically. Nothing else to install.
 
-To connect from your phone, scan the QR code shown in Settings.
+To connect from your phone, open **Settings → your host → Connections → Pair a device**.
 
 ### CLI / headless
 
@@ -99,6 +99,21 @@ For full setup and configuration, see:
 
 - [Docs](https://paseo.sh/docs)
 - [Configuration reference](https://paseo.sh/docs/configuration)
+
+### Docker
+
+Run the Paseo daemon and self-hosted web UI in Docker:
+
+```bash
+docker run -d --name paseo \
+  -p 6767:6767 \
+  -e PASEO_PASSWORD=change-me \
+  -v "$PWD/paseo-home:/home/paseo" \
+  -v "$PWD:/workspace" \
+  ghcr.io/getpaseo/paseo:latest
+```
+
+Open `http://localhost:6767` after it starts. Extend the base image with the agent CLIs you use, then provide credentials through environment variables or the persistent `/home/paseo` volume. See the [Docker documentation](docs/docker.md) for full setup details.
 
 ## CLI
 
@@ -166,6 +181,7 @@ npm run typecheck
 ## Community
 
 - [paseo-relay](https://github.com/zenghongtu/paseo-relay) — self-hosted relay in Go
+- [paseo-vscode](https://marketplace.visualstudio.com/items?itemName=hinnes.paseo-vscode) — VS Code extension
 
 ---
 

@@ -212,6 +212,35 @@ describe("ClaudeAgentSession sub-agent sidechain updates", () => {
           elapsed_time_seconds: 1,
         },
         {
+          type: "user",
+          parent_tool_use_id: "task-call-1",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "sub-read-1",
+                tool_name: "Read",
+                content: "README contents",
+                is_error: false,
+              },
+            ],
+          },
+        },
+        {
+          type: "assistant",
+          parent_tool_use_id: "task-call-1",
+          message: {
+            id: "subagent-message-1",
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                text: "Sub-agent narration belongs inside the Task row, not the parent transcript.",
+              },
+            ],
+          },
+        },
+        {
           type: "assistant",
           parent_tool_use_id: null,
           message: {
@@ -293,6 +322,124 @@ describe("ClaudeAgentSession sub-agent sidechain updates", () => {
     );
 
     expect(projectedTaskCalls).toHaveLength(1);
+
+    const providerEvents = events.flatMap((event) =>
+      event.type === "provider_subagent" ? [event.event] : [],
+    );
+    expect(providerEvents).toContainEqual({
+      type: "timeline",
+      id: "task-call-1",
+      item: expect.objectContaining({
+        type: "tool_call",
+        callId: "sub-read-1",
+        status: "running",
+      }),
+    });
+    expect(providerEvents).toContainEqual({
+      type: "timeline",
+      id: "task-call-1",
+      item: expect.objectContaining({
+        type: "tool_call",
+        callId: "sub-read-1",
+        status: "completed",
+      }),
+    });
+    expect(providerEvents).toContainEqual({
+      type: "timeline",
+      id: "task-call-1",
+      item: {
+        type: "assistant_message",
+        messageId: "subagent-message-1",
+        text: "Sub-agent narration belongs inside the Task row, not the parent transcript.",
+      },
+    });
+    expect(providerEvents.at(-1)).toMatchObject({
+      type: "upsert",
+      id: "task-call-1",
+      title: "Explore",
+      description: "Inspect repository structure",
+      status: "completed",
+    });
+  });
+
+  test("keeps sidechain assistant text out of the parent transcript", async () => {
+    const session = await new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+    });
+
+    const events = await collectUntilTerminal(streamSession(session, "delegate work"));
+    await session.close();
+
+    const visibleAssistantText = events
+      .flatMap((event) =>
+        event.type === "timeline" && event.item.type === "assistant_message"
+          ? [event.item.text]
+          : [],
+      )
+      .join("");
+
+    expect(visibleAssistantText).not.toContain("Sub-agent narration");
+
+    const latestSubAgentUpdate = events
+      .filter(
+        (event): event is Extract<AgentStreamEvent, { type: "timeline" }> =>
+          event.type === "timeline" &&
+          event.item.type === "tool_call" &&
+          event.item.callId === "task-call-1" &&
+          event.item.detail.type === "sub_agent",
+      )
+      .map((event) => event.item)
+      .at(-1);
+
+    expect(latestSubAgentUpdate?.detail).toMatchObject({
+      type: "sub_agent",
+      log: expect.stringContaining("[Read] README.md"),
+    });
+  });
+
+  test("keeps a failed Task subagent failed when the parent turn succeeds", async () => {
+    const failedEvents = buildTailScenarioEvents(1);
+    const taskResult = failedEvents.find(
+      (event) =>
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "assistant",
+    ) as { message: Record<string, unknown> } | undefined;
+    if (!taskResult) throw new Error("expected Task result fixture");
+    taskResult.message = {
+      ...taskResult.message,
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "task-tail-1",
+          tool_name: "Task",
+          content: "failed",
+          is_error: true,
+        },
+      ],
+    };
+    queryFactory.mockImplementation(() => buildQueryMock(failedEvents));
+    const session = await new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({ provider: "claude", cwd: process.cwd() });
+
+    const events = await collectUntilTerminal(streamSession(session, "delegate work"));
+    await session.close();
+
+    expect(
+      events
+        .filter((event) => event.type === "provider_subagent")
+        .map((event) => event.event)
+        .at(-1),
+    ).toMatchObject({ type: "upsert", id: "task-tail-1", status: "failed" });
   });
 
   test("tails sub-agent actions instead of dropping latest entries at cap", async () => {

@@ -1,9 +1,8 @@
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
-import { stat } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
 import { basename, normalize, resolve, sep } from "path";
 import { homedir } from "node:os";
-import type { ToolSet } from "ai";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import {
   serializeAgentStreamEvent,
@@ -49,8 +48,6 @@ import {
   resolveFirstAgentPromptTitle,
 } from "./agent/create-agent-title.js";
 import { respondToAgentPermission } from "./agent/permission-response.js";
-import { experimental_createMCPClient } from "ai";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "./voice-types.js";
 import type { ScriptHealthState } from "./script-health-monitor.js";
 import { spawnWorkspaceScript } from "./worktree-bootstrap.js";
@@ -64,8 +61,12 @@ import { getErrorMessage, getErrorMessageOr } from "@getpaseo/protocol/error-uti
 import { getAgentStatusPriority } from "@getpaseo/protocol/agent-state-bucket";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "./workspace-git-service.js";
+import {
+  CLIENT_SHUTDOWN_RPC_REASON,
+  normalizeClientRestartRpcReason,
+} from "./lifecycle-reasons.js";
 
-import { AgentManager } from "./agent/agent-manager.js";
+import { AgentManager, AgentRunCancellationError } from "./agent/agent-manager.js";
 import { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import type {
   AgentManagerEvent,
@@ -98,13 +99,13 @@ import {
   type TimelineProjectionEntry,
   type TimelineProjectionMode,
 } from "./agent/timeline-projection.js";
+import { buildAgentForkContextAttachment } from "./agent/activity-curator.js";
+import { buildAgentPrompt } from "./agent/prompt-attachments.js";
 import type { StructuredGenerationDaemonConfig } from "./agent/structured-generation-providers.js";
 import {
   getAgentStreamEventTurnId,
   type AgentPersistenceHandle,
   type AgentPermissionResponse,
-  type AgentPromptContentBlock,
-  type AgentPromptInput,
   type AgentRunOptions,
   type AgentSessionConfig,
 } from "./agent/agent-sdk-types.js";
@@ -148,6 +149,7 @@ import { WorkspaceFilesSession } from "./session/files/workspace-files-session.j
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
 import { ProjectConfigSession } from "./session/project-config/project-config-session.js";
 import { DaemonSession, type DaemonRuntimeConfig } from "./session/daemon/daemon-session.js";
+import type { DaemonWebSocketRuntimeDiagnosticSnapshot } from "./session/daemon/diagnostics.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import { PushTokenStore } from "./push/token-store.js";
 import {
@@ -171,7 +173,10 @@ import {
   type AgentUpdatesService,
 } from "./session/agent-updates/agent-updates-service.js";
 import { expandTilde } from "../utils/path.js";
-import { searchHomeDirectories, searchWorkspaceEntries } from "../utils/directory-suggestions.js";
+import {
+  searchDirectoryEntries,
+  WORKSPACE_SEARCH_HIDDEN_DIRECTORIES,
+} from "../utils/directory-suggestions.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import type { Resolvable } from "./speech/provider-resolver.js";
 import type { SpeechReadinessSnapshot } from "./speech/speech-runtime.js";
@@ -179,7 +184,13 @@ import type pino from "pino";
 import { FileBackedChatService } from "./chat/chat-service.js";
 import { LoopService } from "./loop-service.js";
 import { ScheduleService } from "./schedule/service.js";
-import { createGitHubService, type GitHubService } from "../services/github-service.js";
+import {
+  createGitHubService,
+  GitHubAuthenticationError,
+  GitHubCliMissingError,
+  GitHubCommandError,
+  type GitHubService,
+} from "../services/github-service.js";
 import type { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import {
   summarizeFetchWorkspacesEntries,
@@ -189,16 +200,12 @@ import {
 } from "./workspace-directory.js";
 import { shouldEmitPendingBootstrapUpdate } from "./workspace-bootstrap-dedupe.js";
 import {
-  attemptFirstAgentBranchAutoName,
   createLocalCheckoutWorkspace,
   createPaseoWorktree,
   type CreatePaseoWorktreeInput,
   type CreatePaseoWorktreeResult,
 } from "./paseo-worktree-service.js";
-import {
-  generateBranchNameFromFirstAgentContext,
-  type GeneratedWorkspaceName,
-} from "./worktree-branch-name-generator.js";
+import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import {
   buildAgentSessionConfig as buildWorktreeAgentSessionConfig,
   createPaseoWorktreeWorkflow as createWorktreeWorkflow,
@@ -215,6 +222,11 @@ import {
   toWorktreeRequestError,
   toWorktreeWireError,
 } from "./worktree-errors.js";
+import { parseGitRemoteLocation } from "@getpaseo/protocol/git-remote";
+import {
+  createProjectDirectory,
+  ProjectDirectoryRequestError,
+} from "./project-directory-service.js";
 import { type WorktreeConfig, createWorktree } from "../utils/worktree.js";
 import { runGitCommand } from "../utils/run-git-command.js";
 import { CreateAgentLifecycleDispatch } from "./agent/create-agent-lifecycle-dispatch.js";
@@ -224,7 +236,6 @@ import { CreateAgentLifecycleDispatch } from "./agent/create-agent-lifecycle-dis
 // the entire session message if they encounter an unknown provider.
 const LEGACY_PROVIDER_IDS = new Set(["claude", "codex", "opencode"]);
 const MIN_VERSION_ALL_PROVIDERS = "0.1.45";
-
 function errorToFriendlyMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -361,6 +372,10 @@ type FetchWorkspacesResponsePayload = Extract<
 type FetchWorkspacesResponseEntry = FetchWorkspacesResponsePayload["entries"][number];
 type FetchWorkspacesResponsePageInfo = FetchWorkspacesResponsePayload["pageInfo"];
 type WorkspaceProjectDescriptorPayload = FetchWorkspacesResponsePayload["emptyProjects"][number];
+type WorkspaceGithubSearchRepositoriesResponsePayload = Extract<
+  SessionOutboundMessage,
+  { type: "workspace.github.search_repositories.response" }
+>["payload"];
 type WorkspaceUpdatePayload = Extract<
   SessionOutboundMessage,
   { type: "workspace_update" }
@@ -424,10 +439,8 @@ export interface SessionOptions {
   // Injected so tests can substitute the git branch rename without module mocks;
   // defaults to the real checkout-git implementation.
   renameCurrentBranch?: typeof renameCurrentBranchDefault;
-  // Injected so tests can substitute workspace title/branch generation without
-  // calling the LLM; defaults to the real first-agent-context generator.
-  generateWorkspaceName?: typeof generateBranchNameFromFirstAgentContext;
   workspaceGitService: WorkspaceGitService;
+  workspaceAutoName: WorkspaceAutoName;
   daemonConfigStore: DaemonConfigStore;
   mcpBaseUrl?: string | null;
   stt: Resolvable<SpeechToTextProvider | null>;
@@ -466,6 +479,7 @@ export interface SessionOptions {
   serverId?: string;
   daemonVersion?: string;
   daemonRuntimeConfig?: DaemonRuntimeConfig;
+  getWebSocketRuntimeMetrics?: () => DaemonWebSocketRuntimeDiagnosticSnapshot | null;
 }
 
 export type SessionLifecycleIntent =
@@ -473,12 +487,13 @@ export type SessionLifecycleIntent =
       type: "shutdown";
       clientId: string;
       requestId: string;
+      reason: string;
     }
   | {
       type: "restart";
       clientId: string;
       requestId: string;
-      reason?: string;
+      reason: string;
     };
 
 function parseClientCapabilities(
@@ -537,9 +552,6 @@ export class Session {
   private readonly paseoHome: string;
   private readonly worktreesRoot: string | undefined;
 
-  // Per-session MCP client and tools
-  private agentMcpClient: Awaited<ReturnType<typeof experimental_createMCPClient>> | null = null;
-  private agentTools: ToolSet | null = null;
   private agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
   private readonly projectRegistry: ProjectRegistry;
@@ -547,12 +559,11 @@ export class Session {
   private readonly filesystem: SessionFileSystem;
   private readonly github: GitHubService;
   private readonly renameCurrentBranch: typeof renameCurrentBranchDefault;
-  private readonly generateWorkspaceName: typeof generateBranchNameFromFirstAgentContext;
   private readonly workspaceGitService: WorkspaceGitService;
+  private readonly workspaceAutoName: WorkspaceAutoName;
   private readonly gitMutation: GitMutationService;
   private readonly workspaceProvisioning: WorkspaceProvisioningService;
   private readonly daemonConfigStore: DaemonConfigStore;
-  private readonly mcpBaseUrl: string | null;
   private readonly pushTokenStore: PushTokenStore;
   private unsubscribeAgentEvents: (() => void) | null = null;
   private unsubscribeTerminalWorkspaceContributionEvents: (() => void) | null = null;
@@ -616,10 +627,9 @@ export class Session {
       checkoutDiffManager,
       github,
       renameCurrentBranch,
-      generateWorkspaceName,
       workspaceGitService,
+      workspaceAutoName,
       daemonConfigStore,
-      mcpBaseUrl,
       stt,
       sttLanguage,
       tts,
@@ -640,6 +650,7 @@ export class Session {
       serverId,
       daemonVersion,
       daemonRuntimeConfig,
+      getWebSocketRuntimeMetrics,
     } = options;
     this.clientId = clientId;
     this.appVersion = appVersion ?? null;
@@ -674,13 +685,13 @@ export class Session {
     this.filesystem = filesystem ?? nodeSessionFileSystem;
     this.github = github ?? createGitHubService();
     this.renameCurrentBranch = renameCurrentBranch ?? renameCurrentBranchDefault;
-    this.generateWorkspaceName = generateWorkspaceName ?? generateBranchNameFromFirstAgentContext;
     this.workspaceGitService = workspaceGitService;
     this.gitMutation = createGitMutationService({
       workspaceGitService: this.workspaceGitService,
       github: this.github,
       logger: this.sessionLogger,
     });
+    this.workspaceAutoName = workspaceAutoName;
     this.workspaceProvisioning = createWorkspaceProvisioningService({
       workspaceRegistry: this.workspaceRegistry,
       projectRegistry: this.projectRegistry,
@@ -782,16 +793,21 @@ export class Session {
     this.daemonSession = new DaemonSession({
       host: {
         emit: (msg) => this.emit(msg),
+        emitLifecycleIntent: (intent) => this.emitLifecycleIntent(intent),
       },
+      clientId: this.clientId,
       paseoHome: this.paseoHome,
       serverId,
       daemonVersion,
       daemonRuntimeConfig,
+      getWebSocketRuntimeMetrics,
       listProviderAvailability: () => this.agentManager.listProviderAvailability(),
+      listAgents: () => this.agentManager.listAgents(),
+      listProjects: () => this.projectRegistry.list(),
+      listWorkspaces: () => this.workspaceRegistry.list(),
       logger: this.sessionLogger,
     });
     this.daemonConfigStore = daemonConfigStore;
-    this.mcpBaseUrl = mcpBaseUrl ?? null;
     this.terminalManager = terminalManager;
     this.terminalController = new TerminalSessionController({
       terminalManager,
@@ -908,8 +924,6 @@ export class Session {
       dictation,
     });
 
-    // Initialize agent MCP client asynchronously
-    void this.initializeAgentMcp();
     this.subscribeToAgentEvents();
 
     this.sessionLogger.trace({}, "agent.session.lifecycle.created");
@@ -1027,33 +1041,6 @@ export class Session {
   }
 
   /**
-   * Normalize a user prompt (with optional image metadata) for AgentManager
-   */
-  private buildAgentPrompt(
-    text: string,
-    images?: Array<{ data: string; mimeType: string }>,
-    attachments?: AgentAttachment[],
-  ): AgentPromptInput {
-    const normalized = text?.trim() ?? "";
-    const hasImages = Boolean(images && images.length > 0);
-    const hasAttachments = Boolean(attachments && attachments.length > 0);
-    if (!hasImages && !hasAttachments) {
-      return normalized;
-    }
-    const blocks: AgentPromptContentBlock[] = [];
-    if (normalized.length > 0) {
-      blocks.push({ type: "text", text: normalized });
-    }
-    for (const image of images ?? []) {
-      blocks.push({ type: "image", data: image.data, mimeType: image.mimeType });
-    }
-    for (const attachment of attachments ?? []) {
-      blocks.push(attachment);
-    }
-    return blocks;
-  }
-
-  /**
    * Interrupt the agent's active run so the next prompt starts a fresh turn.
    * Returns once the manager confirms the stream has been cancelled.
    */
@@ -1084,16 +1071,17 @@ export class Session {
     );
 
     const t0 = Date.now();
-    const cancelled = await this.agentManager.cancelAgentRun(agentId);
+    const cancellation = await this.agentManager.cancelAgentRun(agentId);
     this.sessionLogger.debug(
-      { agentId, cancelled, durationMs: Date.now() - t0 },
+      { agentId, cancellation: cancellation.status, durationMs: Date.now() - t0 },
       "interruptAgentIfRunning: cancelAgentRun completed",
     );
-    if (!cancelled) {
+    if (cancellation.status === "refused") {
       this.sessionLogger.warn(
         { agentId },
         "interruptAgentIfRunning: reported running but no active run was cancelled",
       );
+      throw new AgentRunCancellationError(agentId, "stop");
     }
   }
 
@@ -1116,37 +1104,6 @@ export class Session {
         content: `${context}: ${message}`,
       },
     });
-  }
-
-  /**
-   * Initialize Agent MCP client for this session using the daemon's HTTP MCP endpoint.
-   */
-  private async initializeAgentMcp(): Promise<void> {
-    try {
-      if (!this.mcpBaseUrl) {
-        this.sessionLogger.info(
-          "Skipping Agent MCP initialization because no MCP base URL is configured",
-        );
-        return;
-      }
-      const authToken = this.agentManager.getMcpAuthToken();
-      const transport = new StreamableHTTPClientTransport(
-        new URL(this.mcpBaseUrl),
-        authToken
-          ? { requestInit: { headers: { Authorization: `Bearer ${authToken}` } } }
-          : undefined,
-      );
-
-      this.agentMcpClient = await experimental_createMCPClient({
-        transport,
-      });
-
-      this.agentTools = (await this.agentMcpClient.tools()) as ToolSet;
-      const agentToolCount = Object.keys(this.agentTools ?? {}).length;
-      this.sessionLogger.trace({ agentToolCount }, "agent.session.mcp_init");
-    } catch (error) {
-      this.sessionLogger.error({ err: error }, "Failed to initialize Agent MCP");
-    }
   }
 
   /**
@@ -1187,6 +1144,43 @@ export class Session {
             "agent.session.forward_update",
           );
           void this.agentUpdates.forwardLiveAgent(event.agent);
+          return;
+        }
+
+        if (event.type === "provider_subagent") {
+          if (!this.supports(CLIENT_CAPS.providerSubagents)) {
+            return;
+          }
+          const update = event.event;
+          if (update.type === "upsert") {
+            this.emit({
+              type: "agent.provider_subagents.update",
+              payload: { kind: "upsert", subagent: update.subagent },
+            });
+          } else if (update.type === "timeline") {
+            this.emit({
+              type: "agent.provider_subagents.update",
+              payload: {
+                kind: "timeline",
+                parentAgentId: update.parentAgentId,
+                subagentId: update.subagentId,
+                provider: update.provider,
+                item: update.row.item,
+                timestamp: update.row.timestamp,
+                seq: update.row.seq,
+                epoch: update.epoch,
+              },
+            });
+          } else {
+            this.emit({
+              type: "agent.provider_subagents.update",
+              payload: {
+                kind: "remove",
+                parentAgentId: update.parentAgentId,
+                subagentId: update.subagentId,
+              },
+            });
+          }
           return;
         }
 
@@ -1325,14 +1319,6 @@ export class Session {
   ): Promise<ProjectPlacementPayload | null> {
     const workspace = await this.workspaceRegistry.get(workspaceId);
     if (!workspace) return null;
-    return this.buildProjectPlacementForWorkspace(workspace);
-  }
-
-  private async buildProjectPlacementForExistingWorkspaceProject(
-    workspaceId: string,
-  ): Promise<ProjectPlacementPayload | null> {
-    const workspace = await this.workspaceRegistry.get(workspaceId);
-    if (!workspace) return null;
 
     const project = await this.projectRegistry.get(workspace.projectId);
     if (!project) return null;
@@ -1399,10 +1385,12 @@ export class Session {
       this.dispatchVoiceAndControlMessage(msg) ??
       this.dispatchAgentRewindMessage(msg) ??
       this.dispatchAgentRelationshipMessage(msg) ??
+      this.dispatchAgentTimelineMessage(msg) ??
       this.dispatchAgentLifecycleMessage(msg) ??
       this.dispatchAgentConfigMessage(msg) ??
       this.dispatchCheckoutMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg) ??
+      this.dispatchWorkspaceFileMessage(msg) ??
       this.dispatchProviderMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchChatScheduleLoopMessage(msg) ??
@@ -1478,6 +1466,21 @@ export class Session {
     }
   }
 
+  private dispatchAgentTimelineMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "fetch_agent_timeline_request":
+        return this.handleFetchAgentTimelineRequest(msg);
+      case "agent.provider_subagents.list.request":
+        return this.handleProviderSubagentListRequest(msg);
+      case "agent.provider_subagents.timeline.get.request":
+        return this.handleProviderSubagentTimelineRequest(msg);
+      case "agent.fork_context.request":
+        return this.handleAgentForkContextRequest(msg);
+      default:
+        return undefined;
+    }
+  }
+
   private dispatchAgentLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     switch (msg.type) {
       case "fetch_agents_request":
@@ -1512,8 +1515,6 @@ export class Session {
         return this.handleRefreshAgentRequest(msg);
       case "cancel_agent_request":
         return this.handleCancelAgentRequest(msg.agentId, msg.requestId);
-      case "fetch_agent_timeline_request":
-        return this.handleFetchAgentTimelineRequest(msg);
       case "agent_permission_response":
         return this.handleAgentPermissionResponse(msg.agentId, msg.requestId, msg.response);
       case "clear_agent_attention":
@@ -1543,6 +1544,10 @@ export class Session {
         return this.daemonSession.handleGetStatusRequest(msg);
       case "daemon.get_pairing_offer.request":
         return this.daemonSession.handleGetPairingOfferRequest(msg);
+      case "diagnostics.request":
+        return this.daemonSession.handleDiagnosticsRequest(msg);
+      case "daemon.update.request":
+        return this.daemonSession.handleUpdateRequest(msg);
       case "set_daemon_config_request":
         this.emit({
           type: "set_daemon_config_response",
@@ -1641,6 +1646,12 @@ export class Session {
         return this.handleOpenProjectRequest(msg);
       case "project.add.request":
         return this.handleProjectAddRequest(msg);
+      case "project.create_directory.request":
+        return this.handleProjectCreateDirectoryRequest(msg);
+      case "workspace.github.search_repositories.request":
+        return this.handleWorkspaceGithubSearchRepositoriesRequest(msg);
+      case "project.github.clone.request":
+        return this.handleProjectGithubCloneRequest(msg);
       case "archive_workspace_request":
         return this.handleArchiveWorkspaceRequest(msg);
       case "project.remove.request":
@@ -1651,6 +1662,15 @@ export class Session {
         return this.handleWorkspaceClearAttentionRequest(msg);
       case "workspace.title.set.request":
         return this.handleWorkspaceTitleSetRequest(msg.workspaceId, msg.title, msg.requestId);
+      case "workspace.pin.set.request":
+        return this.handleWorkspacePinSetRequest(msg.workspaceId, msg.pinned, msg.requestId);
+      default:
+        return undefined;
+    }
+  }
+
+  private dispatchWorkspaceFileMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
       case "file_explorer_request":
         return this.workspaceFilesSession.handleFileExplorerRequest(msg);
       case "project_icon_request":
@@ -1760,6 +1780,10 @@ export class Session {
     this.peakInflightRequests = this.inflightRequests;
   }
 
+  public getSessionId(): string {
+    return this.sessionId;
+  }
+
   public async handleBinaryFrame(binaryFrame: BinaryFrame): Promise<void> {
     if (binaryFrame.kind === "file_transfer") {
       await this.workspaceFilesSession.handleFileTransferFrame(binaryFrame.frame);
@@ -1769,6 +1793,7 @@ export class Session {
   }
 
   private async handleRestartServerRequest(requestId: string, reason?: string): Promise<void> {
+    const lifecycleReason = normalizeClientRestartRpcReason(reason);
     const payload: { status: string } & Record<string, unknown> = {
       status: "restart_requested",
       clientId: this.clientId,
@@ -1778,7 +1803,7 @@ export class Session {
     }
     payload.requestId = requestId;
 
-    this.sessionLogger.warn({ reason }, "Restart requested via websocket");
+    this.sessionLogger.warn({ reason: lifecycleReason }, "Restart requested via websocket");
     this.emit({
       type: "status",
       payload,
@@ -1788,12 +1813,13 @@ export class Session {
       type: "restart",
       clientId: this.clientId,
       requestId,
-      ...(reason ? { reason } : {}),
+      reason: lifecycleReason,
     });
   }
 
   private async handleShutdownServerRequest(requestId: string): Promise<void> {
-    this.sessionLogger.warn("Shutdown requested via websocket");
+    const reason = CLIENT_SHUTDOWN_RPC_REASON;
+    this.sessionLogger.warn({ reason }, "Shutdown requested via websocket");
     this.emit({
       type: "status",
       payload: {
@@ -1807,6 +1833,7 @@ export class Session {
       type: "shutdown",
       clientId: this.clientId,
       requestId,
+      reason,
     });
   }
 
@@ -2264,8 +2291,15 @@ export class Session {
     );
 
     try {
-      const existing = await this.workspaceRegistry.get(workspaceId);
-      if (!existing) {
+      const trimmed = title?.trim() ?? "";
+      const nextTitle = trimmed.length === 0 ? null : trimmed;
+      const updatedAt = new Date().toISOString();
+      const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
+        ...existing,
+        title: nextTitle,
+        updatedAt,
+      }));
+      if (!updated) {
         this.emit({
           type: "workspace.title.set.response",
           payload: {
@@ -2278,15 +2312,6 @@ export class Session {
         });
         return;
       }
-
-      const trimmed = title?.trim() ?? "";
-      const nextTitle = trimmed.length === 0 ? null : trimmed;
-
-      await this.workspaceRegistry.upsert({
-        ...existing,
-        title: nextTitle,
-        updatedAt: new Date().toISOString(),
-      });
 
       this.emit({
         type: "workspace.title.set.response",
@@ -2329,6 +2354,52 @@ export class Session {
     }
   }
 
+  private async handleWorkspacePinSetRequest(
+    workspaceId: string,
+    pinned: boolean,
+    requestId: string,
+  ): Promise<void> {
+    const logContext = { workspaceId, pinned, requestId };
+    this.sessionLogger.info(logContext, "session: workspace.pin.set.request");
+    const emitResponse = (accepted: boolean, pinnedAt: string | null, error: string | null) => {
+      this.emit({
+        type: "workspace.pin.set.response",
+        payload: { requestId, workspaceId, accepted, pinnedAt, error },
+      });
+    };
+
+    try {
+      const nextPinnedAt = pinned ? new Date().toISOString() : null;
+      const updatedAt = new Date().toISOString();
+      const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
+        ...existing,
+        pinnedAt: nextPinnedAt,
+        updatedAt,
+      }));
+      if (!updated) {
+        emitResponse(false, null, "Workspace not found");
+        return;
+      }
+      emitResponse(true, nextPinnedAt, null);
+      await this.emitWorkspaceUpdatesForWorkspaceIds([workspaceId], { skipReconcile: true });
+    } catch (error) {
+      this.sessionLogger.error(
+        { ...logContext, err: error },
+        "session: workspace.pin.set.request error",
+      );
+      this.emit({
+        type: "activity_log",
+        payload: {
+          id: uuidv4(),
+          timestamp: new Date(),
+          type: "error",
+          content: `Failed to pin workspace: ${getErrorMessage(error)}`,
+        },
+      });
+      emitResponse(false, null, getErrorMessageOr(error, "Failed to pin workspace"));
+    }
+  }
+
   /**
    * Handle text message to agent (with optional image attachments)
    */
@@ -2358,7 +2429,7 @@ export class Session {
     );
 
     const promptText = options?.spokenInput ? wrapSpokenInput(text) : text;
-    const prompt = this.buildAgentPrompt(promptText, images, attachments);
+    const prompt = buildAgentPrompt(promptText, images, attachments);
 
     try {
       await sendPromptToAgent({
@@ -2440,6 +2511,7 @@ export class Session {
           initialTitle: workspacePromptTitle,
         },
       );
+      const createdDirectoryWorkspaceForAgent = !createdWorktree && !msg.workspaceId;
 
       const { snapshot, liveSnapshot } = await createAgentCommand(
         {
@@ -2470,16 +2542,16 @@ export class Session {
         },
       );
       createdAgentId = snapshot.id;
-      if (!createdWorktree && msg.workspaceId) {
-        await this.writeInitialWorkspaceTitleIfUntitled(workspaceId, workspacePromptTitle);
-      }
       await this.agentUpdates.forwardLiveAgent(snapshot);
-      if (!createdWorktree && trimmedPrompt) {
-        await this.scheduleAutoNameLocalWorkspaceTitleForFirstAgent({
-          workspaceId,
-          cwd: createAgentConfig.cwd,
-          firstAgentContext,
-        });
+      if (createdDirectoryWorkspaceForAgent && trimmedPrompt) {
+        this.workspaceAutoName.scheduleForDirectory(
+          {
+            workspaceId,
+            cwd: createAgentConfig.cwd,
+            firstAgentContext,
+          },
+          { currentSelection: this.getFocusedAgentSelectionForCwd(createAgentConfig.cwd) },
+        );
       }
       this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
         autoArchive,
@@ -2719,7 +2791,7 @@ export class Session {
           extractTimestamps(record),
         );
       }
-      await this.agentManager.hydrateTimelineFromProvider(agentId);
+      await this.agentManager.hydrateTimelineFromProvider(agentId, { broadcast: true });
       await this.agentUpdates.forwardLiveAgent(snapshot);
       const timelineSize = this.agentManager.getTimeline(agentId).length;
       if (requestId) {
@@ -2776,11 +2848,30 @@ export class Session {
             requestId,
             agentId,
             agent: payload,
+            error: null,
           },
         });
       }
     } catch (error) {
-      this.handleAgentRunError(agentId, error, "Failed to cancel running agent on request");
+      if (requestId) {
+        this.sessionLogger.error(
+          { err: error, agentId },
+          `Failed to cancel running agent on request for agent ${agentId}`,
+        );
+        const agent = this.agentManager.getAgent(agentId);
+        const payload = agent ? await this.buildAgentPayload(agent) : null;
+        this.emit({
+          type: "cancel_agent_response",
+          payload: {
+            requestId,
+            agentId,
+            agent: payload,
+            error: errorToFriendlyMessage(error),
+          },
+        });
+      } else {
+        this.handleAgentRunError(agentId, error, "Failed to cancel running agent on request");
+      }
     }
   }
 
@@ -2857,158 +2948,6 @@ export class Session {
       gitOptions,
       legacyWorktreeName,
       firstAgentContext,
-    );
-  }
-
-  private scheduleAutoNameWorkspaceBranchForFirstAgent(input: {
-    workspace: PersistedWorkspaceRecord;
-    firstAgentContext: FirstAgentContext;
-  }): void {
-    this.scheduleWorkspaceNaming(() => this.maybeAutoNameWorkspaceBranchForFirstAgent(input), {
-      cwd: input.workspace.cwd,
-      message: "Failed to auto-name worktree branch",
-    });
-  }
-
-  private async maybeAutoNameWorkspaceBranchForFirstAgent(input: {
-    workspace: PersistedWorkspaceRecord;
-    firstAgentContext: FirstAgentContext;
-  }): Promise<void> {
-    // Capture the generated title from the generator callback so we can write
-    // title := generated title after the branch rename completes.
-    let generatedTitle: string | null = null;
-    const result = await attemptFirstAgentBranchAutoName({
-      cwd: input.workspace.cwd,
-      firstAgentContext: input.firstAgentContext,
-      generateBranchNameFromContext: ({ cwd, firstAgentContext }) => {
-        return this.generateWorkspaceName({
-          agentManager: this.agentManager,
-          cwd,
-          workspaceGitService: this.workspaceGitService,
-          providerSnapshotManager: this.providerSnapshotManager,
-          daemonConfig: this.readStructuredGenerationDaemonConfig(),
-          currentSelection: this.getFocusedAgentSelectionForCwd(cwd),
-          firstAgentContext,
-          logger: this.sessionLogger,
-        }).then((r) => {
-          generatedTitle = r?.title ?? null;
-          return r?.branch ?? null;
-        });
-      },
-    });
-    if (!result.renamed || !generatedTitle) {
-      return;
-    }
-
-    // K4: re-read from the registry before writing so any concurrent upsert
-    // that happened between workspace creation and this async path is not clobbered.
-    // The first-agent rename renamed the git branch too, so persist the new branch
-    // alongside the title — both are this path's own fields.
-    await this.applyGeneratedWorkspaceTitle(input.workspace.workspaceId, {
-      title: generatedTitle,
-      branch: result.branchName,
-      promptTitle: resolveFirstAgentPromptTitle(input.firstAgentContext),
-    });
-    await this.gitMutation.notifyGitMutation(input.workspace.cwd, "rename-branch");
-    await this.emitWorkspaceUpdateForCwd(input.workspace.cwd);
-  }
-
-  // Generated names may replace the prompt title set at creation, but not a user
-  // rename that landed while the async generator was running.
-  private async applyGeneratedWorkspaceTitle(
-    workspaceId: string,
-    input: { title: string; branch?: string | null; promptTitle?: string | null },
-  ): Promise<void> {
-    const current = await this.workspaceRegistry.get(workspaceId);
-    if (!current) {
-      return;
-    }
-    let title = current.title;
-    if (!title || (input.promptTitle && title === input.promptTitle)) {
-      title = input.title;
-    }
-    await this.workspaceRegistry.upsert({
-      ...current,
-      title,
-      ...(input.branch ? { branch: input.branch } : {}),
-      updatedAt: new Date().toISOString(),
-    });
-  }
-
-  private async writeInitialWorkspaceTitleIfUntitled(
-    workspaceId: string,
-    title: string | null,
-  ): Promise<void> {
-    if (!title) {
-      return;
-    }
-    const current = await this.workspaceRegistry.get(workspaceId);
-    if (!current || current.title) {
-      return;
-    }
-    await this.workspaceRegistry.upsert({
-      ...current,
-      title,
-      updatedAt: new Date().toISOString(),
-    });
-  }
-
-  // Wraps the injected workspace-name generator for a directory workspace.
-  private async generateWorkspaceTitleFromContext(input: {
-    cwd: string;
-    firstAgentContext: FirstAgentContext;
-  }): Promise<GeneratedWorkspaceName | null> {
-    return this.generateWorkspaceName({
-      agentManager: this.agentManager,
-      cwd: input.cwd,
-      workspaceGitService: this.workspaceGitService,
-      providerSnapshotManager: this.providerSnapshotManager,
-      daemonConfig: this.readStructuredGenerationDaemonConfig(),
-      currentSelection: this.getFocusedAgentSelectionForCwd(input.cwd),
-      firstAgentContext: input.firstAgentContext,
-      logger: this.sessionLogger,
-    });
-  }
-
-  // Generates a human title for a directory workspace from the firstAgentContext
-  // prompt. No branch rename — directory workspaces have no worktree git state.
-  // TODO(K7): same-dir directory-workspace display disambiguation not yet implemented.
-  private async maybeAutoNameDirectoryWorkspaceTitle(input: {
-    workspaceId: string;
-    cwd: string;
-    firstAgentContext: FirstAgentContext;
-  }): Promise<void> {
-    const generated = await this.generateWorkspaceTitleFromContext({
-      cwd: input.cwd,
-      firstAgentContext: input.firstAgentContext,
-    });
-    const title = generated?.title ?? null;
-    if (!title) {
-      return;
-    }
-    // K4: applyGeneratedWorkspaceTitle re-reads from the registry before writing.
-    // Directory workspaces have no branch — write only the title.
-    await this.applyGeneratedWorkspaceTitle(input.workspaceId, {
-      title,
-      promptTitle: resolveFirstAgentPromptTitle(input.firstAgentContext),
-    });
-    await this.emitWorkspaceUpdateForWorkspaceId(input.workspaceId);
-  }
-
-  private async scheduleAutoNameLocalWorkspaceTitleForFirstAgent(input: {
-    workspaceId: string;
-    cwd: string;
-    firstAgentContext: FirstAgentContext;
-  }): Promise<void> {
-    const workspaceId = input.workspaceId;
-    this.scheduleWorkspaceNaming(
-      () =>
-        this.maybeAutoNameDirectoryWorkspaceTitle({
-          workspaceId,
-          cwd: input.cwd,
-          firstAgentContext: input.firstAgentContext,
-        }),
-      { cwd: input.cwd, message: "Failed to auto-name local workspace title" },
     );
   }
 
@@ -3220,22 +3159,23 @@ export class Session {
 
     try {
       const workspaceCwd = cwd?.trim();
-      const entries = workspaceCwd
-        ? await searchWorkspaceEntries({
-            cwd: expandTilde(workspaceCwd),
-            query,
-            limit,
-            includeFiles,
-            includeDirectories,
-            matchMode,
-          })
-        : (
-            await searchHomeDirectories({
-              homeDir: process.env.HOME ?? homedir(),
-              query,
-              limit,
-            })
-          ).map((path) => ({ path, kind: "directory" as const }));
+      const searchesWorkspace = Boolean(workspaceCwd);
+      const entries = await searchDirectoryEntries({
+        root: workspaceCwd ? expandTilde(workspaceCwd) : (process.env.HOME ?? homedir()),
+        query,
+        pathFormat: searchesWorkspace ? "relative" : "absolute",
+        pathQueryPolicy: searchesWorkspace ? "slashes" : "rooted",
+        blankQueryBehavior: searchesWorkspace ? "children" : "none",
+        rootAliases: searchesWorkspace ? [] : ["~"],
+        traversableHiddenDirectoryNames: searchesWorkspace
+          ? WORKSPACE_SEARCH_HIDDEN_DIRECTORIES
+          : [],
+        confidentResultScanThreshold: searchesWorkspace ? undefined : 5_000,
+        includeFiles,
+        includeDirectories,
+        matchMode,
+        limit,
+      });
       const directories = entries
         .filter((entry) => entry.kind === "directory")
         .map((entry) => entry.path);
@@ -3589,10 +3529,7 @@ export class Session {
       if (existing) {
         return existing;
       }
-      const placementPromise =
-        request.type === "fetch_agent_history_request"
-          ? this.buildProjectPlacementForExistingWorkspaceProject(workspaceId)
-          : this.buildProjectPlacementForWorkspaceId(workspaceId);
+      const placementPromise = this.buildProjectPlacementForWorkspaceId(workspaceId);
       placementByWorkspaceId.set(workspaceId, placementPromise);
       return placementPromise;
     };
@@ -3697,6 +3634,7 @@ export class Session {
       workspaceKind: workspace.kind,
       name: resolveWorkspaceDisplayName(workspace),
       title: workspace.title,
+      pinnedAt: workspace.pinnedAt,
       archivingAt: null,
       status: "done",
       statusEnteredAt: null,
@@ -3781,6 +3719,7 @@ export class Session {
         derivedDisplayName: result.worktree.branchName || result.workspace.displayName,
       }),
       title: result.workspace.title,
+      pinnedAt: result.workspace.pinnedAt,
       archivingAt: null,
       status: "done",
       statusEnteredAt: result.workspace.createdAt,
@@ -4604,29 +4543,15 @@ export class Session {
       });
     if (request.firstAgentContext) {
       const firstAgentContext = request.firstAgentContext;
-      this.scheduleWorkspaceNaming(
-        () =>
-          this.maybeAutoNameDirectoryWorkspaceTitle({
-            workspaceId: workspace.workspaceId,
-            cwd: workspace.cwd,
-            firstAgentContext,
-          }),
-        { cwd: workspace.cwd, message: "Failed to auto-name directory workspace title" },
+      this.workspaceAutoName.scheduleForDirectory(
+        {
+          workspaceId: workspace.workspaceId,
+          cwd: workspace.cwd,
+          firstAgentContext,
+        },
+        { currentSelection: this.getFocusedAgentSelectionForCwd(workspace.cwd) },
       );
     }
-  }
-
-  // Schedules a background workspace-naming write off the request path. The
-  // setTimeout(0) keeps the LLM call off the hot path.
-  private scheduleWorkspaceNaming(
-    run: () => Promise<void>,
-    context: { cwd: string; message: string },
-  ): void {
-    setTimeout(() => {
-      void run().catch((error) => {
-        this.sessionLogger.warn({ err: error, cwd: context.cwd }, context.message);
-      });
-    }, 0);
   }
 
   private async handleWorkspaceCreateWorktree(
@@ -4863,6 +4788,206 @@ export class Session {
     }
   }
 
+  private async handleProjectCreateDirectoryRequest(
+    request: Extract<SessionInboundMessage, { type: "project.create_directory.request" }>,
+  ): Promise<void> {
+    try {
+      const result = await createProjectDirectory(
+        { parentPath: request.parentPath, name: request.name },
+        {
+          registerProject: (directoryPath) =>
+            this.workspaceProvisioning.findOrCreateProjectForDirectory(directoryPath),
+        },
+      );
+      this.emit({
+        type: "project.create_directory.response",
+        payload: {
+          requestId: request.requestId,
+          directoryPath: result.directoryPath,
+          project: this.buildProjectDescriptor(result.project),
+          error: null,
+          errorCode: null,
+        },
+      });
+    } catch (error) {
+      const requestError =
+        error instanceof ProjectDirectoryRequestError
+          ? error
+          : new ProjectDirectoryRequestError(
+              "registration_failed",
+              error instanceof Error ? error.message : "Failed to create project directory",
+            );
+      this.sessionLogger.error(
+        {
+          err: error,
+          parentPath: request.parentPath,
+          name: request.name,
+          errorCode: requestError.code,
+        },
+        "Failed to create project directory",
+      );
+      this.emit({
+        type: "project.create_directory.response",
+        payload: {
+          requestId: request.requestId,
+          directoryPath: requestError.directoryPath,
+          project: null,
+          error: requestError.message,
+          errorCode: requestError.code,
+        },
+      });
+    }
+  }
+
+  private async handleWorkspaceGithubSearchRepositoriesRequest(
+    request: Extract<
+      SessionInboundMessage,
+      { type: "workspace.github.search_repositories.request" }
+    >,
+  ): Promise<void> {
+    try {
+      const repositories = await this.github.searchRepositories({
+        cwd: homedir(),
+        query: request.query,
+        limit: request.limit,
+      });
+      this.emit({
+        type: "workspace.github.search_repositories.response",
+        payload: {
+          requestId: request.requestId,
+          repositories,
+          status: "success",
+          available: true,
+          error: null,
+        },
+      });
+    } catch (error) {
+      const missing = error instanceof GitHubCliMissingError;
+      const unauthenticated = error instanceof GitHubAuthenticationError;
+      const commandError = error instanceof GitHubCommandError ? error.stderr.trim() : "";
+      let message: string;
+      if (missing) {
+        message = "GitHub CLI (gh) is not installed or not in PATH";
+      } else if (unauthenticated) {
+        message = "GitHub CLI is not authenticated. Run gh auth login on the host.";
+      } else if (commandError) {
+        message = commandError;
+      } else {
+        message = error instanceof Error ? error.message : "GitHub search failed";
+      }
+      let payload: WorkspaceGithubSearchRepositoriesResponsePayload;
+      if (missing) {
+        payload = {
+          status: "unavailable",
+          requestId: request.requestId,
+          repositories: [],
+          reason: "gh_missing",
+          available: false,
+          error: message,
+        };
+      } else if (unauthenticated) {
+        payload = {
+          status: "unauthenticated",
+          requestId: request.requestId,
+          repositories: [],
+          available: false,
+          error: message,
+        };
+      } else {
+        payload = {
+          status: "error",
+          requestId: request.requestId,
+          repositories: [],
+          available: true,
+          error: message,
+        };
+      }
+      this.sessionLogger.warn({ err: error }, "GitHub repository search failed");
+      this.emit({
+        type: "workspace.github.search_repositories.response",
+        payload,
+      });
+    }
+  }
+
+  private async handleProjectGithubCloneRequest(
+    request: Extract<SessionInboundMessage, { type: "project.github.clone.request" }>,
+  ): Promise<void> {
+    let normalizedRepo = request.repo;
+    let checkoutPath: string | null = null;
+    try {
+      const repo = normalizeCloneRepository({
+        repo: request.repo,
+        cloneProtocol: request.cloneProtocol,
+      });
+      normalizedRepo = repo.displayName;
+      const targetParent = resolve(expandTilde(request.targetDirectory.trim()));
+      checkoutPath = resolve(targetParent, repo.name);
+      if (!this.isPathWithinRoot(targetParent, checkoutPath)) {
+        throw new Error("Resolved checkout path must stay inside the target directory");
+      }
+
+      await mkdir(targetParent, { recursive: true });
+      try {
+        await lstat(checkoutPath);
+        throw new Error(`Checkout path already exists: ${checkoutPath}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+      }
+
+      const cloneStagingPath = await mkdtemp(resolve(targetParent, ".paseo-clone-"));
+      try {
+        await runGitCommand(["clone", repo.cloneUrl, cloneStagingPath], {
+          cwd: targetParent,
+          timeout: 5 * 60 * 1000,
+          maxOutputBytes: 1024 * 1024,
+          logger: this.sessionLogger,
+        });
+        await rename(cloneStagingPath, checkoutPath);
+      } catch (error) {
+        await rm(cloneStagingPath, { recursive: true, force: true }).catch((cleanupError) => {
+          this.sessionLogger.warn(
+            { err: cleanupError, cloneStagingPath },
+            "Failed to clean up partial GitHub clone",
+          );
+        });
+        throw error;
+      }
+
+      const project =
+        await this.workspaceProvisioning.findOrCreateProjectForDirectory(checkoutPath);
+
+      this.emit({
+        type: "project.github.clone.response",
+        payload: {
+          requestId: request.requestId,
+          repo: repo.displayName,
+          checkoutPath,
+          project: this.buildProjectDescriptor(project),
+          error: null,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to clone GitHub repo";
+      this.sessionLogger.error(
+        { err: error, repo: request.repo, targetDirectory: request.targetDirectory },
+        "Failed to clone GitHub project",
+      );
+      this.emit({
+        type: "project.github.clone.response",
+        payload: {
+          requestId: request.requestId,
+          repo: normalizedRepo,
+          checkoutPath,
+          project: null,
+          error: message,
+        },
+      });
+    }
+  }
+
   // Named accessor: the workspace descriptor builder and the git-watch test both read a workspace's
   // scripts snapshot through here; the workspace-scripts module owns the payload assembly.
   private buildWorkspaceScriptPayloadSnapshot(
@@ -4933,7 +5058,9 @@ export class Session {
           this.createPaseoWorktree(workflowInput, serviceOptions),
         warmWorkspaceGitData: (workspace) => this.warmWorkspaceGitDataForWorkspace(workspace),
         autoNameWorkspaceBranchForFirstAgent: (autoNameInput) =>
-          this.scheduleAutoNameWorkspaceBranchForFirstAgent(autoNameInput),
+          this.workspaceAutoName.scheduleForWorktree(autoNameInput, {
+            currentSelection: this.getFocusedAgentSelectionForCwd(autoNameInput.workspace.cwd),
+          }),
         emitWorkspaceUpdateForWorkspaceId: (workspaceId) =>
           this.emitWorkspaceUpdateForWorkspaceId(workspaceId),
         cacheWorkspaceSetupSnapshot: (workspaceId, snapshot) => {
@@ -5392,6 +5519,152 @@ export class Session {
     }
   }
 
+  private async handleProviderSubagentListRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.provider_subagents.list.request" }>,
+  ): Promise<void> {
+    try {
+      this.emit({
+        type: "agent.provider_subagents.list.response",
+        payload: {
+          requestId: msg.requestId,
+          parentAgentId: msg.parentAgentId,
+          subagents: this.agentManager.listProviderSubagents(msg.parentAgentId),
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.provider_subagents.list.response",
+        payload: {
+          requestId: msg.requestId,
+          parentAgentId: msg.parentAgentId,
+          subagents: [],
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  }
+
+  private async handleProviderSubagentTimelineRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.provider_subagents.timeline.get.request" }>,
+  ): Promise<void> {
+    const direction: AgentTimelineFetchDirection = msg.direction ?? (msg.cursor ? "after" : "tail");
+    try {
+      const descriptor = this.agentManager.getProviderSubagent(msg.parentAgentId, msg.subagentId);
+      if (!descriptor) {
+        throw new Error("Provider subagent not found");
+      }
+      const timeline = this.agentManager.fetchProviderSubagentTimeline(
+        msg.parentAgentId,
+        msg.subagentId,
+        {
+          direction,
+          cursor: msg.cursor,
+          limit: msg.limit ?? (direction === "after" ? 0 : 200),
+        },
+      );
+      this.emit({
+        type: "agent.provider_subagents.timeline.get.response",
+        payload: {
+          requestId: msg.requestId,
+          parentAgentId: msg.parentAgentId,
+          subagentId: msg.subagentId,
+          provider: descriptor.provider,
+          direction,
+          epoch: timeline.epoch,
+          reset: timeline.reset,
+          staleCursor: timeline.staleCursor,
+          gap: timeline.gap,
+          window: timeline.window,
+          hasOlder: timeline.hasOlder,
+          hasNewer: timeline.hasNewer,
+          rows: timeline.rows.map((row) => ({
+            item: row.item,
+            timestamp: row.timestamp,
+            seq: row.seq,
+          })),
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "agent.provider_subagents.timeline.get.response",
+        payload: {
+          requestId: msg.requestId,
+          parentAgentId: msg.parentAgentId,
+          subagentId: msg.subagentId,
+          provider: null,
+          direction,
+          epoch: "",
+          reset: false,
+          staleCursor: false,
+          gap: false,
+          window: { minSeq: 0, maxSeq: 0, nextSeq: 0 },
+          hasOlder: false,
+          hasNewer: false,
+          rows: [],
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  }
+
+  private async handleAgentForkContextRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.fork_context.request" }>,
+  ): Promise<void> {
+    try {
+      const snapshot = await ensureAgentLoaded(msg.agentId, {
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        logger: this.sessionLogger,
+      });
+      const agentPayload = await this.buildAgentPayload(snapshot);
+      const timeline = this.agentManager.fetchTimeline(msg.agentId, {
+        direction: "tail",
+        limit: 0,
+      });
+      const forkContext = buildAgentForkContextAttachment({
+        rows: timeline.rows,
+        cursorBoundary: msg.boundaryCursor
+          ? { timelineEpoch: timeline.epoch, cursor: msg.boundaryCursor }
+          : null,
+        boundaryMessageId: msg.boundaryMessageId,
+        agentTitle: agentPayload.title,
+        cwd: snapshot.cwd,
+      });
+
+      this.emit({
+        type: "agent.fork_context.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: msg.agentId,
+          attachment: forkContext.attachment,
+          itemCount: forkContext.itemCount,
+          boundaryCursor: forkContext.boundaryCursor,
+          boundaryMessageId: forkContext.boundaryMessageId,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.sessionLogger.error(
+        { err: error, agentId: msg.agentId },
+        "Failed to handle agent.fork_context.request",
+      );
+      this.emit({
+        type: "agent.fork_context.response",
+        payload: {
+          requestId: msg.requestId,
+          agentId: msg.agentId,
+          attachment: null,
+          itemCount: 0,
+          boundaryCursor: msg.boundaryCursor ?? null,
+          boundaryMessageId: msg.boundaryMessageId ?? null,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  }
+
   private async handleSendAgentMessageRequest(
     msg: Extract<SessionInboundMessage, { type: "send_agent_message_request" }>,
   ): Promise<void> {
@@ -5412,7 +5685,7 @@ export class Session {
     try {
       const agentId = resolved.agentId;
 
-      const prompt = this.buildAgentPrompt(msg.text, msg.images, msg.attachments);
+      const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
       this.sessionLogger.trace(
         {
           agentId,
@@ -5667,21 +5940,61 @@ export class Session {
 
     await this.voiceSession.cleanup();
 
-    // Close MCP clients
-    if (this.agentMcpClient) {
-      try {
-        await this.agentMcpClient.close();
-      } catch (error) {
-        this.sessionLogger.error({ err: error }, "Failed to close Agent MCP client");
-      }
-      this.agentMcpClient = null;
-      this.agentTools = null;
-    }
-
     this.terminalController.dispose();
 
     this.checkoutSession.cleanup();
 
     this.workspaceGitObserver.dispose();
   }
+}
+
+interface CloneRepositoryInput {
+  name: string;
+  displayName: string;
+  cloneUrl: string;
+}
+
+function normalizeCloneRepository(input: {
+  repo: string;
+  cloneProtocol?: "https" | "ssh";
+}): CloneRepositoryInput {
+  const trimmed = input.repo.trim();
+  if (!trimmed) {
+    throw new Error("Repository is required");
+  }
+
+  const remote = parseGitRemoteLocation(trimmed);
+  if (remote) {
+    const segments = remote.path.split("/").filter(Boolean);
+    const name = segments.at(-1);
+    if (!name || !isValidGitHubRepoSegment(name)) {
+      throw new Error("Repository name contains invalid characters");
+    }
+    return { name, displayName: remote.path, cloneUrl: trimmed };
+  }
+
+  const [owner, rawName, ...extra] = trimmed.split("/");
+  if (!owner || !rawName || extra.length > 0) {
+    throw new Error("Repository must use owner/repo format or a git remote URL");
+  }
+  const name = rawName.endsWith(".git") ? rawName.slice(0, -4) : rawName;
+  if (!isValidGitHubRepoSegment(owner) || !isValidGitHubRepoSegment(name)) {
+    throw new Error("Repository contains invalid characters");
+  }
+  if (!input.cloneProtocol) {
+    throw new Error("Clone protocol is required for owner/repo repository names");
+  }
+  const cloneUrl =
+    input.cloneProtocol === "ssh"
+      ? `git@github.com:${owner}/${name}.git`
+      : `https://github.com/${owner}/${name}.git`;
+  return {
+    name,
+    displayName: `${owner}/${name}`,
+    cloneUrl,
+  };
+}
+
+function isValidGitHubRepoSegment(value: string): boolean {
+  return /^[A-Za-z0-9._-]+$/u.test(value);
 }

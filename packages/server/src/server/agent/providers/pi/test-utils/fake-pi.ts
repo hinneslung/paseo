@@ -7,6 +7,7 @@ import type {
 import type {
   PiAgentMessage,
   PiModel,
+  PiPromptAck,
   PiRpcSlashCommand,
   PiRuntimeEvent,
   PiSessionState,
@@ -73,9 +74,14 @@ export class FakePiSession implements PiRuntimeSession {
   commands: PiRpcSlashCommand[] = [];
   compactError: Error | null = null;
   emitCompactEnd = true;
+  getStateError: Error | null = null;
+  promptAck: PiPromptAck = {};
   state: PiSessionState;
 
   private readonly subscribers = new Set<(event: PiRuntimeEvent) => void>();
+  private nextHeldPrompt: { promise: Promise<void>; reject: (error: Error) => void } | null = null;
+  private activeHeldPrompt: { promise: Promise<void>; reject: (error: Error) => void } | null =
+    null;
 
   constructor(launch: PiRuntimeLaunch) {
     this.state = {
@@ -101,10 +107,43 @@ export class FakePiSession implements PiRuntimeSession {
   async prompt(
     message: string,
     images?: Array<{ type: "image"; data: string; mimeType: string }>,
-  ): Promise<void> {
+  ): Promise<PiPromptAck> {
     this.prompts.push({ message, imageCount: images?.length ?? 0 });
+    const heldPrompt = this.nextHeldPrompt;
+    if (heldPrompt) {
+      this.nextHeldPrompt = null;
+      this.activeHeldPrompt = heldPrompt;
+      try {
+        await heldPrompt.promise;
+      } finally {
+        if (this.activeHeldPrompt === heldPrompt) {
+          this.activeHeldPrompt = null;
+        }
+      }
+    }
     this.handleTreeNavigationCommand(message);
     this.handleEntryCaptureCommand(message);
+    return this.promptAck;
+  }
+
+  holdNextPrompt(): void {
+    if (this.nextHeldPrompt || this.activeHeldPrompt) {
+      throw new Error("FakePi already has a held prompt");
+    }
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((_resolve, rejectPromise) => {
+      reject = rejectPromise;
+    });
+    this.nextHeldPrompt = { promise, reject };
+  }
+
+  async failHeldPrompt(error: Error): Promise<void> {
+    const heldPrompt = this.activeHeldPrompt ?? this.nextHeldPrompt;
+    if (!heldPrompt) {
+      throw new Error("FakePi has no held prompt");
+    }
+    heldPrompt.reject(error);
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 
   async compact(customInstructions?: string): Promise<void> {
@@ -131,6 +170,9 @@ export class FakePiSession implements PiRuntimeSession {
   }
 
   async getState(): Promise<PiSessionState> {
+    if (this.getStateError) {
+      throw this.getStateError;
+    }
     return this.state;
   }
 
