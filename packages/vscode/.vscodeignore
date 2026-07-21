@@ -10,3 +10,4 @@ dist/test/**
 *.vsix
 .gitignore
 .vscode-test/**
+artifacts/**

@@ -7,7 +7,6 @@ import {
   useState,
   type ComponentProps,
   type ReactElement,
-  type ComponentProps,
   type ReactNode,
 } from "react";
 import { useStoreWithEqualityFn } from "zustand/traditional";
@@ -36,7 +35,6 @@ import {
   SquareTerminal,
   X,
 } from "lucide-react-native";
-import { GestureDetector } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { Theme } from "@/styles/theme";
@@ -71,7 +69,6 @@ import { WorkspaceOpenInEditorButton } from "@/screens/workspace/workspace-open-
 import { WorkspaceScriptsButton } from "@/screens/workspace/workspace-scripts-button";
 import { ImportSessionSheet } from "@/components/import-session-sheet";
 import { useToast } from "@/contexts/toast-context";
-import { useExplorerOpenGesture } from "@/hooks/use-explorer-open-gesture";
 import { selectIsFileExplorerOpen, usePanelStore } from "@/stores/panel-store";
 import { type ExplorerCheckoutContext } from "@/stores/explorer-checkout-context";
 import {
@@ -208,7 +205,6 @@ const EMPTY_UI_TABS: WorkspaceTab[] = [];
 const EMPTY_WORKSPACE_SCRIPTS: WorkspaceDescriptor["scripts"] = [];
 const EMPTY_PINNED_AGENT_IDS = new Set<string>();
 const EMPTY_SET = new Set<string>();
-const COMPACT_WEB_GESTURE_TOUCH_ACTION = isWeb ? "auto" : "pan-y";
 
 function getWorkspaceScripts(
   workspaceDescriptor: WorkspaceDescriptor | null | undefined,
@@ -906,29 +902,6 @@ const MobileMountedTabSlot = memo(function MobileMountedTabSlot({
     </RenderProfile>
   );
 });
-
-interface MobileExplorerOpenGestureSurfaceProps {
-  children: ReactNode;
-  enabled: boolean;
-  onOpenExplorer: () => void;
-}
-
-function MobileExplorerOpenGestureSurface({
-  children,
-  enabled,
-  onOpenExplorer,
-}: MobileExplorerOpenGestureSurfaceProps) {
-  const explorerOpenGesture = useExplorerOpenGesture({
-    enabled,
-    onOpen: onOpenExplorer,
-  });
-
-  return (
-    <GestureDetector gesture={explorerOpenGesture} touchAction={COMPACT_WEB_GESTURE_TOUCH_ACTION}>
-      <View style={styles.content}>{children}</View>
-    </GestureDetector>
-  );
-}
 
 function useStableTabDescriptorMap(tabDescriptors: WorkspaceTabDescriptor[]) {
   const cacheRef = useRef(new Map<string, WorkspaceTabDescriptor>());
@@ -1856,10 +1829,8 @@ interface WorkspaceExplorerActionsInput {
 }
 
 interface WorkspaceExplorerActions {
-  openExplorerForWorkspace: () => void;
   handleToggleExplorer: () => void;
   closeMobileExplorer: () => void;
-  canOpenExplorerWithGesture: boolean;
 }
 
 function useWorkspaceTerminalTabActions({
@@ -1961,22 +1932,10 @@ function useWorkspaceExplorerActions({
   isRouteFocused,
   showFileExplorer,
 }: WorkspaceExplorerActionsInput): WorkspaceExplorerActions {
-  const openFileExplorerForCheckout = usePanelStore((state) => state.openFileExplorerForCheckout);
   const toggleFileExplorerForCheckout = usePanelStore(
     (state) => state.toggleFileExplorerForCheckout,
   );
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
-  const canOpenExplorerWithGesture = showFileExplorer && Boolean(activeExplorerCheckout);
-
-  const openExplorerForWorkspace = useCallback(() => {
-    if (!showFileExplorer || !activeExplorerCheckout) {
-      return;
-    }
-    openFileExplorerForCheckout({
-      isCompact: isMobile,
-      checkout: activeExplorerCheckout,
-    });
-  }, [activeExplorerCheckout, isMobile, openFileExplorerForCheckout, showFileExplorer]);
 
   const handleToggleExplorer = useCallback(() => {
     if (!showFileExplorer || !activeExplorerCheckout) {
@@ -2011,10 +1970,8 @@ function useWorkspaceExplorerActions({
   }, [isExplorerOpen, isRouteFocused, showFileExplorer, showMobileAgent]);
 
   return {
-    openExplorerForWorkspace,
     handleToggleExplorer,
     closeMobileExplorer,
-    canOpenExplorerWithGesture,
   };
 }
 function WorkspaceScreenContent({
@@ -2198,12 +2155,7 @@ function WorkspaceScreenContent({
       isGit: isGitCheckout,
     };
   }, [isGitCheckout, normalizedServerId, workspaceDirectory]);
-  const {
-    openExplorerForWorkspace,
-    handleToggleExplorer,
-    closeMobileExplorer,
-    canOpenExplorerWithGesture,
-  } = useWorkspaceExplorerActions({
+  const { handleToggleExplorer, closeMobileExplorer } = useWorkspaceExplorerActions({
     activeExplorerCheckout,
     isExplorerOpen,
     isMobile,
@@ -3877,12 +3829,7 @@ function WorkspaceScreenContent({
 
       <View style={styles.centerContent}>
         {isMobile ? (
-          <MobileExplorerOpenGestureSurface
-            enabled={canOpenExplorerWithGesture}
-            onOpenExplorer={openExplorerForWorkspace}
-          >
-            {content}
-          </MobileExplorerOpenGestureSurface>
+          <View style={styles.content}>{content}</View>
         ) : (
           <View style={styles.content}>{desktopContent}</View>
         )}
