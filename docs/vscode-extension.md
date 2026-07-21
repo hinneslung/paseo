@@ -162,3 +162,18 @@ The package also has an `@vscode/test-electron` smoke test at
 `src/test/run-vscode-smoke.mjs`. Test VS Code must launch as Electron, not as a
 Node child process. Delete `ELECTRON_RUN_AS_NODE` before launching VS Code; the
 smoke test and CDP harness do this explicitly.
+
+The deterministic workspace-open and editing-shortcuts CDP spec normally runs
+under Xvfb:
+
+```bash
+xvfb-run -a node packages/vscode/scripts/vscode-e2e.mjs
+```
+
+On a displayless Linux host without `xvfb-run`, use the harness's native
+Electron headless mode. It also expands the CDP viewport so the visible composer
+is exercised rather than a retained responsive-layout copy:
+
+```bash
+PASEO_VSCODE_E2E_HEADLESS=1 node packages/vscode/scripts/vscode-e2e.mjs
+```

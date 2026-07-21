@@ -913,6 +913,7 @@ export const ptBR: TranslationResources = {
         openIn: "Abrir workspace em {{target}}",
         openFileIn: "Abrir {{fileName}} em {{target}}",
         failedOpen: "Falha ao abrir workspace",
+        failedOpenFile: "Falha ao abrir arquivo",
       },
       pr: {
         actions: {
@@ -1332,6 +1333,11 @@ export const ptBR: TranslationResources = {
     errorTitle: "Algo deu errado",
     errorDescription:
       "O servidor local falhou ao iniciar. Se isso continuar acontecendo, reporte o problema no GitHub e inclua os logs abaixo.",
+    status: {
+      connecting: "Conectando ao daemon do Paseo…",
+      loadingWorkspaces: "Carregando workspaces…",
+      opening: "Abrindo esta pasta no Paseo…",
+    },
     logs: {
       loading: "Carregando logs do daemon...",
       unavailable: "Nenhum log do daemon disponível.",

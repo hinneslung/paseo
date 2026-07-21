@@ -434,7 +434,7 @@ export function StartupSplashScreen({
       <View style={styles.errorScreen}>
         <TitlebarDragRegion />
         <ScrollView
-          style={errorScrollViewStyle}
+          style={styles.errorScrollView}
           contentContainerStyle={styles.errorScrollContent}
           showsVerticalScrollIndicator
         >

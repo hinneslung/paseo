@@ -21,6 +21,7 @@ const packageRoot = path.resolve(scriptDir, "..");
 const vscodeVersion = process.env.PASEO_VSCODE_TEST_VERSION ?? "1.124.2";
 const daemonPort = Number(process.env.PASEO_VSCODE_E2E_DAEMON_PORT ?? 6788);
 const cdpPort = Number(process.env.PASEO_VSCODE_E2E_CDP_PORT ?? 9230);
+const runHeadless = process.env.PASEO_VSCODE_E2E_HEADLESS === "1";
 const artifactDir =
   process.env.PASEO_VSCODE_E2E_ARTIFACT_DIR ?? path.join(packageRoot, "artifacts", "vscode-e2e");
 const workspaceMarkerSelector = '[data-testid="workspace-header-title"]';
@@ -69,7 +70,14 @@ async function waitForWorkspace(frame, timeoutMs) {
 
 async function readMessageInputState(frame) {
   return frame.evaluate(() => {
-    const textarea = document.querySelector('[data-testid="message-input-root"] textarea');
+    const textarea = Array.from(
+      document.querySelectorAll('[data-testid="message-input-root"] textarea'),
+    ).find(
+      (candidate) =>
+        candidate instanceof HTMLTextAreaElement &&
+        candidate.getClientRects().length > 0 &&
+        getComputedStyle(candidate).visibility !== "hidden",
+    );
     if (!(textarea instanceof HTMLTextAreaElement)) {
       return { present: false };
     }
@@ -103,7 +111,7 @@ async function waitForMessageInputState(frame, timeoutMs, predicate, label) {
 // same handler the mac Cmd combos hit; the modifier mapping is unit-tested.
 async function runEditingShortcutsProbe(appFrame) {
   const probeText = `paseo edit probe ${Date.now()}`;
-  const textarea = appFrame.locator('[data-testid="message-input-root"] textarea').first();
+  const textarea = appFrame.locator('[data-testid="message-input-root"] textarea:visible').first();
   await textarea.click();
   await waitForMessageInputState(appFrame, 10_000, (s) => s.present && s.focused, "composer focus");
 
@@ -203,7 +211,12 @@ async function runWorkspaceOpenSpec() {
         PASEO_VSCODE_TEST_PASSWORD: password,
       },
       extraArgs: ["--password-store=basic"],
-      extraArgsAfterGpu: ["--disable-dev-shm-usage"],
+      extraArgsAfterGpu: [
+        "--disable-dev-shm-usage",
+        ...(runHeadless
+          ? ["--headless", "--ozone-platform=headless", "--window-size=1440,900"]
+          : []),
+      ],
       logLaunch: () =>
         log("launching VS Code", { workspaceDir, cdpPort, daemonListen: daemon.listen }),
       userDataDir,
@@ -216,6 +229,9 @@ async function runWorkspaceOpenSpec() {
 
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
     workbench = await waitForWorkbench(browser, 30_000);
+    if (runHeadless) {
+      await workbench.setViewportSize({ width: 1440, height: 900 });
+    }
     workbench.on("console", (message) => log(`workbench:${message.type()}`, message.text()));
     workbench.on("pageerror", (error) => log("workbench pageerror", error.message));
 
