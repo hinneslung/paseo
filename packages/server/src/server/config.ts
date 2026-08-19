@@ -22,6 +22,7 @@ import { AgentProviderSchema } from "@getpaseo/protocol/provider-manifest";
 import { hashDaemonPassword } from "./auth.js";
 import { resolveSpeechConfig } from "./speech/speech-config-resolver.js";
 import { mergeHostnames, parseHostnamesEnv, type HostnamesConfig } from "./hostnames.js";
+import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
 
 const DEFAULT_PORT = 6767;
 const DEFAULT_RELAY_ENDPOINT = "relay.paseo.sh:443";
@@ -85,6 +86,16 @@ function normalizeLogEnv(value: string | undefined): string | undefined {
   }
 
   return value.trim().toLowerCase();
+}
+
+function resolveGitProcessConfig(
+  env: NodeJS.ProcessEnv,
+  persisted: ReturnType<typeof loadPersistedConfig>,
+): NonNullable<PaseoDaemonConfig["git"]> {
+  return resolveGitProcessPolicy({
+    env,
+    persisted: persisted.daemon?.git,
+  });
 }
 
 export type CliConfigOverrides = Partial<{
@@ -187,6 +198,7 @@ interface ResolveRelayInput {
 
 interface ResolvedRelay {
   enabled: boolean;
+  enabledMutable: boolean;
   endpoint: string;
   publicEndpoint: string;
   useTls: boolean;
@@ -210,11 +222,11 @@ function resolveTlsFromEnv(
 }
 
 function resolveRelayConfig(input: ResolveRelayInput): ResolvedRelay {
+  const environmentEnabled = parseBooleanEnv(input.env.PASEO_RELAY_ENABLED);
+  // COMPAT(relayOptInDefault): configs created before v0.2.6 may omit this field.
+  // Preserve their relay-on behavior until 2027-01-31; new homes materialize false.
   const enabled =
-    input.cliRelayEnabled ??
-    parseBooleanEnv(input.env.PASEO_RELAY_ENABLED) ??
-    input.persisted.daemon?.relay?.enabled ??
-    true;
+    input.cliRelayEnabled ?? environmentEnabled ?? input.persisted.daemon?.relay?.enabled ?? true;
   const endpoint =
     input.env.PASEO_RELAY_ENDPOINT ??
     input.persisted.daemon?.relay?.endpoint ??
@@ -235,7 +247,14 @@ function resolveRelayConfig(input: ResolveRelayInput): ResolvedRelay {
     input.persisted.daemon?.relay?.publicUseTls,
     useTls,
   );
-  return { enabled, endpoint, publicEndpoint, useTls, publicUseTls };
+  return {
+    enabled,
+    enabledMutable: input.cliRelayEnabled === undefined && environmentEnabled === undefined,
+    endpoint,
+    publicEndpoint,
+    useTls,
+    publicUseTls,
+  };
 }
 
 interface ResolvedVoiceLlm {
@@ -419,6 +438,18 @@ function resolveBrowserToolsEnabled(persisted: ReturnType<typeof loadPersistedCo
   return persisted.daemon?.browserTools?.enabled ?? false;
 }
 
+/**
+ * Both profile lists stay `undefined` when absent rather than defaulting to an
+ * empty array: for terminal profiles that is what selects the built-in
+ * defaults, so an empty array has to keep meaning "the user removed them all".
+ */
+function resolveProfileLists(persisted: ReturnType<typeof loadPersistedConfig>) {
+  return {
+    terminalProfiles: persisted.daemon?.terminalProfiles,
+    agentProfiles: persisted.daemon?.agentProfiles,
+  };
+}
+
 function resolveStaticLoadConfigSettings(
   env: NodeJS.ProcessEnv,
   cli: CliConfigOverrides | undefined,
@@ -431,7 +462,7 @@ function resolveStaticLoadConfigSettings(
     browserToolsEnabled: resolveBrowserToolsEnabled(persisted),
     autoArchiveAfterMerge: persisted.daemon?.autoArchiveAfterMerge ?? false,
     appendSystemPrompt: resolveAppendSystemPrompt(persisted),
-    terminalProfiles: persisted.daemon?.terminalProfiles,
+    ...resolveProfileLists(persisted),
     hostnames: mergeHostnames([
       persisted.daemon?.hostnames,
       parseHostnamesEnv(env.PASEO_HOSTNAMES ?? env.PASEO_ALLOWED_HOSTS),
@@ -460,6 +491,7 @@ export function loadConfig(
     autoArchiveAfterMerge,
     appendSystemPrompt,
     terminalProfiles,
+    agentProfiles,
     hostnames,
     trustedProxies,
     appBaseUrl,
@@ -488,6 +520,7 @@ export function loadConfig(
   return {
     listen,
     paseoHome,
+    desktopManaged: env.PASEO_DESKTOP_MANAGED === "1",
     worktreesRoot: resolveWorktreesRoot(paseoHome, persisted),
     corsAllowedOrigins: resolveCorsAllowedOrigins(env, persisted),
     hostnames,
@@ -495,16 +528,19 @@ export function loadConfig(
     mcpEnabled,
     mcpInjectIntoAgents,
     browserToolsEnabled,
+    git: resolveGitProcessConfig(env, persisted),
     autoArchiveAfterMerge,
     enableTerminalAgentHooks: persisted.daemon?.enableTerminalAgentHooks ?? false,
     appendSystemPrompt,
     terminalProfiles,
+    agentProfiles,
     mcpDebug: env.MCP_DEBUG === "1",
     isDev: resolvePaseoNodeEnv(env) === "development",
     agentStoragePath: path.join(paseoHome, "agents"),
     staticDir: "public",
     agentClients: {},
     relayEnabled: relay.enabled,
+    relayEnabledMutable: relay.enabledMutable,
     relayEndpoint: relay.endpoint,
     relayPublicEndpoint: relay.publicEndpoint,
     relayUseTls: relay.useTls,
@@ -519,6 +555,7 @@ export function loadConfig(
     voiceLlmProviderExplicit: voiceLlm.providerExplicit,
     voiceLlmModel: voiceLlm.model,
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
+    providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
     metadataGeneration: persisted.agents?.metadataGeneration,
     providerOverrides,
     log: resolveLogConfigFromEnv(env, persisted),

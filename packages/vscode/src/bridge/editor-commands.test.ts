@@ -6,16 +6,16 @@ describe("editor bridge command parsing", () => {
     expect(
       parseEditorOpenTargetInput({
         editorId: "vscode-self",
-        path: " /workspace/src/app.ts ",
-        mode: "open",
-        lineStart: 12.8,
+        workspacePath: " /workspace ",
+        filePath: " /workspace/src/app.ts ",
+        line: 12.8,
         lineEnd: 14,
       }),
     ).toEqual({
       editorId: "vscode-self",
-      path: "/workspace/src/app.ts",
-      mode: "open",
-      lineStart: 12,
+      workspacePath: "/workspace",
+      filePath: "/workspace/src/app.ts",
+      line: 12,
       lineEnd: 14,
     });
   });
@@ -24,7 +24,8 @@ describe("editor bridge command parsing", () => {
     expect(() =>
       parseEditorOpenTargetInput({
         editorId: "external-editor",
-        path: "/workspace/src/app.ts",
+        workspacePath: "/workspace",
+        filePath: "/workspace/src/app.ts",
       }),
     ).toThrow("editor.openTarget only supports the VS Code editor target.");
   });
@@ -33,11 +34,12 @@ describe("editor bridge command parsing", () => {
     expect(() =>
       parseEditorOpenTargetInput({
         editorId: "vscode-self",
-        path: "/workspace/src/app.ts",
-        lineStart: 8,
+        workspacePath: "/workspace",
+        filePath: "/workspace/src/app.ts",
+        line: 8,
         lineEnd: 4,
       }),
-    ).toThrow("lineEnd must be greater than or equal to lineStart.");
+    ).toThrow("lineEnd must be greater than or equal to line.");
   });
 
   it("allows http, https, and mailto external URL inputs", () => {

@@ -3,6 +3,7 @@ import {
   appendFileMentionPaths,
   applyFileMentionReplacement,
   findActiveFileMention,
+  formatQuotedFileMentionPath,
 } from "./file-mention-autocomplete";
 
 describe("findActiveFileMention", () => {
@@ -47,6 +48,14 @@ describe("findActiveFileMention", () => {
       cursorIndex: 2,
     });
     expect(mention).toBeNull();
+  });
+});
+
+describe("formatQuotedFileMentionPath", () => {
+  it("quotes workspace-relative paths using file mention escaping", () => {
+    expect(formatQuotedFileMentionPath('src/changed "file".ts')).toBe(
+      '"src/changed \\"file\\".ts"',
+    );
   });
 });
 

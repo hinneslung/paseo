@@ -22,10 +22,30 @@ import {
   codexAppServerTurnInputFromPrompt,
   listCodexSkills,
   mapCodexPatchNotificationToToolCall,
+  mapCodexPlanUpdateToTodo,
   mapCodexPlanToToolCall,
   normalizeCodexOutputSchema,
   toAgentUsage,
 } from "./codex-app-server-agent.js";
+
+describe("mapCodexPlanUpdateToTodo", () => {
+  test("preserves checklist progress without creating a plan card", () => {
+    expect(
+      mapCodexPlanUpdateToTodo([
+        { step: "Inspect", status: "completed" },
+        { step: "Implement", status: "inProgress" },
+        { step: "Verify", status: "pending" },
+      ]),
+    ).toEqual({
+      type: "todo",
+      items: [
+        { id: "0", text: "Inspect", status: "completed", completed: true },
+        { id: "1", text: "Implement", status: "in_progress", completed: false },
+        { id: "2", text: "Verify", status: "pending", completed: false },
+      ],
+    });
+  });
+});
 import { CodexAppServerClient } from "./codex/app-server-transport.js";
 import {
   createFakeCodexAppServer,
@@ -70,6 +90,11 @@ type CodexTestSession = AgentSession & {
   client: CodexClientLike | null;
 };
 
+type TurnTerminalEvent = Extract<
+  AgentStreamEvent,
+  { type: "turn_completed" | "turn_failed" | "turn_canceled" }
+>;
+
 const ONE_BY_ONE_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X1r0AAAAASUVORK5CYII=";
 const CODEX_PROVIDER = "codex";
@@ -104,6 +129,72 @@ function createSession(
   session.currentThreadId = "test-thread";
   session.activeForegroundTurnId = "test-turn";
   return session;
+}
+
+function createProviderWithFakeAppServer(appServer: FakeCodexAppServer): CodexAppServerAgentClient {
+  const provider = new CodexAppServerAgentClient(createTestLogger());
+  const internals = castInternals<{
+    goalsEnabledPromise: Promise<boolean> | null;
+    autoReviewEnabledPromise: Promise<boolean> | null;
+    spawnAppServer: () => Promise<ChildProcessWithoutNullStreams>;
+  }>(provider);
+  internals.goalsEnabledPromise = Promise.resolve(false);
+  internals.autoReviewEnabledPromise = Promise.resolve(false);
+  internals.spawnAppServer = async () => appServer.child;
+  return provider;
+}
+
+async function startCompactionTurnTest(): Promise<{
+  appServer: FakeCodexAppServer;
+  session: AgentSession;
+  events: AgentStreamEvent[];
+  terminalEvent: Promise<TurnTerminalEvent>;
+}> {
+  const appServer = createFakeCodexAppServer();
+  const session = new CodexAppServerAgentSession(
+    createConfig({ cwd: "/workspace/project" }),
+    null,
+    createTestLogger(),
+    async () => appServer.child,
+  );
+  const events: AgentStreamEvent[] = [];
+  const terminalEvent = new Promise<TurnTerminalEvent>((resolve) => {
+    session.subscribe((event) => {
+      const isCompaction = event.type === "timeline" && event.item.type === "compaction";
+      const isTerminal =
+        event.type === "turn_completed" ||
+        event.type === "turn_failed" ||
+        event.type === "turn_canceled";
+      if (isCompaction || isTerminal) {
+        events.push(event);
+      }
+      if (isTerminal) {
+        resolve(event);
+      }
+    });
+  });
+
+  await session.startTurn("exercise compaction lifecycle");
+  appServer.startsTurn({ threadId: "thread-1", turnId: "codex-turn-1" });
+  return { appServer, session, events, terminalEvent };
+}
+
+function archivedThreadHandle() {
+  return {
+    sessionId: "archived-thread-id",
+    metadata: {
+      cwd: "/tmp/codex-question-test",
+      modeId: "auto",
+      model: "gpt-5.4",
+    },
+  };
+}
+
+function archivedThreadErrorMessage(threadId: string): string {
+  return (
+    `session ${threadId} is archived. ` +
+    `Run \`codex unarchive ${threadId}\` to unarchive it first.`
+  );
 }
 
 function asInternals(session: CodexTestSession): CodexSessionTestAccess {
@@ -232,22 +323,40 @@ function capturedThreadStartConfig(records: CapturedFakeCodexRecord[]): unknown 
   return params?.config;
 }
 
-async function listCommandsFromFakeCodex(skills: unknown[]): Promise<AgentSlashCommand[]> {
+async function listCommandsFromFakeCodex(
+  skills: unknown[],
+  filesystemSkills: Array<{ name: string; description: string }> = [],
+): Promise<AgentSlashCommand[]> {
   const tempDir = await mkdtemp(path.join(tmpdir(), "codex-command-list-"));
+  const projectCwd = path.join(tempDir, "project");
   const fakeCodexPath = path.join(tempDir, "fake-codex.cjs");
+  mkdirSync(projectCwd, { recursive: true });
+  for (const skill of filesystemSkills) {
+    const skillDir = path.join(projectCwd, ".codex", "skills", skill.name);
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      path.join(skillDir, "SKILL.md"),
+      `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n`,
+    );
+  }
   writeFileSync(
     fakeCodexPath,
     `
 let buffer = "";
 
-function resultFor(method) {
+function resultFor(method, params) {
   if (method === "initialize") return {};
   if (method === "collaborationMode/list") return { data: [] };
   if (method === "skills/list") {
+    const cwds = params && params.cwds;
+    const projectCwd = ${JSON.stringify(projectCwd)};
+    if (!Array.isArray(cwds) || cwds.length !== 1 || cwds[0] !== projectCwd) {
+      return { data: [] };
+    }
     return {
       data: [
         {
-          cwd: "/tmp/codex-question-test",
+          cwd: projectCwd,
           skills: ${JSON.stringify(skills)},
           errors: [],
         },
@@ -268,7 +377,7 @@ process.stdin.on("data", (chunk) => {
     const message = JSON.parse(line);
     if (typeof message.id !== "number") continue;
     try {
-      process.stdout.write(JSON.stringify({ id: message.id, result: resultFor(message.method) }) + "\\n");
+      process.stdout.write(JSON.stringify({ id: message.id, result: resultFor(message.method, message.params) }) + "\\n");
     } catch (error) {
       process.stdout.write(JSON.stringify({ id: message.id, error: { message: error.message } }) + "\\n");
     }
@@ -280,7 +389,7 @@ process.stdin.on("data", (chunk) => {
   const client = new CodexAppServerAgentClient(createTestLogger(), {
     command: { mode: "replace", argv: [process.execPath, fakeCodexPath] },
   });
-  const session = await client.createSession(createConfig());
+  const session = await client.createSession(createConfig({ cwd: projectCwd }));
   try {
     return await session.listCommands();
   } finally {
@@ -347,12 +456,12 @@ describe("Codex app-server provider", () => {
     const session = createSession({ modeId: "auto", thinkingOptionId: "medium" });
 
     await expect(session.setMode("full-access")).resolves.toEqual({
-      type: "info",
-      message: "This change applies next turn.",
+      type: "warning",
+      message: "Permission mode applies next turn",
     });
     await expect(session.setThinkingOption?.("high")).resolves.toEqual({
-      type: "info",
-      message: "This change applies next turn.",
+      type: "warning",
+      message: "Thinking level applies next turn",
     });
 
     session.activeForegroundTurnId = null;
@@ -416,6 +525,141 @@ describe("Codex app-server provider", () => {
         approvalsReviewer: "auto_review",
       }),
     );
+  });
+
+  test("omitted mode preserves Codex resolved approval and sandbox config", async () => {
+    const session = createSession({ modeId: undefined });
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/loaded/list") return { data: ["test-thread"] };
+      if (method === "turn/start") return {};
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({ request });
+
+    await session.startTurn("inherit config");
+
+    const turnStart = request.mock.calls.find(([method]) => method === "turn/start")?.[1];
+    expect(turnStart).not.toHaveProperty("approvalPolicy");
+    expect(turnStart).not.toHaveProperty("sandboxPolicy");
+  });
+
+  test("carries the complete native workspace-write policy including writable roots", async () => {
+    const session = createSession({
+      modeId: undefined,
+      providerOptions: {
+        sandbox_mode: "workspace-write",
+        sandbox_workspace_write: {
+          writable_roots: ["/var/cache/npm", "/tmp/build-cache"],
+          network_access: true,
+          exclude_slash_tmp: true,
+          exclude_tmpdir_env_var: true,
+        },
+      },
+    });
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/loaded/list") return { data: ["test-thread"] };
+      if (method === "turn/start") return {};
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({ request });
+
+    await session.startTurn("use writable roots");
+
+    const turnStart = request.mock.calls.find(([method]) => method === "turn/start")?.[1];
+    expect(turnStart).toMatchObject({
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        writableRoots: ["/var/cache/npm", "/tmp/build-cache"],
+        networkAccess: true,
+        excludeSlashTmp: true,
+        excludeTmpdirEnvVar: true,
+      },
+      config: {
+        sandbox_mode: "workspace-write",
+        sandbox_workspace_write: {
+          writable_roots: ["/var/cache/npm", "/tmp/build-cache"],
+        },
+      },
+    });
+  });
+
+  test("preserves cwd-resolved Codex writable roots under an explicit workflow mode", async () => {
+    const appServer = createFakeCodexAppServer({
+      "config/read": () => ({
+        config: {
+          sandbox_workspace_write: {
+            writable_roots: ["/var/cache/npm"],
+            network_access: true,
+            exclude_slash_tmp: true,
+            exclude_tmpdir_env_var: true,
+          },
+        },
+      }),
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ modeId: "auto" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    try {
+      await session.connect();
+      await session.startTurn("keep native roots");
+
+      await expect(appServer.waitForTurnStart()).resolves.toMatchObject({
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          writableRoots: ["/var/cache/npm"],
+          networkAccess: true,
+          excludeSlashTmp: true,
+          excludeTmpdirEnvVar: true,
+        },
+      });
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("preapproves only granted tools on the injected Codex MCP server", async () => {
+    const session = createSession({
+      modeId: undefined,
+      providerOptions: { sandbox_mode: "read-only" },
+      mcpServers: {
+        hub: { type: "http", url: "http://127.0.0.1/hub" },
+      },
+      toolPolicy: {
+        preapproved: [{ kind: "mcp", server: "hub", tool: "finish_execution" }],
+      },
+    });
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/loaded/list") return { data: ["test-thread"] };
+      if (method === "turn/start") return {};
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({ request });
+
+    await session.startTurn("finish");
+
+    const turnStart = request.mock.calls.find(([method]) => method === "turn/start")?.[1];
+    expect(turnStart).toMatchObject({
+      sandboxPolicy: { type: "readOnly" },
+      config: {
+        sandbox_mode: "read-only",
+        mcp_servers: {
+          hub: {
+            enabled_tools: ["finish_execution"],
+            default_tools_approval_mode: "prompt",
+            tools: { finish_execution: { approval_mode: "approve" } },
+          },
+        },
+      },
+    });
+    expect(turnStart).not.toHaveProperty("config.mcp_servers.hub.tools.reply");
   });
 
   test("passes ephemeral: true to thread/start when constructed as ephemeral", async () => {
@@ -871,6 +1115,66 @@ describe("Codex app-server provider", () => {
     await session.close();
   });
 
+  test("loads archived Codex history without resuming the native thread", async () => {
+    const threadRequests: string[] = [];
+    const appServer = createFakeCodexAppServer({
+      "thread/loaded/list": () => {
+        threadRequests.push("thread/loaded/list");
+        return { data: [] };
+      },
+      "thread/resume": () => {
+        threadRequests.push("thread/resume");
+        return Promise.reject(new Error(archivedThreadErrorMessage("archived-thread-id")));
+      },
+      "thread/read": () => {
+        threadRequests.push("thread/read");
+        return { thread: { turns: [] } };
+      },
+    });
+    const provider = createProviderWithFakeAppServer(appServer);
+
+    const session = await provider.resumeSession(archivedThreadHandle(), undefined, undefined, {
+      purpose: "history",
+    });
+
+    expect(threadRequests).toEqual(["thread/loaded/list", "thread/resume", "thread/read"]);
+    await session.close();
+    appServer.assertNoErrors();
+  });
+
+  test("closes Codex app-server when an interactive resume fails", async () => {
+    const appServer = createFakeCodexAppServer({
+      "thread/resume": () =>
+        Promise.reject(new Error(archivedThreadErrorMessage("archived-thread-id"))),
+    });
+    const killSpy = vi.spyOn(appServer.child, "kill");
+    const provider = createProviderWithFakeAppServer(appServer);
+
+    await expect(provider.resumeSession(archivedThreadHandle())).rejects.toThrow(
+      archivedThreadErrorMessage("archived-thread-id"),
+    );
+
+    expect(killSpy).toHaveBeenCalledWith("SIGTERM");
+    appServer.assertNoErrors();
+  });
+
+  test("closes Codex app-server when archived history hydration fails", async () => {
+    const appServer = createFakeCodexAppServer({
+      "thread/resume": () =>
+        Promise.reject(new Error(archivedThreadErrorMessage("archived-thread-id"))),
+      "thread/read": () => Promise.reject(new Error("thread history is unavailable")),
+    });
+    const killSpy = vi.spyOn(appServer.child, "kill");
+    const provider = createProviderWithFakeAppServer(appServer);
+
+    await expect(
+      provider.resumeSession(archivedThreadHandle(), undefined, undefined, { purpose: "history" }),
+    ).rejects.toThrow("thread history is unavailable");
+
+    expect(killSpy).toHaveBeenCalledWith("SIGTERM");
+    appServer.assertNoErrors();
+  });
+
   test("unarchives a persisted Codex thread through app-server", async () => {
     const threadRequests: Array<{ method: string; params: unknown }> = [];
     const appServer = createFakeCodexAppServer({
@@ -1014,6 +1318,37 @@ describe("Codex app-server provider", () => {
     await session.close();
   });
 
+  test("correlates a Codex user message with the submitting client message", async () => {
+    const appServer = createFakeCodexAppServer();
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    await session.startTurn("remember this", { clientMessageId: "client-message" });
+    asInternals(session).handleNotification("turn/started", {
+      threadId: "thread-1",
+      turn: { id: "turn-1" },
+    });
+    const userMessage = waitForNextTimelineItem(session, "user_message");
+    emitCodexUserMessage(appServer, { id: "codex-message", text: "remember this" });
+
+    await expect(userMessage).resolves.toMatchObject({
+      item: {
+        type: "user_message",
+        messageId: "codex-message",
+        clientMessageId: "client-message",
+      },
+    });
+    expect(events.slice(0, 2).map((event) => event.type)).toEqual(["turn_started", "timeline"]);
+    appServer.completeTurn();
+    await session.close();
+  });
+
   test("configures Codex app-server to use a custom provider base URL", async () => {
     const capturedRequests = await runCustomCodexProviderTurn(
       "codex-iisb",
@@ -1089,12 +1424,7 @@ describe("Codex app-server provider", () => {
         };
       },
     });
-    const provider = new CodexAppServerAgentClient(createTestLogger());
-    castInternals<{ goalsEnabledPromise: Promise<boolean> | null }>(provider).goalsEnabledPromise =
-      Promise.resolve(false);
-    castInternals<{ spawnAppServer: () => Promise<ChildProcessWithoutNullStreams> }>(
-      provider,
-    ).spawnAppServer = async () => appServer.child;
+    const provider = createProviderWithFakeAppServer(appServer);
 
     const outcome = await Promise.race([
       provider
@@ -1124,7 +1454,7 @@ describe("Codex app-server provider", () => {
       throw new Error(`resumeSession timed out; thread requests: ${threadRequests.join(", ")}`);
     }
 
-    expect(threadRequests).toEqual(["thread/loaded/list", "thread/resume"]);
+    expect(threadRequests).toEqual(["config/read", "thread/loaded/list", "thread/resume"]);
     expect(outcome).toBe("rejected");
     appServer.assertNoErrors();
   });
@@ -1388,6 +1718,23 @@ describe("Codex app-server provider", () => {
     );
   });
 
+  test("lists project skill commands when app-server receives the project cwd in cwds", async () => {
+    const commands = await listCommandsFromFakeCodex([
+      {
+        name: "project-skill-discovery-regression",
+        description: "A skill discovered from this project.",
+        path: "/tmp/codex-question-test/.agents/skills/project-skill-discovery-regression/SKILL.md",
+      },
+    ]);
+
+    expect(commands).toContainEqual({
+      name: "project-skill-discovery-regression",
+      description: "A skill discovered from this project.",
+      argumentHint: "",
+      kind: "skill",
+    });
+  });
+
   test("deduplicates Codex skill slash commands returned from multiple skill roots", async () => {
     const commands = await listCommandsFromFakeCodex([
       {
@@ -1410,6 +1757,53 @@ describe("Codex app-server provider", () => {
         kind: "skill",
       },
     ]);
+  });
+
+  test("omits disabled Codex skills from slash commands", async () => {
+    const commands = await listCommandsFromFakeCodex([
+      {
+        name: "enabled-skill",
+        description: "An enabled skill.",
+        path: "/tmp/skills/enabled-skill/SKILL.md",
+        enabled: true,
+      },
+      {
+        name: "disabled-skill",
+        description: "A disabled skill.",
+        path: "/tmp/skills/disabled-skill/SKILL.md",
+        enabled: false,
+      },
+      {
+        name: "legacy-skill",
+        description: "Skill without enabled field (older Codex).",
+        path: "/tmp/skills/legacy-skill/SKILL.md",
+      },
+    ]);
+
+    const skillCommands = commands.filter((command) => command.kind === "skill");
+    expect(skillCommands.map((command) => command.name).sort()).toEqual([
+      "enabled-skill",
+      "legacy-skill",
+    ]);
+    expect(skillCommands.find((command) => command.name === "disabled-skill")).toBeUndefined();
+  });
+
+  test("does not rediscover disabled Codex skills through filesystem fallback", async () => {
+    const commands = await listCommandsFromFakeCodex(
+      [
+        {
+          name: "disabled-skill",
+          description: "A disabled skill.",
+          path: "/tmp/skills/disabled-skill/SKILL.md",
+          enabled: false,
+        },
+      ],
+      [{ name: "disabled-skill", description: "A disabled skill." }],
+    );
+
+    expect(commands).not.toContainEqual(
+      expect.objectContaining({ name: "disabled-skill", kind: "skill" }),
+    );
   });
 
   test("maps image prompt blocks to Codex localImage input", async () => {
@@ -1845,6 +2239,80 @@ describe("Codex app-server provider", () => {
       id: "child-thread-1",
       status: "completed",
     });
+  });
+
+  test("keeps a settled child completed until Codex starts another child turn", async () => {
+    const appServer = createFakeCodexAppServer();
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      const resultPromise = session.run("Delegate the investigation.");
+      await appServer.waitForTurnStart();
+
+      appServer.startsSubAgent({
+        callId: "call-settled-child",
+        threadId: "settled-child-thread",
+        agentPath: "/root/settled-child",
+      });
+      appServer.completeTurn({ threadId: "settled-child-thread" });
+      appServer.says({
+        threadId: "settled-child-thread",
+        itemId: "late-child-message",
+        text: "Late trailing output.",
+      });
+
+      const providerUpserts = events.flatMap((event) =>
+        event.type === "provider_subagent" && event.event.type === "upsert" ? [event.event] : [],
+      );
+      expect(providerUpserts.at(-1)).toMatchObject({
+        id: "settled-child-thread",
+        status: "completed",
+      });
+      expect(events.at(-1)).toMatchObject({
+        type: "timeline",
+        item: {
+          callId: "call-settled-child",
+          status: "completed",
+          detail: { type: "sub_agent", log: "[Assistant] Late trailing output." },
+        },
+      });
+
+      appServer.completesSubAgentActivity({
+        callId: "late-child-interaction",
+        threadId: "settled-child-thread",
+        agentPath: "/root/settled-child",
+        kind: "interacted",
+      });
+      expect(
+        events.findLast(
+          (event) => event.type === "provider_subagent" && event.event.type === "upsert",
+        ),
+      ).toMatchObject({ event: { id: "settled-child-thread", status: "completed" } });
+
+      appServer.startsTurn({
+        threadId: "settled-child-thread",
+        turnId: "next-child-turn",
+      });
+      expect(
+        events.findLast(
+          (event) => event.type === "provider_subagent" && event.event.type === "upsert",
+        ),
+      ).toMatchObject({ event: { id: "settled-child-thread", status: "running" } });
+
+      appServer.completeTurn({ threadId: "settled-child-thread" });
+      appServer.completeTurn();
+      await resultPromise;
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
   });
 
   test("updates a registered child with its later native activity name", () => {
@@ -2595,8 +3063,14 @@ describe("Codex app-server provider", () => {
     }
   });
 
-  test("rejects an interrupt until Codex identifies the accepted turn", async () => {
-    const appServer = createFakeCodexAppServer();
+  test("waits for Codex to identify an accepted turn before interrupting it", async () => {
+    const interruptedTurns: unknown[] = [];
+    const appServer = createFakeCodexAppServer({
+      "turn/interrupt": async (params) => {
+        interruptedTurns.push(params);
+        return {};
+      },
+    });
     const session = new CodexAppServerAgentSession(
       createConfig({ cwd: "/workspace/project" }),
       null,
@@ -2608,13 +3082,45 @@ describe("Codex app-server provider", () => {
       const resultPromise = session.run("Start working.");
       await appServer.waitForTurnStart();
 
-      await expect(session.interrupt()).rejects.toThrow(
-        "Cannot interrupt Codex before turn/started identifies the active turn",
-      );
-
+      const interruptPromise = session.interrupt();
       appServer.startsTurn({ threadId: "thread-1", turnId: "turn-identified-late" });
+      await interruptPromise;
+
+      expect(interruptedTurns).toEqual([{ threadId: "thread-1", turnId: "turn-identified-late" }]);
       appServer.completeTurn();
       await resultPromise;
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("does not interrupt after the accepted turn terminates before identification", async () => {
+    const interruptedTurns: unknown[] = [];
+    const appServer = createFakeCodexAppServer({
+      "turn/interrupt": async (params) => {
+        interruptedTurns.push(params);
+        return {};
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    try {
+      const resultPromise = session.run("Finish before identification.");
+      await appServer.waitForTurnStart();
+      const interruptPromise = session.interrupt();
+      appServer.completeTurn();
+
+      await expect(interruptPromise).rejects.toThrow(
+        "Cannot interrupt Codex before turn/started identifies the active turn",
+      );
+      await resultPromise;
+      expect(interruptedTurns).toEqual([]);
       appServer.assertNoErrors();
     } finally {
       await session.close();
@@ -3021,6 +3527,10 @@ describe("Codex app-server provider", () => {
 
     const liveEvents: AgentStreamEvent[] = [];
     session.subscribe((event) => liveEvents.push(event));
+    asInternals(session).handleNotification("turn/started", {
+      threadId: "v2-child-thread",
+      turn: { id: "v2-child-turn-after-resume" },
+    });
     asInternals(session).handleNotification("item/completed", {
       threadId: "test-thread",
       item: {
@@ -3049,6 +3559,10 @@ describe("Codex app-server provider", () => {
     });
 
     liveEvents.length = 0;
+    asInternals(session).handleNotification("turn/started", {
+      threadId: "legacy-child-thread",
+      turn: { id: "legacy-child-turn-after-resume" },
+    });
     asInternals(session).handleNotification("item/agentMessage/delta", {
       threadId: "legacy-child-thread",
       itemId: "legacy-child-message-after-resume",
@@ -3142,6 +3656,115 @@ describe("Codex app-server provider", () => {
         }),
       },
     ]);
+  });
+
+  test("does not import a parent interaction from child history as another sub-agent", async () => {
+    const appServer = createFakeCodexAppServer({
+      "thread/read": (params) => {
+        const threadId = (params as { threadId?: string }).threadId;
+        if (threadId === "test-thread") {
+          return {
+            thread: {
+              turns: [
+                {
+                  items: [
+                    {
+                      type: "subAgentActivity",
+                      id: "child-started",
+                      kind: "started",
+                      agentThreadId: "child-thread",
+                      agentPath: "/root/child",
+                    },
+                  ],
+                },
+              ],
+            },
+          };
+        }
+        return {
+          thread: {
+            turns: [
+              {
+                items: [
+                  {
+                    type: "subAgentActivity",
+                    id: "parent-interacted",
+                    kind: "interacted",
+                    agentThreadId: "test-thread",
+                    agentPath: "/root",
+                  },
+                ],
+              },
+            ],
+          },
+        };
+      },
+    });
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      { sessionId: "test-thread" },
+      createTestLogger(),
+      async () => appServer.child,
+    );
+
+    try {
+      await session.connect();
+
+      const providerSubagentIds = new Set<string>();
+      for await (const event of session.streamHistory()) {
+        if (event.type === "provider_subagent" && event.event.type === "upsert") {
+          providerSubagentIds.add(event.event.id);
+        }
+      }
+
+      expect(providerSubagentIds).toEqual(new Set(["child-thread"]));
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("does not register a parent interaction on a child thread as another sub-agent", async () => {
+    const appServer = createFakeCodexAppServer();
+    const session = new CodexAppServerAgentSession(
+      createConfig({ cwd: "/workspace/project" }),
+      null,
+      createTestLogger(),
+      async () => appServer.child,
+    );
+    const providerSubagentIds = new Set<string>();
+    session.subscribe((event) => {
+      if (event.type === "provider_subagent" && event.event.type === "upsert") {
+        providerSubagentIds.add(event.event.id);
+      }
+    });
+
+    try {
+      const resultPromise = session.run("Delegate the investigation.");
+      await appServer.waitForTurnStart();
+
+      const child = waitForProviderSubagent(session, "child-thread");
+      appServer.startsSubAgent({
+        callId: "child-started",
+        threadId: "child-thread",
+        agentPath: "/root/child",
+      });
+      await child;
+      appServer.beginsSubAgentActivity({
+        callId: "parent-interacted",
+        threadId: "thread-1",
+        parentThreadId: "child-thread",
+        kind: "interacted",
+        agentPath: "/root",
+      });
+      appServer.completeTurn();
+      await resultPromise;
+
+      expect(providerSubagentIds).toEqual(new Set(["child-thread"]));
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
   });
 
   test("uses Codex turn timestamps for timestamp-less persisted history items", async () => {
@@ -3340,6 +3963,99 @@ describe("Codex app-server provider", () => {
         },
       },
     ]);
+  });
+
+  test("completes a pending Codex compaction when its turn ends", async () => {
+    const { appServer, session, events, terminalEvent } = await startCompactionTurnTest();
+
+    try {
+      appServer.startsCompaction({
+        threadId: "thread-1",
+        itemId: "compact-without-completion",
+      });
+      appServer.completeTurn();
+      await terminalEvent;
+
+      expect(
+        events.map((event) =>
+          event.type === "timeline" ? `${event.item.type}:${event.item.status}` : event.type,
+        ),
+      ).toEqual(["compaction:loading", "compaction:completed", "turn_completed"]);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("does not complete a Codex compaction twice when its item finishes before the turn", async () => {
+    const { appServer, session, events, terminalEvent } = await startCompactionTurnTest();
+
+    try {
+      appServer.startsCompaction({
+        threadId: "thread-1",
+        itemId: "compact-completed-normally",
+      });
+      appServer.completesCompaction({
+        threadId: "thread-1",
+        itemId: "compact-completed-normally",
+      });
+      appServer.completeTurn();
+      await terminalEvent;
+
+      expect(
+        events.map((event) =>
+          event.type === "timeline" ? `${event.item.type}:${event.item.status}` : event.type,
+        ),
+      ).toEqual(["compaction:loading", "compaction:completed", "turn_completed"]);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("does not let a late compaction completion consume the current pending item", async () => {
+    const { appServer, session, events, terminalEvent } = await startCompactionTurnTest();
+
+    try {
+      appServer.startsCompaction({ threadId: "thread-1", itemId: "current-compaction" });
+      appServer.completesCompaction({ threadId: "thread-1", itemId: "older-compaction" });
+      appServer.completeTurn();
+      await terminalEvent;
+
+      expect(
+        events.map((event) =>
+          event.type === "timeline" ? `${event.item.type}:${event.item.status}` : event.type,
+        ),
+      ).toEqual(["compaction:loading", "compaction:completed", "turn_completed"]);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test.each([
+    { status: "failed", terminalType: "turn_failed" },
+    { status: "interrupted", terminalType: "turn_canceled" },
+  ])("completes a pending compaction before a $status turn", async ({ status, terminalType }) => {
+    const { appServer, session, events, terminalEvent } = await startCompactionTurnTest();
+
+    try {
+      appServer.startsCompaction({ threadId: "thread-1", itemId: `compact-${status}` });
+      appServer.completeTurn({
+        status,
+        error: status === "failed" ? { message: "Compaction failed" } : null,
+      });
+      await terminalEvent;
+
+      expect(
+        events.map((event) =>
+          event.type === "timeline" ? `${event.item.type}:${event.item.status}` : event.type,
+        ),
+      ).toEqual(["compaction:loading", "compaction:completed", terminalType]);
+      appServer.assertNoErrors();
+    } finally {
+      await session.close();
+    }
   });
 
   test("emits and dedupes Codex thread/compacted notifications", () => {
@@ -3673,8 +4389,8 @@ describe("Codex app-server provider", () => {
         },
         actions: [
           expect.objectContaining({
-            id: "reject",
-            label: "Reject",
+            id: "dismiss",
+            label: "Dismiss",
             behavior: "deny",
           }),
           expect.objectContaining({
@@ -3736,6 +4452,216 @@ describe("Codex app-server provider", () => {
         },
       }),
     });
+  });
+
+  test("replaces a pending synthetic plan approval when a later plan completes", () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-first" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the first plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-second" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the revised plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+
+    expect(session.getPendingPermissions()).toEqual([
+      expect.objectContaining({
+        kind: "plan",
+        input: { plan: "- Implement the revised plan" },
+      }),
+    ]);
+  });
+
+  test("dismisses a pending synthetic plan approval after a new prompt is accepted", async () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-pending" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the original plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+    const pendingPlan = session.getPendingPermissions()[0];
+    expect(pendingPlan).toBeDefined();
+
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({
+      request: async (method) => {
+        if (method === "thread/loaded/list") return { data: ["test-thread"] };
+        if (method === "turn/start") return {};
+        throw new Error(`Unexpected request: ${method}`);
+      },
+    });
+
+    await session.startTurn("Revise the plan to include tests");
+
+    expect(session.getPendingPermissions()).toEqual([]);
+    expect(events).toContainEqual({
+      type: "permission_resolved",
+      provider: "codex",
+      requestId: pendingPlan!.id,
+      resolution: {
+        behavior: "deny",
+        message: "Dismissed by a new prompt",
+      },
+    });
+  });
+
+  test("makes the old plan non-actionable while a new prompt is being prepared", async () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-pending" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the original plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+    const pendingPlan = session.getPendingPermissions()[0];
+    expect(pendingPlan).toBeDefined();
+
+    let continuePromptSetup: (() => void) | undefined;
+    let markPromptSetupStarted: (() => void) | undefined;
+    const promptSetupStarted = new Promise<void>((resolve) => {
+      markPromptSetupStarted = resolve;
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({
+      request: async (method) => {
+        if (method === "thread/loaded/list") {
+          markPromptSetupStarted?.();
+          await new Promise<void>((resolve) => {
+            continuePromptSetup = resolve;
+          });
+          return { data: ["test-thread"] };
+        }
+        if (method === "turn/start") return {};
+        throw new Error(`Unexpected request: ${method}`);
+      },
+    });
+
+    const startTurn = session.startTurn("Revise the plan");
+    await promptSetupStarted;
+
+    expect(session.getPendingPermissions()).toEqual([]);
+    await expect(
+      session.respondToPermission(pendingPlan!.id, {
+        behavior: "allow",
+        selectedActionId: "implement",
+      }),
+    ).rejects.toThrow(
+      `No pending Codex app-server permission request with id '${pendingPlan!.id}'`,
+    );
+
+    continuePromptSetup?.();
+    await startTurn;
+  });
+
+  test("does not dismiss a new plan approval emitted while a prompt is being accepted", async () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-pending" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the original plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+
+    let acceptPrompt: (() => void) | undefined;
+    let markPromptRequested: (() => void) | undefined;
+    const promptRequested = new Promise<void>((resolve) => {
+      markPromptRequested = resolve;
+    });
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({
+      request: async (method) => {
+        if (method === "thread/loaded/list") return { data: ["test-thread"] };
+        if (method === "turn/start") {
+          markPromptRequested?.();
+          return await new Promise<void>((resolve) => {
+            acceptPrompt = resolve;
+          });
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      },
+    });
+
+    const startTurn = session.startTurn("Revise the plan");
+    await promptRequested;
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the newer plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+    acceptPrompt?.();
+    await startTurn;
+
+    expect(session.getPendingPermissions()).toEqual([
+      expect.objectContaining({ input: { plan: "- Implement the newer plan" } }),
+    ]);
+  });
+
+  test("keeps a synthetic plan dismissed when a new prompt is rejected", async () => {
+    const session = createSession({
+      featureValues: { plan_mode: true },
+    });
+
+    asInternals(session).handleNotification("turn/started", {
+      turn: { id: "turn-plan-pending" },
+    });
+    asInternals(session).handleNotification("turn/plan/updated", {
+      plan: [{ step: "Implement the original plan", status: "pending" }],
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+    const pendingPlan = session.getPendingPermissions()[0];
+    expect(pendingPlan).toBeDefined();
+
+    session.activeForegroundTurnId = null;
+    session.client = createStub<CodexClientLike>({
+      request: async (method) => {
+        if (method === "thread/loaded/list") return { data: ["test-thread"] };
+        if (method === "turn/start") throw new Error("Prompt rejected");
+        throw new Error(`Unexpected request: ${method}`);
+      },
+    });
+
+    await expect(session.startTurn("Revise the plan")).rejects.toThrow("Prompt rejected");
+
+    expect(session.getPendingPermissions()).toEqual([]);
   });
 
   test("emits imageView paths with spaces as valid assistant markdown images", () => {

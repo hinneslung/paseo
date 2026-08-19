@@ -5,13 +5,17 @@ import type { ImageAttachment } from "@/composer/types";
 import { getDesktopHost } from "@/desktop/host";
 import { persistAttachmentFromBlob, persistAttachmentFromFileUri } from "@/attachments/service";
 import {
-  getRasterImageMimeTypeFromPath,
   isRasterImageFile,
   isRasterImagePath,
+  resolveRasterImageMimeType,
 } from "@/attachments/file-types";
 import { getIsVscode, isWeb } from "@/constants/platform";
 import { parseDroppedFilePaths } from "@/workspace/file-drop-mentions";
 import type { DroppedFileUriItem, DroppedItem, DroppedPathItem, FileDropSink } from "./types";
+import {
+  parseWorkspaceFileDragPayload,
+  WORKSPACE_FILE_DRAG_MIME,
+} from "@/attachments/workspace-file-drag";
 
 function canUseFileUriDrop(): boolean {
   return getDesktopHost() !== null;
@@ -44,14 +48,21 @@ interface DesktopDragDropEvent {
 }
 
 async function filePathToImageAttachment(path: string): Promise<ImageAttachment> {
-  const mimeType = getRasterImageMimeTypeFromPath(path) ?? "image/jpeg";
+  const mimeType = resolveRasterImageMimeType({ path });
+  if (!mimeType) {
+    throw new Error(`Unsupported image type for '${path}'.`);
+  }
   return await persistAttachmentFromFileUri({ uri: path, mimeType });
 }
 
 async function fileToImageAttachment(file: File): Promise<ImageAttachment> {
+  const mimeType = resolveRasterImageMimeType({ mimeType: file.type, path: file.name });
+  if (!mimeType) {
+    throw new Error(`Unsupported image type for '${file.name}'.`);
+  }
   return await persistAttachmentFromBlob({
     blob: file,
-    mimeType: file.type || "image/jpeg",
+    mimeType,
     fileName: file.name,
   });
 }
@@ -210,7 +221,11 @@ export function useDropListeners({
         if (disabledRef.current) return;
 
         dragCounter.current++;
-        if (e.dataTransfer?.types.includes("Files") || dataTransferHasFileUri(e.dataTransfer)) {
+        if (suppressed.value || !hasSink.value) return;
+        const types = new Set(e.dataTransfer?.types ?? []);
+        const acceptsWorkspaceFile =
+          types.has(WORKSPACE_FILE_DRAG_MIME) && Boolean(getSink()?.onWorkspaceFile);
+        if (types.has("Files") || acceptsWorkspaceFile || dataTransferHasFileUri(e.dataTransfer)) {
           isDragging.value = true;
         }
       }
@@ -222,7 +237,12 @@ export function useDropListeners({
         if (!e.dataTransfer) return;
         // Only advertise "copy" when the drop would actually be accepted, so the cursor doesn't
         // promise a drop that the handler then discards (suppressed/archived/no consumer mounted).
-        const canAccept = !disabledRef.current && !suppressed.value && hasSink.value;
+        const types = new Set(e.dataTransfer.types);
+        const acceptsWorkspaceFile =
+          types.has(WORKSPACE_FILE_DRAG_MIME) && Boolean(getSink()?.onWorkspaceFile);
+        const acceptsDrop =
+          types.has("Files") || acceptsWorkspaceFile || dataTransferHasFileUri(e.dataTransfer);
+        const canAccept = acceptsDrop && !disabledRef.current && !suppressed.value && hasSink.value;
         e.dataTransfer.dropEffect = canAccept ? "copy" : "none";
       }
 
@@ -249,6 +269,14 @@ export function useDropListeners({
 
         const sink = getSink();
         if (!sink) return;
+
+        const serializedWorkspaceFile = e.dataTransfer?.getData(WORKSPACE_FILE_DRAG_MIME);
+        if (serializedWorkspaceFile && sink.onWorkspaceFile) {
+          const payload = parseWorkspaceFileDragPayload(serializedWorkspaceFile);
+          if (payload) {
+            sink.onWorkspaceFile(payload);
+          }
+        }
 
         const fileUriItems = getDroppedFileUriItems(e.dataTransfer);
         if (fileUriItems.length > 0 && sink.onGenericFiles) {

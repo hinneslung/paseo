@@ -20,10 +20,11 @@ export function useOpenProject(
   const isConnected = useHostRuntimeIsConnected(normalizedServerId);
   const canAddProject = useSessionStore((state) =>
     normalizedServerId
-      ? state.sessions[normalizedServerId]?.serverInfo?.features?.projectAdd === true
+      ? state.sessions[normalizedServerId]?.serverInfo?.features?.projectAdd === true &&
+        state.sessions[normalizedServerId]?.serverInfo?.features?.stableProjectIdentity === true
       : false,
   );
-  const addEmptyProject = useSessionStore((state) => state.addEmptyProject);
+  const upsertProject = useSessionStore((state) => state.upsertProject);
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
@@ -34,13 +35,13 @@ export function useOpenProject(
         isConnected,
         canAddProject,
         client,
-        addEmptyProject,
+        upsertProject,
         setHasHydratedWorkspaces,
       });
       return result;
     },
     [
-      addEmptyProject,
+      upsertProject,
       canAddProject,
       client,
       isConnected,
@@ -60,7 +61,7 @@ export function useCloneGithubProject(
   const normalizedServerId = serverId?.trim() ?? "";
   const client = useHostRuntimeClient(normalizedServerId);
   const isConnected = useHostRuntimeIsConnected(normalizedServerId);
-  const addEmptyProject = useSessionStore((state) => state.addEmptyProject);
+  const upsertProject = useSessionStore((state) => state.upsertProject);
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
@@ -72,11 +73,11 @@ export function useCloneGithubProject(
         ...(cloneProtocol ? { cloneProtocol } : {}),
         isConnected,
         client,
-        addEmptyProject,
+        upsertProject,
         setHasHydratedWorkspaces,
       });
     },
-    [addEmptyProject, client, isConnected, normalizedServerId, setHasHydratedWorkspaces],
+    [client, isConnected, normalizedServerId, setHasHydratedWorkspaces, upsertProject],
   );
 }
 

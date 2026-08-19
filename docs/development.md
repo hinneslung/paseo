@@ -19,7 +19,28 @@ Root checkout dev is intentionally split across terminals:
 - `npm run dev:app` runs Expo on `http://localhost:8081` and connects to the dev daemon.
 - `npm run dev:desktop` runs its own Electron-flavored Expo server on the first free port from `8082` through `8089`. It never claims port `8081`.
 
+Desktop dev launches its desktop-managed daemon with `PASEO_NODE_ENV=development`,
+so development-only providers such as Mock Load Test are available. Packaged
+desktop launches always force the daemon to production mode.
+
+The web and desktop dev launchers pass the current Git branch to Metro as
+`EXPO_PUBLIC_PASEO_DEV_BUILD_LABEL`. The expanded desktop sidebar shows it in
+the titlebar row. Production builds leave the variable unset and show no label.
+
 `npm run dev` is only a shorthand for `npm run dev:server`. Keep `127.0.0.1:6767` for the packaged app and production-style `~/.paseo` state.
+
+## Nix desktop package
+
+The flake exposes `packages.<system>.desktop` on Linux and macOS:
+
+```bash
+nix build .#desktop
+```
+
+Linux produces the `paseo-desktop` launcher and desktop entry. macOS produces
+`Applications/Paseo.app` plus the `paseo-desktop` launcher. Both use the nixpkgs
+Electron runtime and the checkout's built daemon, client, and renderer rather
+than downloading a published desktop release.
 
 ### PASEO_HOME
 
@@ -98,10 +119,23 @@ The iOS simulator shares the Mac's loopback, so `localhost:<port>` reaches the h
 
 ### Desktop renderer profiling
 
-`npm run dev:desktop` starts Electron with Chromium remote debugging enabled on
-`http://127.0.0.1:9223` so renderer CPU profiles can be captured through CDP.
-It launches its own Electron-flavored Expo server and passes that URL to Electron.
-Override the CDP port with `PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` when `9223` is busy.
+`npm run dev:desktop` starts Electron with Chromium remote debugging enabled so
+renderer CPU profiles can be captured through CDP. By default it passes
+`--remote-debugging-port=0`, so Chromium atomically asks the OS for an available
+port and prints the selected DevTools endpoint. Set
+`PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` when a QA workflow requires a validated,
+fixed port.
+
+Desktop dev also scopes Electron `userData` to the current dev root. This prevents
+desktop-only environment inherited by terminals opened inside Paseo from coupling
+a new worktree instance to the parent desktop instance's profile or single-instance
+lock.
+
+The desktop workspace script `exec`s the dev runner so the terminal owns the runner
+PID. Terminal shutdown reaches the runner as `SIGHUP`; the runner stops Metro and
+asks Electron to quit through its normal app lifecycle. Do not add an npm wrapper or
+detach Electron: either change leaves an orphan holding the worktree's single-instance
+lock and broken output pipes.
 
 With desktop dev running, verify the real BrowserWindow, titlebar clearance, fullscreen
 transition, and 751-pixel settings split with:
@@ -111,8 +145,9 @@ npm run verify:electron-cdp --workspace=@getpaseo/desktop
 ```
 
 The verifier reads the same `EXPO_PORT` and
-`PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` environment names as desktop dev. Set both when
-testing an isolated instance on non-default ports.
+`PASEO_ELECTRON_REMOTE_DEBUGGING_PORT` environment names as desktop dev. Set an
+explicit remote-debugging port for verifier runs, and set both when testing an
+isolated instance on non-default ports.
 
 When running a dedicated Electron QA instance against a non-default Expo port, set
 `EXPO_DEV_URL` explicitly. Desktop main defaults to `http://localhost:8081`, so
@@ -228,6 +263,27 @@ The supervisor rotates `daemon.log`. Persisted `log.file.rotate` settings in
 `PASEO_LOG_ROTATE_SIZE` and `PASEO_LOG_ROTATE_COUNT` env vars override the
 defaults. The default rotation is `10m` x `3` files everywhere.
 
+### Git process pressure
+
+If Git refreshes consume too much CPU, disk, or antivirus capacity, especially on Windows, reduce
+the daemon-global Git process limits in `$PASEO_HOME/config.json`:
+
+```json
+{
+  "daemon": {
+    "git": {
+      "maxProcessesPerSecond": 5,
+      "maxProcessConcurrency": 4
+    }
+  }
+}
+```
+
+Restart the daemon with `paseo daemon restart`. If Paseo Desktop manages the daemon, fully quit and
+reopen the desktop app. Lower values reduce machine pressure but make Git-backed workspace state and
+Git RPCs wait longer. See [Git process limits](data-model.md#git-process-limits) for defaults,
+semantics, and environment-variable overrides.
+
 ### Agent Tool Catalog Measurement
 
 Measure the MCP `tools/list` payload that Paseo injects into agents with:
@@ -241,6 +297,21 @@ tools, and the browser-tools delta. It defaults to the agent-scoped catalog; use
 `-- --scope=top-level` for the unaffiliated `/mcp/agents` shape and `-- --json`
 for machine-readable output.
 
+## Worktree starting refs
+
+A new worktree starts from the current branch's upstream, or the local branch when it has no
+upstream. This keeps unpushed local commits out of new workspaces by default. The picker collapses
+identical refs; divergent local or non-origin refs remain explicit, qualified choices.
+
+The daemon sends the exact upstream ref because the remote and branch names cannot be inferred.
+Worktrees retain that ref for comparisons and updates from base while exposing its branch name to
+the UI. Merging into base requires a mutable local target: `origin/main` maps to local `main`, while
+another remote fails closed until the worktree records an explicit local target. Older daemons omit
+the optional field and retain the previous local-first behavior; older worktree metadata without the
+exact ref also resolves through its stored branch name.
+
+Worktrees inherit committed Git state only; uncommitted source-checkout changes are not copied.
+
 ## paseo.json service scripts
 
 `worktree.setup` and `worktree.teardown` accept either a multiline shell script or an array
@@ -250,10 +321,18 @@ Lifecycle commands run in the worktree through a stable script shell: `bash`
 resolved from `PATH` on macOS/Linux, and PowerShell with `-NoProfile` on
 Windows. They inherit the daemon environment plus Paseo's lifecycle variables;
 login and interactive shell startup files are not loaded, and Bash's `BASH_ENV`
-hook is unset. Daemon-run loop verify checks and ACP single-string terminal
-commands use the same non-login Bash behavior on macOS/Linux, but preserve their
-existing `cmd.exe /c` string semantics on Windows. Service scripts are separate:
+hook is unset. ACP single-string terminal commands use the same non-login Bash
+behavior on macOS/Linux, but preserve their existing `cmd.exe /c` string semantics
+on Windows. Service scripts are separate:
 they launch in a terminal and receive the service environment described below.
+
+Because the shell differs per platform, a lifecycle command that must run
+everywhere cannot use POSIX-only syntax — `VAR=1 cmd` env prefixes, `$VAR`
+expansion, `cp`/`rm`, or a `./scripts/*.sh` entrypoint all fail under PowerShell,
+and `bash` is not guaranteed to exist on Windows. Put that logic in a Node script
+that reads what it needs from `process.env` and invoke it as
+`node ./scripts/<name>.mjs`. This repo's own setup does exactly that in
+`scripts/seed-worktree-dev-state.mjs` and `scripts/seed-ios-native-cache.mjs`.
 
 ```json
 {
@@ -290,6 +369,15 @@ Service proxy hostnames use the double-dash shape: `web--feature-auth--project.l
   }
 }
 ```
+
+Service ports use OS ephemeral allocation by default. Set `worktrees.servicePorts` in
+`$PASEO_HOME/config.json`, or replace it for one project with `worktree.servicePorts` in
+`paseo.json`. The block accepts an inclusive `range` such as `"3000-4000"` or a `portScript`
+executable. Since `portScript` is executed directly without a shell, it must point to a real executable (e.g., a binary or a script with a proper shebang like `#!/bin/sh`) rather than an inline shell command or shell pipeline. For inline shell commands or pipelines, wrap them in a small script. `portScript` runs in the workspace directory with four arguments: service name,
+workspace ID, branch name, and worktree path. A missing branch is passed as an empty string. The same
+values are available as `PASEO_SCRIPTNAME`, `PASEO_WORKSPACE_ID`, `PASEO_BRANCH_NAME`, and
+`PASEO_WORKTREE_PATH`. The script must print one valid TCP port. Paseo trusts the external allocator,
+so the port may already be bound. `portScript` takes precedence when both values are present.
 
 ## Bundled daemon web UI
 
@@ -387,11 +475,14 @@ install.
 
 Use `npm run cli` to run the in-repo CLI from source (`npx tsx packages/cli/src/index.ts`). The script wraps the CLI with `scripts/dev-home.sh`, so it automatically uses this checkout's `.dev/paseo-home` and dev daemon endpoint unless you pass an explicit override. The globally installed `paseo` binary on macOS is a symlink into the installed Paseo desktop app, not this checkout — use it to drive the desktop's built-in daemon, but use `npm run cli` when you want to talk to the CLI you are editing.
 
+Canonical automation uses `paseo workspace create/ls/rename/archive`, `paseo heartbeat create/update/delete`, and the full `paseo schedule` group. MCP heartbeat automation is intentionally smaller: create and delete only. Detach remains an explicit user lifecycle action rather than an agent tool. `paseo run --new-workspace local|worktree` composes workspace creation with agent creation. The old `paseo worktree` and `paseo run --worktree` forms are hidden compatibility aliases.
+
 ```bash
 npm run cli -- ls -a -g              # List all agents globally
 npm run cli -- ls -a -g --json       # Same, as JSON
 npm run cli -- inspect <id>          # Show detailed agent info
 npm run cli -- logs <id>             # View agent timeline
+npm run cli -- agent open <id>       # Focus an existing agent in Paseo Desktop
 npm run cli -- daemon status         # Check daemon status
 npm run cli -- clone owner/repo --dir ~/workspace # Clone GitHub repo and register project
 ```
@@ -401,6 +492,11 @@ Use `--host <host:port>` to point the CLI at a different daemon:
 ```bash
 npm run cli -- --host localhost:7777 ls -a
 ```
+
+Desktop integrations can focus an existing agent without creating one or
+sending a message. Use `paseo://h/<server-id>/agent/<agent-id>`, or run
+`paseo agent open <agent-id>`. The CLI reads the local daemon's server ID by
+default; pass `--server <server-id>` when targeting another server.
 
 ## Agent state
 

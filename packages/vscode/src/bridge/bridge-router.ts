@@ -202,13 +202,20 @@ export class BridgeRouter {
   private async openEditorTarget(args: unknown): Promise<void> {
     const target = parseEditorOpenTargetInput(args);
     try {
-      if (target.mode === "reveal") {
-        await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(target.path));
+      if (!target.filePath) {
+        const targetUri = vscode.Uri.file(target.workspacePath);
+        const isOpenWorkspace = vscode.workspace.workspaceFolders?.some(
+          (folder) => folder.uri.fsPath === targetUri.fsPath,
+        );
+        if (!isOpenWorkspace) {
+          await vscode.commands.executeCommand("vscode.openFolder", targetUri, false);
+        }
         return;
       }
       await openTextEditorTarget(target);
     } catch (error) {
-      throw new Error(`Failed to open ${target.path} in VS Code: ${getErrorMessage(error)}`, {
+      const targetPath = target.filePath ?? target.workspacePath;
+      throw new Error(`Failed to open ${targetPath} in VS Code: ${getErrorMessage(error)}`, {
         cause: error,
       });
     }
@@ -271,11 +278,11 @@ export class BridgeRouter {
 }
 
 async function openTextEditorTarget(target: EditorOpenTargetInput): Promise<void> {
-  const uri = vscode.Uri.file(target.path);
-  // With no specific line requested, open with VS Code's default editor. This also handles
-  // non-text files (images, PDFs, ...) which openTextDocument() rejects with
-  // "File seems to be binary and cannot be opened as text".
-  if (target.lineStart === undefined) {
+  if (!target.filePath) {
+    return;
+  }
+  const uri = vscode.Uri.file(target.filePath);
+  if (target.line === undefined) {
     await vscode.commands.executeCommand("vscode.open", uri);
     return;
   }
@@ -291,10 +298,10 @@ async function openTextEditorTarget(target: EditorOpenTargetInput): Promise<void
   }
   const editor = await vscode.window.showTextDocument(doc);
 
-  const startLine = clampLineIndex(target.lineStart, doc.lineCount);
+  const startLine = clampLineIndex(target.line, doc.lineCount);
   const endLine =
     target.lineEnd === undefined ? startLine : clampLineIndex(target.lineEnd, doc.lineCount);
-  const start = new vscode.Position(startLine, 0);
+  const start = new vscode.Position(startLine, Math.max(0, (target.column ?? 1) - 1));
   const end = new vscode.Position(endLine, doc.lineAt(endLine).range.end.character);
   const range = new vscode.Range(start, end);
   editor.selection = new vscode.Selection(start, target.lineEnd === undefined ? start : end);

@@ -24,7 +24,8 @@ export type CheckoutGitAsyncActionId =
   | "enable-pr-auto-merge-rebase"
   | "disable-pr-auto-merge"
   | "merge-branch"
-  | "merge-from-base";
+  | "merge-from-base"
+  | "discard-changes";
 
 type CheckoutKey = string;
 type StatusMap = Partial<Record<CheckoutGitAsyncActionId, CheckoutGitActionStatus>>;
@@ -42,11 +43,19 @@ function resolveClient(serverId: string) {
   return client;
 }
 
-function assertGitHubAutoMergeActionsSupported(serverId: string) {
+type AutoMergeActionsRpc = "forge" | "github";
+
+function resolveAutoMergeActionsRpc(serverId: string): AutoMergeActionsRpc {
   const session = useSessionStore.getState().sessions[serverId];
-  if (session?.serverInfo?.features?.checkoutGithubSetAutoMerge !== true) {
-    throw new Error("Update the host to use GitHub auto-merge actions.");
+  if (session?.serverInfo?.features?.checkoutForgeSetAutoMerge === true) {
+    return "forge";
   }
+  // COMPAT(githubAutoMergeRpc): added in v0.1.106, remove after 2026-12-28 once
+  // all supported clients use checkout.forge.set_auto_merge.*.
+  if (session?.serverInfo?.features?.checkoutGithubSetAutoMerge === true) {
+    return "github";
+  }
+  throw new Error("Update the host to use auto-merge actions.");
 }
 
 function setStatus(
@@ -111,6 +120,7 @@ interface CheckoutGitActionsStoreState {
   disablePrAutoMerge: (params: { serverId: string; cwd: string }) => Promise<void>;
   mergeBranch: (params: { serverId: string; cwd: string; baseRef: string }) => Promise<void>;
   mergeFromBase: (params: { serverId: string; cwd: string; baseRef: string }) => Promise<void>;
+  discardChanges: (params: { serverId: string; cwd: string; paths: string[] }) => Promise<void>;
 }
 
 async function runCheckoutAction({
@@ -281,14 +291,19 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
   },
 
   enablePrAutoMerge: async ({ serverId, cwd, method }) => {
-    assertGitHubAutoMergeActionsSupported(serverId);
+    const rpc = resolveAutoMergeActionsRpc(serverId);
     await runCheckoutAction({
       serverId,
       cwd,
       actionId: `enable-pr-auto-merge-${method}`,
       run: async () => {
         const client = resolveClient(serverId);
-        const payload = await client.checkoutGithubSetAutoMerge(cwd, { enabled: true, method });
+        // COMPAT(githubAutoMergeRpc): added in v0.1.106, remove after 2026-12-28 once
+        // all supported clients use checkout.forge.set_auto_merge.*.
+        const payload =
+          rpc === "forge"
+            ? await client.checkoutForgeSetAutoMerge(cwd, { enabled: true, method })
+            : await client.checkoutGithubSetAutoMerge(cwd, { enabled: true, method });
         if (payload.error) {
           throw new Error(payload.error.message);
         }
@@ -297,14 +312,19 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
   },
 
   disablePrAutoMerge: async ({ serverId, cwd }) => {
-    assertGitHubAutoMergeActionsSupported(serverId);
+    const rpc = resolveAutoMergeActionsRpc(serverId);
     await runCheckoutAction({
       serverId,
       cwd,
       actionId: "disable-pr-auto-merge",
       run: async () => {
         const client = resolveClient(serverId);
-        const payload = await client.checkoutGithubSetAutoMerge(cwd, { enabled: false });
+        // COMPAT(githubAutoMergeRpc): added in v0.1.106, remove after 2026-12-28 once
+        // all supported clients use checkout.forge.set_auto_merge.*.
+        const payload =
+          rpc === "forge"
+            ? await client.checkoutForgeSetAutoMerge(cwd, { enabled: false })
+            : await client.checkoutGithubSetAutoMerge(cwd, { enabled: false });
         if (payload.error) {
           throw new Error(payload.error.message);
         }
@@ -344,6 +364,23 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
         });
         if (payload.error) {
           throw new Error(payload.error.message);
+        }
+      },
+    });
+  },
+
+  discardChanges: async ({ serverId, cwd, paths }) => {
+    await runCheckoutAction({
+      serverId,
+      cwd,
+      actionId: "discard-changes",
+      run: async () => {
+        const client = resolveClient(serverId);
+        const payload = await client.checkoutDiscardChanges(cwd, { paths });
+        if (!payload.success) {
+          throw new Error(
+            payload.error?.message ?? i18n.t("workspace.fileActions.confirmRevert.failed"),
+          );
         }
       },
     });

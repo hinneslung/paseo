@@ -176,6 +176,7 @@
 }
 
 .changelog-release-heading:hover .changelog-heading-anchor,
+.changelog-patch-heading:hover .changelog-heading-anchor,
 .changelog-heading-anchor:focus {
   opacity: 1;
 }
@@ -184,13 +185,44 @@
   color: var(--color-foreground);
 }
 
+.changelog-patches {
+  display: grid;
+  gap: 2.5rem;
+}
+
+.changelog-patch + .changelog-patch {
+  border-top: 1px solid var(--color-border);
+  padding-top: 2.5rem;
+}
+
+.changelog-patch-heading {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 0.625rem;
+  scroll-margin-top: 1.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.changelog-patch-title {
+  color: var(--color-foreground);
+  font-size: 1rem;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.changelog-patch-heading .changelog-release-date {
+  margin-bottom: 0;
+}
+
 .changelog-release-notes {
   color: color-mix(in srgb, var(--color-foreground) 76%, transparent);
   font-size: 0.9375rem;
   line-height: 1.7;
 }
 
-.changelog-release-notes h3 {
+.changelog-release-notes h3,
+.changelog-release-notes h4 {
   margin-top: 1.75rem;
   margin-bottom: 0.625rem;
   color: var(--color-muted-foreground);
@@ -199,7 +231,8 @@
   line-height: 1.4;
 }
 
-.changelog-release-notes h3:first-child {
+.changelog-release-notes h3:first-child,
+.changelog-release-notes h4:first-child {
   margin-top: 0;
 }
 
@@ -263,6 +296,53 @@
   scroll-margin-top: 1.5rem;
 }
 
+.docs-example {
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  padding: 0.875rem 1rem;
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+  scroll-margin-top: 1.5rem;
+}
+
+.docs-example[open] {
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+.docs-example-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0;
+  cursor: pointer;
+  list-style: none;
+  color: var(--color-foreground);
+  font-weight: 500;
+}
+
+.docs-example-summary::-webkit-details-marker {
+  display: none;
+}
+
+.docs-example-summary::before {
+  content: "+";
+  color: rgba(255, 255, 255, 0.4);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  flex-shrink: 0;
+}
+
+.docs-example[open] > .docs-example-summary::before {
+  content: "−";
+}
+
+.docs-example[open] > .docs-example-summary {
+  margin-bottom: 0.75rem;
+}
+
+.docs-example > :last-child {
+  margin-bottom: 0;
+}
+
 .docs-prose h1 {
   color: var(--color-foreground);
   font-size: 1.875rem;
@@ -274,9 +354,11 @@
 
 .docs-prose h2 {
   color: var(--color-foreground);
-  font-size: 1.25rem;
+  font-size: 1.375rem;
   line-height: 1.4;
   font-weight: 500;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
   margin-top: 2rem;
   margin-bottom: 1rem;
 }
@@ -366,6 +448,7 @@
   font-weight: 600;
 }
 
+.changelog-release-notes blockquote,
 .docs-prose blockquote {
   background-color: color-mix(in srgb, var(--color-primary) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
@@ -376,10 +459,12 @@
   color: rgba(255, 255, 255, 0.8);
 }
 
+.changelog-release-notes blockquote > :first-child,
 .docs-prose blockquote > :first-child {
   margin-top: 0;
 }
 
+.changelog-release-notes blockquote > :last-child,
 .docs-prose blockquote > :last-child {
   margin-bottom: 0;
 }

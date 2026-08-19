@@ -99,10 +99,11 @@ describe("snapshot mutation ownership boundary", () => {
     const session = asInternals<SessionInternals>(
       new Session({
         clientId: "test-client",
+        scopes: ["*"],
         onMessage,
         logger: createStub<SessionOptions["logger"]>(logger),
         downloadTokenStore: createStub<SessionOptions["downloadTokenStore"]>({}),
-        pushTokenStore: createStub<SessionOptions["pushTokenStore"]>({}),
+        pushNotifications: createStub<SessionOptions["pushNotifications"]>({}),
         paseoHome: "/tmp/paseo-test",
         agentManager: createStub<SessionOptions["agentManager"]>({
           subscribe: () => () => {},
@@ -118,6 +119,7 @@ describe("snapshot mutation ownership boundary", () => {
           upsert: directStorageWrite,
         }),
         projectRegistry: createStub<SessionOptions["projectRegistry"]>({
+          subscribeToMutations: () => () => {},
           initialize: async () => {},
           existsOnDisk: async () => true,
           list: async () => [],
@@ -127,6 +129,7 @@ describe("snapshot mutation ownership boundary", () => {
           remove: async () => {},
         }),
         workspaceRegistry: createStub<SessionOptions["workspaceRegistry"]>({
+          subscribeToMutations: () => () => {},
           initialize: async () => {},
           existsOnDisk: async () => true,
           list: async () => [],

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -8,7 +8,8 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, { useAnimatedStyle, useSharedValue, runOnJS } from "react-native-reanimated";
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { scheduleOnRN } from "react-native-worklets";
+import { Gesture } from "react-native-gesture-handler";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { X } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
@@ -33,9 +34,18 @@ import { useKeyboardShiftStyle } from "@/hooks/use-keyboard-shift-style";
 import { useHasOwnedWindowChromeObstruction, WindowChromeSafeArea } from "@/utils/desktop-window";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { RetainedPanelActivity } from "@/components/retained-panel";
-import { isWeb } from "@/constants/platform";
+import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
 import { buildWorkspaceAttachmentScopeKey } from "@/attachments/workspace-attachments-store";
 import { resolveDesktopExplorerWidth } from "@/components/desktop-sidebar-layout";
+import {
+  SIDEBAR_RESIZE_ACTIVATION_OFFSET,
+  SIDEBAR_RESIZE_FAIL_OFFSET,
+} from "@/components/sidebar-resize-handle-layout";
+import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
+import { resolveFocusedChatTarget } from "@/composer/focused-chat-target";
+import { createWorkspaceFileAttachment } from "@/attachments/workspace-file";
+import { useDraftStore } from "@/stores/draft-store";
 
 function logExplorerSidebar(_event: string, _details: Record<string, unknown>): void {}
 
@@ -162,6 +172,9 @@ export function ExplorerSidebar({
   });
   const startWidthRef = useRef(visibleExplorerWidth);
   const resizeWidth = useSharedValue(visibleExplorerWidth);
+  const [resizePressed, setResizePressed] = useState(false);
+  const showResizeGrip = useCallback(() => setResizePressed(true), []);
+  const hideResizeGrip = useCallback(() => setResizePressed(false), []);
 
   useEffect(() => {
     resizeWidth.value = visibleExplorerWidth;
@@ -180,8 +193,15 @@ export function ExplorerSidebar({
       Gesture.Pan()
         .enabled(true)
         .hitSlop({ left: 8, right: 8, top: 0, bottom: 0 })
-        .onStart(() => {
-          startWidthRef.current = visibleExplorerWidth;
+        .onBegin(() => {
+          scheduleOnRN(showResizeGrip);
+        })
+        // See the left sidebar's gesture: horizontal intent only, with the start
+        // width anchored to the activation translation so the threshold is free.
+        .activeOffsetX([-SIDEBAR_RESIZE_ACTIVATION_OFFSET, SIDEBAR_RESIZE_ACTIVATION_OFFSET])
+        .failOffsetY([-SIDEBAR_RESIZE_FAIL_OFFSET, SIDEBAR_RESIZE_FAIL_OFFSET])
+        .onStart((event) => {
+          startWidthRef.current = visibleExplorerWidth + event.translationX;
           resizeWidth.value = visibleExplorerWidth;
         })
         .onUpdate((event) => {
@@ -193,8 +213,18 @@ export function ExplorerSidebar({
         })
         .onEnd(() => {
           runOnJS(setExplorerWidth)(resizeWidth.value);
+        })
+        .onFinalize(() => {
+          scheduleOnRN(hideResizeGrip);
         }),
-    [resizeWidth, setExplorerWidth, viewportWidth, visibleExplorerWidth],
+    [
+      hideResizeGrip,
+      resizeWidth,
+      setExplorerWidth,
+      showResizeGrip,
+      viewportWidth,
+      visibleExplorerWidth,
+    ],
   );
 
   const resizeAnimatedStyle = useAnimatedStyle(() => ({
@@ -211,10 +241,13 @@ export function ExplorerSidebar({
 
   return (
     <Animated.View style={desktopSidebarStyle}>
-      <View style={DESKTOP_SIDEBAR_BORDER_STYLE}>
-        <GestureDetector gesture={resizeGesture}>
-          <View style={RESIZE_HANDLE_STYLE} />
-        </GestureDetector>
+      <View style={[styles.desktopSidebarBorder, { flex: 1 }]}>
+        <SidebarResizeHandle
+          edge="left"
+          gesture={resizeGesture}
+          pressed={resizePressed}
+          testID="explorer-sidebar-resize-handle"
+        />
 
         <ExplorerSidebarContent
           activeTab={explorerTab}
@@ -347,6 +380,7 @@ function ExplorerSidebarContent({
               testID="explorer-tab-pr"
             >
               <PullRequestTabIcon
+                forge={prPane.forge}
                 size={13}
                 color={
                   resolvedTab === "pr" ? theme.colors.foreground : theme.colors.foregroundMuted
@@ -383,15 +417,16 @@ function ExplorerSidebarContent({
       {/* Content based on active tab */}
       <View style={styles.contentArea} testID="explorer-content-area">
         {resolvedTab === "changes" && (
-          <GitDiffPane
+          <ChangedFilesPane
             serverId={serverId}
             workspaceId={workspaceId}
-            cwd={workspaceRoot}
-            enabled={isOpen}
+            workspaceRoot={workspaceRoot}
+            isOpen={isOpen}
+            onOpenFile={onOpenFile}
           />
         )}
         {resolvedTab === "files" && (
-          <FileExplorerPane
+          <FilesPane
             serverId={serverId}
             workspaceId={workspaceId}
             workspaceRoot={workspaceRoot}
@@ -409,6 +444,83 @@ function ExplorerSidebarContent({
         )}
       </View>
     </View>
+  );
+}
+
+/**
+ * Shared add-to-chat state for the changes/files panes: both expose an "add file
+ * to chat" action that attaches the file to the focused chat's composer.
+ * Available only when a workspace with a focused chat is available.
+ */
+function useAddFileToChat({
+  serverId,
+  workspaceId,
+}: Pick<SidebarContentProps, "serverId" | "workspaceId">) {
+  const workspaceKey = workspaceId
+    ? buildWorkspaceTabPersistenceKey({ serverId, workspaceId })
+    : null;
+  const layout = useWorkspaceLayoutStore((state) =>
+    workspaceKey ? state.layoutByWorkspace[workspaceKey] : undefined,
+  );
+  const focusTab = useWorkspaceLayoutStore((state) => state.focusTab);
+  const focusedChat = useMemo(
+    () => resolveFocusedChatTarget({ serverId, layout }),
+    [serverId, layout],
+  );
+  const addFile = useCallback(
+    (filePath: string) => {
+      if (!focusedChat || !workspaceKey) {
+        return;
+      }
+      void useDraftStore.getState().attachWorkspaceFile({
+        draftKey: focusedChat.draftKey,
+        attachment: createWorkspaceFileAttachment({ path: filePath }),
+      });
+      focusTab(workspaceKey, focusedChat.tabId);
+    },
+    [focusTab, focusedChat, workspaceKey],
+  );
+  return { addFile, canAddToChat: focusedChat !== null };
+}
+
+function ChangedFilesPane({
+  serverId,
+  workspaceId,
+  workspaceRoot,
+  isOpen,
+  onOpenFile,
+}: Pick<
+  SidebarContentProps,
+  "serverId" | "workspaceId" | "workspaceRoot" | "isOpen" | "onOpenFile"
+>) {
+  const { addFile, canAddToChat } = useAddFileToChat({ serverId, workspaceId });
+  return (
+    <GitDiffPane
+      serverId={serverId}
+      workspaceId={workspaceId}
+      cwd={workspaceRoot}
+      enabled={isOpen}
+      onOpenFile={onOpenFile}
+      onAddToChat={canAddToChat ? addFile : undefined}
+    />
+  );
+}
+
+function FilesPane({
+  serverId,
+  workspaceId,
+  workspaceRoot,
+  onOpenFile,
+}: Pick<SidebarContentProps, "serverId" | "workspaceId" | "workspaceRoot" | "onOpenFile">) {
+  const { addFile, canAddToChat } = useAddFileToChat({ serverId, workspaceId });
+  return (
+    <FileExplorerPane
+      serverId={serverId}
+      workspaceId={workspaceId}
+      workspaceRoot={workspaceRoot}
+      onOpenFile={onOpenFile}
+      onAddToChat={canAddToChat ? addFile : undefined}
+    />
   );
 }
 
@@ -458,14 +570,6 @@ const styles = StyleSheet.create((theme) => ({
     borderLeftWidth: 1,
     borderLeftColor: theme.colors.border,
     backgroundColor: theme.colors.surfaceSidebar,
-  },
-  resizeHandle: {
-    position: "absolute",
-    left: -5,
-    top: 0,
-    bottom: 0,
-    width: 10,
-    zIndex: 10,
   },
   sidebarContent: {
     flex: 1,
@@ -521,6 +625,3 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 0,
   },
 }));
-
-const DESKTOP_SIDEBAR_BORDER_STYLE = [styles.desktopSidebarBorder, { flex: 1 }];
-const RESIZE_HANDLE_STYLE = [styles.resizeHandle, isWeb && ({ cursor: "col-resize" } as object)];

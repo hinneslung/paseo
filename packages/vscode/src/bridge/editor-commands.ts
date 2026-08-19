@@ -1,9 +1,9 @@
 export interface EditorOpenTargetInput {
   editorId: string;
-  path: string;
-  cwd?: string;
-  mode: "open" | "reveal";
-  lineStart?: number;
+  workspacePath: string;
+  filePath?: string;
+  line?: number;
+  column?: number;
   lineEnd?: number;
 }
 
@@ -39,23 +39,24 @@ export function parseEditorOpenTargetInput(args: unknown): EditorOpenTargetInput
   if (editorId !== "vscode-self") {
     throw new Error("editor.openTarget only supports the VS Code editor target.");
   }
-  const filePath = typeof args.path === "string" ? args.path.trim() : "";
-  if (!filePath) {
-    throw new Error("editor.openTarget requires a file path.");
+  const workspacePath = typeof args.workspacePath === "string" ? args.workspacePath.trim() : "";
+  if (!workspacePath) {
+    throw new Error("editor.openTarget requires a workspace path.");
   }
-  const mode = args.mode === "reveal" ? "reveal" : "open";
-  const lineStart = parseLineNumber(args.lineStart, "lineStart");
+  const filePath =
+    typeof args.filePath === "string" && args.filePath.trim() ? args.filePath.trim() : undefined;
+  const line = parseLineNumber(args.line, "line");
+  const column = parseLineNumber(args.column, "column");
   const lineEnd = parseLineNumber(args.lineEnd, "lineEnd");
-  if (lineStart !== undefined && lineEnd !== undefined && lineEnd < lineStart) {
-    throw new Error("lineEnd must be greater than or equal to lineStart.");
+  if (line !== undefined && lineEnd !== undefined && lineEnd < line) {
+    throw new Error("lineEnd must be greater than or equal to line.");
   }
-  const cwd = typeof args.cwd === "string" && args.cwd.trim() ? args.cwd.trim() : undefined;
   return {
     editorId,
-    path: filePath,
-    mode,
-    ...(cwd ? { cwd } : {}),
-    ...(lineStart !== undefined ? { lineStart } : {}),
+    workspacePath,
+    ...(filePath ? { filePath } : {}),
+    ...(line !== undefined ? { line } : {}),
+    ...(column !== undefined ? { column } : {}),
     ...(lineEnd !== undefined ? { lineEnd } : {}),
   };
 }

@@ -1,14 +1,16 @@
 import { Command, Option } from "commander";
 import { createAgentCommand } from "./commands/agent/index.js";
 import { createDaemonCommand } from "./commands/daemon/index.js";
-import { createChatCommand } from "./commands/chat/index.js";
-import { createLoopCommand } from "./commands/loop/index.js";
 import { createPermitCommand } from "./commands/permit/index.js";
 import { createProviderCommand } from "./commands/provider/index.js";
 import { createScheduleCommand } from "./commands/schedule/index.js";
 import { createSpeechCommand } from "./commands/speech/index.js";
+import { createScriptCommand } from "./commands/script/index.js";
 import { createTerminalCommand } from "./commands/terminal/index.js";
 import { createWorktreeCommand } from "./commands/worktree/index.js";
+import { createWorkspaceCommand } from "./commands/workspace/index.js";
+import { createHeartbeatCommand } from "./commands/heartbeat/index.js";
+import { createHubCommand } from "./commands/hub/index.js";
 import { createHooksCommand } from "./commands/hooks.js";
 import { startCommand as daemonStartCommand } from "./commands/daemon/start.js";
 import { runStatusCommand as runDaemonStatusCommand } from "./commands/daemon/status.js";
@@ -135,6 +137,7 @@ export function createCli(): Command {
       "Listen target for restarted daemon (host:port, port, or unix socket)",
     )
     .option("--port <port>", "Port for restarted daemon listen target")
+    .option("--relay", "Enable relay on restarted daemon")
     .option("--no-relay", "Disable relay on restarted daemon")
     .option("--no-mcp", "Disable Agent MCP on restarted daemon")
     .option(
@@ -160,18 +163,19 @@ export function createCli(): Command {
 
   // Daemon commands
   program.addCommand(createDaemonCommand());
+  program.addCommand(createHubCommand());
 
   // Chat commands
-  program.addCommand(createChatCommand());
 
   // Terminal commands
   program.addCommand(createTerminalCommand());
 
-  // Loop commands
-  program.addCommand(createLoopCommand());
+  // Workspace script commands
+  program.addCommand(createScriptCommand());
 
   // Schedule commands
   program.addCommand(createScheduleCommand());
+  program.addCommand(createHeartbeatCommand());
 
   // Permission commands
   program.addCommand(createPermitCommand());
@@ -182,8 +186,11 @@ export function createCli(): Command {
   // Speech model commands
   program.addCommand(createSpeechCommand());
 
-  // Worktree commands
-  program.addCommand(createWorktreeCommand());
+  // Workspace commands
+  program.addCommand(createWorkspaceCommand());
+  // COMPAT(worktreeCli): legacy command alias added before workspace was the product unit.
+  // Added in v0.2.0; remove after 2027-01-17.
+  program.addCommand(createWorktreeCommand(), { hidden: true });
 
   return program;
 }

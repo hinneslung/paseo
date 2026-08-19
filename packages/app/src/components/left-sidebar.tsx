@@ -2,6 +2,7 @@ import { router, usePathname } from "expo-router";
 import {
   CalendarClock,
   FolderPlus,
+  GitBranch,
   History,
   Home,
   Plus,
@@ -20,20 +21,25 @@ import {
   View,
   type PressableStateCallbackType,
 } from "react-native";
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { Gesture } from "react-native-gesture-handler";
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
+import { scheduleOnRN } from "react-native-worklets";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { resolveDesktopSidebarWidth } from "@/components/desktop-sidebar-layout";
+import {
+  SIDEBAR_RESIZE_ACTIVATION_OFFSET,
+  SIDEBAR_RESIZE_FAIL_OFFSET,
+} from "@/components/sidebar-resize-handle-layout";
 import { HostPicker } from "@/components/hosts/host-picker";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
-import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/sidebar-display-preferences-menu";
+import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/display-preferences/menu";
 import { SidebarHelpMenu } from "@/components/sidebar/sidebar-help-menu";
+import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
 import { Shortcut } from "@/components/ui/shortcut";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HEADER_INNER_HEIGHT, useIsCompactFormFactor } from "@/constants/layout";
-import { isWeb } from "@/constants/platform";
 import { useOpenAddProject } from "@/hooks/use-open-add-project";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { canCreateWorktreeForProjectKind } from "@/projects/host-projects";
@@ -55,6 +61,7 @@ import { usePanelStore } from "@/stores/panel-store";
 import { useOwnsWindowChromeCorner, WindowChromeSafeArea } from "@/utils/desktop-window";
 import { useCloseAgentListGesture } from "@/mobile-panels/gestures";
 import { MobilePanelOverlay } from "@/mobile-panels/presentation";
+import { useIsMobilePanelPresented } from "@/mobile-panels/provider";
 import {
   buildOpenProjectRoute,
   buildNewWorkspaceRoute,
@@ -71,20 +78,21 @@ import { SidebarWorkspaceList } from "./sidebar-workspace-list";
 
 type SidebarTheme = ReturnType<typeof useUnistyles>["theme"];
 
+const DEV_BUILD_LABEL = process.env.EXPO_PUBLIC_PASEO_DEV_BUILD_LABEL?.trim() || null;
+
 interface SidebarSharedProps {
   theme: SidebarTheme;
   statusGroups: StatusGroup[];
   pinnedGroups: PinnedSidebarGroups;
   projects: SidebarProjectEntry[];
   workspaceEntriesByKey: ReadonlyMap<string, SidebarWorkspaceEntry>;
-  projectNamesByKey: Map<string, string>;
   isInitialLoad: boolean;
   isRevalidating: boolean;
   isManualRefresh: boolean;
   groupMode: SidebarGroupMode;
   collapsedProjectKeys: ReadonlySet<string>;
   shortcutIndexByWorkspaceKey: Map<string, number>;
-  toggleProjectCollapsed: (projectKey: string) => void;
+  toggleProjectCollapsed: (projectViewKey: string) => void;
   handleRefresh: () => void;
   handleOpenProject: () => void;
   handleHome: () => void;
@@ -132,7 +140,6 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
   const {
     projects,
     workspaceEntriesByKey,
-    projectNamesByKey,
     isInitialLoad,
     isRevalidating,
     refreshAll,
@@ -238,7 +245,6 @@ export const LeftSidebar = memo(function LeftSidebar({ active }: { active: boole
     pinnedGroups,
     projects,
     workspaceEntriesByKey,
-    projectNamesByKey,
     isInitialLoad,
     isRevalidating,
     isManualRefresh,
@@ -332,6 +338,64 @@ function FooterIconButton({
               color={hovered ? theme.colors.foreground : theme.colors.foregroundMuted}
             />
           )}
+        </Pressable>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="center" offset={8}>
+        <IconTooltipContent label={label} shortcutKeys={shortcutKeys} />
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+function footerAddProjectButtonStyle({
+  hovered,
+}: PressableStateCallbackType & { hovered?: boolean }) {
+  return [styles.footerAddProjectButton, Boolean(hovered) && styles.footerAddProjectButtonHovered];
+}
+
+function FooterAddProjectButton({
+  onPress,
+  label,
+  shortcutKeys,
+  theme,
+}: {
+  onPress: () => void;
+  label: string;
+  shortcutKeys: ReturnType<typeof useShortcutKeys>;
+  theme: SidebarTheme;
+}) {
+  return (
+    <Tooltip delayDuration={300}>
+      <TooltipTrigger asChild>
+        <Pressable
+          style={footerAddProjectButtonStyle}
+          testID="sidebar-add-project"
+          nativeID="sidebar-add-project"
+          accessible
+          accessibilityLabel={label}
+          accessibilityRole="button"
+          onPress={onPress}
+        >
+          {({ hovered }) => {
+            const isHovered = Boolean(hovered);
+            return (
+              <>
+                <FolderPlus
+                  size={theme.iconSize.sm}
+                  color={isHovered ? theme.colors.foreground : theme.colors.foregroundMuted}
+                />
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.footerAddProjectLabel,
+                    isHovered && styles.footerAddProjectLabelHovered,
+                  ]}
+                >
+                  {label}
+                </Text>
+              </>
+            );
+          }}
         </Pressable>
       </TooltipTrigger>
       <TooltipContent side="top" align="center" offset={8}>
@@ -494,20 +558,18 @@ function SidebarFooter({
 
   return (
     <View style={styles.sidebarFooter}>
+      <FooterAddProjectButton
+        onPress={handleOpenProject}
+        label={labels.addProject}
+        shortcutKeys={newAgentKeys}
+        theme={theme}
+      />
       <View style={styles.footerIconRow}>
         <SidebarHostPicker
           theme={theme}
           label={labels.hosts}
           onAddHost={handleAddHost}
           onOpenHostSettings={handleOpenHostSettings}
-        />
-        <FooterIconButton
-          onPress={handleOpenProject}
-          testID="sidebar-add-project"
-          label={labels.addProject}
-          icon={FolderPlus}
-          shortcutKeys={newAgentKeys}
-          theme={theme}
         />
         <FooterIconButton
           onPress={handleHome}
@@ -536,7 +598,6 @@ function MobileSidebar({
   pinnedGroups,
   projects,
   workspaceEntriesByKey,
-  projectNamesByKey,
   isInitialLoad,
   isRevalidating,
   isManualRefresh,
@@ -563,6 +624,7 @@ function MobileSidebar({
   const isSessionsActive = pathname.includes("/sessions");
   const isSchedulesActive = pathname.includes("/schedules");
   const { gesture: closeGesture, gestureRef: closeGestureRef } = useCloseAgentListGesture();
+  const dragGestureHostPresented = useIsMobilePanelPresented("agent-list");
 
   const handleViewMore = useCallback(() => {
     closeSidebar();
@@ -652,12 +714,12 @@ function MobileSidebar({
             pinnedGroups={pinnedGroups}
             projects={projects}
             workspaceEntriesByKey={workspaceEntriesByKey}
-            projectNamesByKey={projectNamesByKey}
             isRefreshing={isManualRefresh && isRevalidating}
             onRefresh={handleRefresh}
             onWorkspacePress={handleWorkspacePress}
             onAddProject={handleOpenProject}
             parentGestureRef={closeGestureRef}
+            dragGestureHostPresented={dragGestureHostPresented}
             listHeaderComponent={workspacesSectionHeaderElement}
           />
         )}
@@ -682,7 +744,6 @@ function DesktopSidebar({
   pinnedGroups,
   projects,
   workspaceEntriesByKey,
-  projectNamesByKey,
   isInitialLoad,
   isRevalidating,
   isManualRefresh,
@@ -718,6 +779,9 @@ function DesktopSidebar({
 
   const startWidthRef = useRef(visibleSidebarWidth);
   const resizeWidth = useSharedValue(visibleSidebarWidth);
+  const [resizePressed, setResizePressed] = useState(false);
+  const showResizeGrip = useCallback(() => setResizePressed(true), []);
+  const hideResizeGrip = useCallback(() => setResizePressed(false), []);
 
   useEffect(() => {
     resizeWidth.value = visibleSidebarWidth;
@@ -727,8 +791,16 @@ function DesktopSidebar({
     () =>
       Gesture.Pan()
         .hitSlop({ left: 8, right: 8, top: 0, bottom: 0 })
-        .onStart(() => {
-          startWidthRef.current = visibleSidebarWidth;
+        .onBegin(() => {
+          scheduleOnRN(showResizeGrip);
+        })
+        // Horizontal intent only, so a finger dragging down the touch grip scrolls
+        // the workspace list instead of resizing. Anchoring the start width to the
+        // activation translation keeps the extra threshold from jumping the edge.
+        .activeOffsetX([-SIDEBAR_RESIZE_ACTIVATION_OFFSET, SIDEBAR_RESIZE_ACTIVATION_OFFSET])
+        .failOffsetY([-SIDEBAR_RESIZE_FAIL_OFFSET, SIDEBAR_RESIZE_FAIL_OFFSET])
+        .onStart((event) => {
+          startWidthRef.current = visibleSidebarWidth - event.translationX;
           resizeWidth.value = visibleSidebarWidth;
         })
         .onUpdate((event) => {
@@ -741,8 +813,18 @@ function DesktopSidebar({
         })
         .onEnd(() => {
           runOnJS(setSidebarWidth)(resizeWidth.value);
+        })
+        .onFinalize(() => {
+          scheduleOnRN(hideResizeGrip);
         }),
-    [resizeWidth, setSidebarWidth, viewportWidth, visibleSidebarWidth],
+    [
+      hideResizeGrip,
+      resizeWidth,
+      setSidebarWidth,
+      showResizeGrip,
+      viewportWidth,
+      visibleSidebarWidth,
+    ],
   );
 
   const resizeAnimatedStyle = useAnimatedStyle(() => ({
@@ -765,11 +847,6 @@ function DesktopSidebar({
     () => [styles.sidebarHeaderGroup, ownsTopLeft && styles.sidebarHeaderGroupBelowChrome],
     [ownsTopLeft],
   );
-  const resizeHandleStyle = useMemo(
-    () => [styles.resizeHandle, isWeb && ({ cursor: "col-resize" } as object)],
-    [],
-  );
-
   return (
     <Animated.View
       accessibilityElementsHidden={!active}
@@ -779,9 +856,22 @@ function DesktopSidebar({
     >
       <View style={desktopSidebarBorderStyle}>
         <View style={styles.sidebarDragArea}>
-          {ownsTopLeft ? (
+          {ownsTopLeft || DEV_BUILD_LABEL ? (
             <View style={styles.desktopChromeRow}>
               <TitlebarDragRegion />
+              {DEV_BUILD_LABEL ? (
+                <View
+                  pointerEvents="none"
+                  style={styles.devBuildBadge}
+                  testID="dev-build-label"
+                  accessibilityLabel={`Development build: ${DEV_BUILD_LABEL}`}
+                >
+                  <GitBranch size={12} color={theme.colors.accentForeground} />
+                  <Text numberOfLines={1} ellipsizeMode="tail" style={styles.devBuildBadgeText}>
+                    {DEV_BUILD_LABEL}
+                  </Text>
+                </View>
+              ) : null}
             </View>
           ) : (
             <TitlebarDragRegion />
@@ -824,7 +914,6 @@ function DesktopSidebar({
             pinnedGroups={pinnedGroups}
             projects={projects}
             workspaceEntriesByKey={workspaceEntriesByKey}
-            projectNamesByKey={projectNamesByKey}
             isRefreshing={isManualRefresh && isRevalidating}
             onRefresh={handleRefresh}
             onAddProject={handleOpenProject}
@@ -844,10 +933,12 @@ function DesktopSidebar({
           handleOpenHostSettings={handleOpenHostSettings}
         />
 
-        {/* Resize handle - absolutely positioned over right border */}
-        <GestureDetector gesture={resizeGesture}>
-          <View style={resizeHandleStyle} />
-        </GestureDetector>
+        <SidebarResizeHandle
+          edge="right"
+          gesture={resizeGesture}
+          pressed={resizePressed}
+          testID="left-sidebar-resize-handle"
+        />
       </View>
     </Animated.View>
   );
@@ -928,9 +1019,6 @@ const styles = StyleSheet.create((theme) => ({
   sidebarHeaderGroup: {
     paddingTop: theme.spacing[2],
     gap: 2,
-    // Distance from History's bottom edge to the divider. WorkspacesSectionHeader
-    // uses a slightly smaller paddingTop to balance the action buttons' centering
-    // offset so the divider reads as visually centered between the two.
     paddingBottom: theme.spacing[1.5],
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border,
@@ -943,11 +1031,11 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "space-between",
     gap: theme.spacing[2],
-    // Rendered inside the scroll's listContent (paddingHorizontal spacing[2]), so the
-    // title lands at spacing[2] left to align with project icons, and the trailing
-    // pill sits flush with the list edge on the right.
+    // Rendered inside the scroll's listContent (paddingHorizontal spacing[2]). The title
+    // lands at spacing[2] left to align with project icons. Settings2's painted path stops
+    // inside its 14px SVG, so 4px aligns the ink rather than the SVG box to the row rail.
     paddingLeft: theme.spacing[2],
-    paddingRight: 0,
+    paddingRight: 4,
     paddingTop: theme.spacing[1],
     paddingBottom: theme.spacing[1],
   },
@@ -985,7 +1073,9 @@ const styles = StyleSheet.create((theme) => ({
     pointerEvents: "box-none",
   },
   mobileCloseButton: {
-    marginRight: theme.spacing[4],
+    // The 16px X paints farther inside its 32px hit target than the 14px Settings2 glyph.
+    // This optical inset puts their painted right edges on the same sidebar rail.
+    marginRight: theme.spacing[2] + 1.5,
     width: 32,
     height: 32,
     alignItems: "center",
@@ -998,14 +1088,6 @@ const styles = StyleSheet.create((theme) => ({
     borderRightColor: theme.colors.border,
     backgroundColor: theme.colors.surfaceSidebar,
   },
-  resizeHandle: {
-    position: "absolute",
-    right: -5,
-    top: 0,
-    bottom: 0,
-    width: 10,
-    zIndex: 10,
-  },
   sidebarDragArea: {
     position: "relative",
   },
@@ -1014,14 +1096,33 @@ const styles = StyleSheet.create((theme) => ({
     height: HEADER_INNER_HEIGHT,
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "flex-end",
+    paddingHorizontal: theme.spacing[3],
     borderBottomWidth: theme.borderWidth[1],
     borderBottomColor: "transparent",
+  },
+  devBuildBadge: {
+    maxWidth: "60%",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: 2,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.accent,
+  },
+  devBuildBadgeText: {
+    minWidth: 0,
+    flexShrink: 1,
+    color: theme.colors.accentForeground,
+    fontSize: theme.fontSize.xs,
+    fontWeight: theme.fontWeight.medium,
   },
   sidebarFooter: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "flex-start",
-    paddingHorizontal: theme.spacing[4],
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[2],
     paddingVertical: theme.spacing[3],
     borderTopWidth: 1,
     borderTopColor: theme.colors.border,
@@ -1031,6 +1132,30 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     gap: theme.spacing[2],
     flexShrink: 0,
+  },
+  footerAddProjectButton: {
+    minWidth: 0,
+    minHeight: 32,
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    paddingVertical: theme.spacing[1.5],
+    paddingHorizontal: theme.spacing[2],
+    borderRadius: theme.borderRadius.lg,
+  },
+  footerAddProjectButtonHovered: {
+    backgroundColor: theme.colors.surfaceSidebarHover,
+  },
+  footerAddProjectLabel: {
+    minWidth: 0,
+    flexShrink: 1,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.normal,
+    color: theme.colors.foregroundMuted,
+  },
+  footerAddProjectLabelHovered: {
+    color: theme.colors.foreground,
   },
   footerIconButton: {
     width: 28,

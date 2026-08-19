@@ -1,12 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useState } from "react";
 import { create } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
-import {
-  buildWorkspaceTabPersistenceKey,
-  type WorkspaceTab,
-  type WorkspaceTabTarget,
-} from "@/stores/workspace-tabs-store";
+import { persist } from "zustand/middleware";
+import { z } from "zod";
+import type { WorkspaceTab, WorkspaceTabTarget } from "@/workspace-tabs/model";
 import {
   defaultWorkspaceLayoutIds,
   type WorkspaceLayoutIdSource,
@@ -37,6 +34,7 @@ import {
   retargetTabInLayout,
   splitPaneEmptyInLayout,
   splitPaneInLayout,
+  stripEphemeralTabsFromLayout,
   type SplitGroup,
   type SplitNode,
   type SplitPane,
@@ -45,8 +43,8 @@ import {
   type WorkspaceLayout,
 } from "@/stores/workspace-layout-actions";
 import { normalizeWorkspaceTabTarget } from "@/workspace-tabs/identity";
+import { createValidatedPersistStorage } from "@/storage/validated-persist-storage";
 
-export { buildWorkspaceTabPersistenceKey };
 export {
   collectAllPanes,
   collectAllTabs,
@@ -59,6 +57,7 @@ export {
   normalizeLayout,
   removePaneFromTree,
   removeTabFromTree,
+  stripEphemeralTabsFromLayout,
 };
 export type {
   SplitGroup,
@@ -73,6 +72,7 @@ interface WorkspaceLayoutStore {
   layoutByWorkspace: Record<string, WorkspaceLayout>;
   splitSizesByWorkspace: Record<string, Record<string, number[]>>;
   pinnedAgentIdsByWorkspace: Record<string, Set<string>>;
+  pendingAgentIdsByWorkspace: Record<string, Set<string>>;
   hiddenAgentIdsByWorkspace: Record<string, Set<string>>;
   focusRestorationByWorkspace: Record<string, WorkspaceFocusRestorationState>;
   openTabFocused: (workspaceKey: string, target: WorkspaceTabTarget) => string | null;
@@ -87,6 +87,7 @@ interface WorkspaceLayoutStore {
   retargetTab: (workspaceKey: string, tabId: string, target: WorkspaceTabTarget) => string | null;
   convertDraftToAgent: (workspaceKey: string, tabId: string, agentId: string) => string | null;
   reconcileTabs: (workspaceKey: string, snapshot: WorkspaceTabSnapshot) => void;
+  resolvePendingAgent: (workspaceKey: string, agentId: string) => void;
   reorderTabs: (workspaceKey: string, tabIds: string[]) => void;
   getWorkspaceTabs: (workspaceKey: string) => WorkspaceTab[];
   splitPane: (
@@ -123,6 +124,83 @@ interface WorkspaceFocusRestorationState {
 }
 
 const MAX_TREE_DEPTH = 4;
+
+const WorkspaceDraftTabSetupStorageSchema = z.strictObject({
+  provider: z.string(),
+  cwd: z.string(),
+  modeId: z.string().nullable(),
+  model: z.string().nullable(),
+  thinkingOptionId: z.string().nullable(),
+  featureValues: z.record(z.string(), z.union([z.boolean(), z.string(), z.null()])),
+});
+const WorkspaceTabTargetStorageSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("draft"),
+    draftId: z.string(),
+    setup: WorkspaceDraftTabSetupStorageSchema.optional(),
+  }),
+  z.strictObject({ kind: z.literal("agent"), agentId: z.string() }),
+  z.strictObject({
+    kind: z.literal("provider_subagent"),
+    parentAgentId: z.string(),
+    subagentId: z.string(),
+  }),
+  z.strictObject({ kind: z.literal("terminal"), terminalId: z.string() }),
+  z.strictObject({ kind: z.literal("browser"), browserId: z.string() }),
+  z.strictObject({
+    kind: z.literal("file"),
+    path: z.string(),
+    lineStart: z.number().int().positive().optional(),
+    lineEnd: z.number().int().positive().optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("working_diff"),
+    focusPath: z.string().optional(),
+    focusRequestId: z.number().optional(),
+    // COMPAT(workingDiffTarget): accepted from pre-canonical tab ids; normalization removes them.
+    mode: z.enum(["uncommitted", "base"]).optional(),
+    baseRef: z.string().nullable().optional(),
+    ignoreWhitespace: z.boolean().optional(),
+  }),
+  z.strictObject({ kind: z.literal("setup"), workspaceId: z.string() }),
+  z.strictObject({ kind: z.literal("commit_diff"), sha: z.string() }),
+]);
+const WorkspaceTabStorageSchema = z.strictObject({
+  tabId: z.string(),
+  target: WorkspaceTabTargetStorageSchema,
+  createdAt: z.number(),
+});
+const SplitNodeStorageSchema: z.ZodType<SplitNode> = z.lazy(() =>
+  z.discriminatedUnion("kind", [
+    z.strictObject({
+      kind: z.literal("pane"),
+      pane: z.strictObject({
+        id: z.string(),
+        tabIds: z.array(z.string()),
+        focusedTabId: z.string().nullable(),
+        tabs: z.array(WorkspaceTabStorageSchema).optional(),
+      }),
+    }),
+    z.strictObject({
+      kind: z.literal("group"),
+      group: z.strictObject({
+        id: z.string(),
+        direction: z.enum(["horizontal", "vertical"]),
+        children: z.array(SplitNodeStorageSchema),
+        sizes: z.array(z.number()),
+      }),
+    }),
+  ]),
+);
+const WorkspaceLayoutStorageSchema: z.ZodType<WorkspaceLayout> = z.strictObject({
+  root: SplitNodeStorageSchema,
+  focusedPaneId: z.string().nullable(),
+  parentTabIdByTabId: z.record(z.string(), z.string()).optional(),
+});
+const WorkspaceLayoutPersistedStateSchema = z.strictObject({
+  layoutByWorkspace: z.record(z.string(), WorkspaceLayoutStorageSchema),
+  splitSizesByWorkspace: z.record(z.string(), z.record(z.string(), z.array(z.number()))).optional(),
+});
 
 function trimNonEmpty(value: string | null | undefined): string | null {
   if (typeof value !== "string") {
@@ -227,6 +305,7 @@ export function createWorkspaceLayoutStore(
         layoutByWorkspace: {},
         splitSizesByWorkspace: {},
         pinnedAgentIdsByWorkspace: {},
+        pendingAgentIdsByWorkspace: {},
         hiddenAgentIdsByWorkspace: {},
         focusRestorationByWorkspace: {},
         openTabFocused: (workspaceKey, target) => {
@@ -465,6 +544,7 @@ export function createWorkspaceLayoutStore(
               {
                 layout: currentLayout,
                 pinnedAgentIds: state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null,
+                pendingAgentIds: state.pendingAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null,
                 hiddenAgentIds: state.hiddenAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null,
               },
               snapshot,
@@ -479,6 +559,25 @@ export function createWorkspaceLayoutStore(
                 [normalizedWorkspaceKey]: nextState.layout,
               },
             };
+          });
+        },
+        resolvePendingAgent: (workspaceKey, agentId) => {
+          const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
+          const normalizedAgentId = trimNonEmpty(agentId);
+          if (!normalizedWorkspaceKey || !normalizedAgentId) {
+            return;
+          }
+
+          set((state) => {
+            const pendingAgentIdsByWorkspace = removeAgentIdFromWorkspaceSet(
+              state.pendingAgentIdsByWorkspace,
+              normalizedWorkspaceKey,
+              normalizedAgentId,
+            );
+            if (pendingAgentIdsByWorkspace === state.pendingAgentIdsByWorkspace) {
+              return state;
+            }
+            return { pendingAgentIdsByWorkspace };
           });
         },
         reorderTabs: (workspaceKey, tabIds) => {
@@ -760,7 +859,12 @@ export function createWorkspaceLayoutStore(
           set((state) => {
             const currentPinnedAgentIds =
               state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null;
-            if (currentPinnedAgentIds?.has(normalizedAgentId)) {
+            const currentPendingAgentIds =
+              state.pendingAgentIdsByWorkspace[normalizedWorkspaceKey] ?? null;
+            if (
+              currentPinnedAgentIds?.has(normalizedAgentId) &&
+              currentPendingAgentIds?.has(normalizedAgentId)
+            ) {
               return state;
             }
 
@@ -777,6 +881,11 @@ export function createWorkspaceLayoutStore(
                 ...state.pinnedAgentIdsByWorkspace,
                 [normalizedWorkspaceKey]: nextPinnedAgentIds,
               },
+              pendingAgentIdsByWorkspace: addAgentIdToWorkspaceSet(
+                state.pendingAgentIdsByWorkspace,
+                normalizedWorkspaceKey,
+                normalizedAgentId,
+              ),
             };
           });
         },
@@ -801,6 +910,11 @@ export function createWorkspaceLayoutStore(
               delete nextPinnedAgentIdsByWorkspace[normalizedWorkspaceKey];
               return {
                 pinnedAgentIdsByWorkspace: nextPinnedAgentIdsByWorkspace,
+                pendingAgentIdsByWorkspace: removeAgentIdFromWorkspaceSet(
+                  state.pendingAgentIdsByWorkspace,
+                  normalizedWorkspaceKey,
+                  normalizedAgentId,
+                ),
               };
             }
 
@@ -812,6 +926,11 @@ export function createWorkspaceLayoutStore(
                 ...state.pinnedAgentIdsByWorkspace,
                 [normalizedWorkspaceKey]: nextPinnedAgentIds,
               },
+              pendingAgentIdsByWorkspace: removeAgentIdFromWorkspaceSet(
+                state.pendingAgentIdsByWorkspace,
+                normalizedWorkspaceKey,
+                normalizedAgentId,
+              ),
             };
           });
         },
@@ -870,6 +989,7 @@ export function createWorkspaceLayoutStore(
               normalizedWorkspaceKey in state.layoutByWorkspace ||
               normalizedWorkspaceKey in state.splitSizesByWorkspace ||
               normalizedWorkspaceKey in state.pinnedAgentIdsByWorkspace ||
+              normalizedWorkspaceKey in state.pendingAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.hiddenAgentIdsByWorkspace ||
               normalizedWorkspaceKey in state.focusRestorationByWorkspace;
             if (!hasAny) {
@@ -881,6 +1001,8 @@ export function createWorkspaceLayoutStore(
               state.splitSizesByWorkspace;
             const { [normalizedWorkspaceKey]: _pinned, ...pinnedAgentIdsByWorkspace } =
               state.pinnedAgentIdsByWorkspace;
+            const { [normalizedWorkspaceKey]: _pending, ...pendingAgentIdsByWorkspace } =
+              state.pendingAgentIdsByWorkspace;
             const { [normalizedWorkspaceKey]: _hidden, ...hiddenAgentIdsByWorkspace } =
               state.hiddenAgentIdsByWorkspace;
             const { [normalizedWorkspaceKey]: _restoration, ...focusRestorationByWorkspace } =
@@ -889,6 +1011,7 @@ export function createWorkspaceLayoutStore(
               layoutByWorkspace,
               splitSizesByWorkspace,
               pinnedAgentIdsByWorkspace,
+              pendingAgentIdsByWorkspace,
               hiddenAgentIdsByWorkspace,
               focusRestorationByWorkspace,
             };
@@ -898,15 +1021,30 @@ export function createWorkspaceLayoutStore(
       {
         name: "workspace-layout-state",
         version: 1,
-        storage: createJSONStorage(() => AsyncStorage),
+        storage: createValidatedPersistStorage(AsyncStorage, WorkspaceLayoutPersistedStateSchema),
         partialize: (state) => {
           const layoutByWorkspace: Record<string, WorkspaceLayout> = {};
           for (const key in state.layoutByWorkspace) {
-            layoutByWorkspace[key] = normalizeLayout(state.layoutByWorkspace[key]);
+            // Strip ephemeral (commit diff) tabs before persisting so they are
+            // dropped on reload rather than restored pointing at a rebased SHA.
+            layoutByWorkspace[key] = stripEphemeralTabsFromLayout(
+              normalizeLayout(state.layoutByWorkspace[key]),
+            );
           }
           return {
             layoutByWorkspace,
             splitSizesByWorkspace: state.splitSizesByWorkspace,
+          };
+        },
+        merge: (persistedState, currentState) => {
+          const result = WorkspaceLayoutPersistedStateSchema.safeParse(persistedState);
+          if (!result.success) {
+            return currentState;
+          }
+          return {
+            ...currentState,
+            layoutByWorkspace: result.data.layoutByWorkspace,
+            splitSizesByWorkspace: result.data.splitSizesByWorkspace ?? {},
           };
         },
       },

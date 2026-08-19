@@ -54,13 +54,17 @@ interface Deferred<T> {
 interface FakeAgentSessionOptions {
   providerName: string;
   config: AgentSessionConfig;
+  supportsMcpServers?: boolean;
   sessionId?: string;
   memoryMarker?: string | null;
   closeSession?: () => Promise<void>;
+  onStartTurn?: (prompt: AgentPromptInput) => void;
 }
 
 export interface TestAgentClientOptions {
   closeSession?: () => Promise<void>;
+  onStartTurn?: (prompt: AgentPromptInput) => void;
+  supportsMcpServers?: boolean;
 }
 
 function createDeferred<T>(): Deferred<T> {
@@ -75,7 +79,10 @@ function createDeferred<T>(): Deferred<T> {
 
 function isAskMode(config: AgentSessionConfig): boolean {
   const mode = (config.modeId ?? "").toLowerCase();
-  const policy = (config.approvalPolicy ?? "").toLowerCase();
+  const policy =
+    typeof config.providerOptions?.approval_policy === "string"
+      ? config.providerOptions.approval_policy.toLowerCase()
+      : "";
 
   // Default behavior for tests: ask unless explicitly bypassed.
   if (!mode && !policy) {
@@ -315,7 +322,7 @@ function buildLargeTimelineItem(input: {
 }
 
 class FakeAgentSession implements AgentSession {
-  readonly capabilities = TEST_CAPABILITIES;
+  readonly capabilities: AgentCapabilityFlags;
   readonly id: string;
   private readonly providerName: string;
   private readonly config: AgentSessionConfig;
@@ -329,13 +336,19 @@ class FakeAgentSession implements AgentSession {
   private activeForegroundTurnId: string | null = null;
 
   private readonly closeSession: (() => Promise<void>) | undefined;
+  private readonly onStartTurn: ((prompt: AgentPromptInput) => void) | undefined;
 
   constructor(options: FakeAgentSessionOptions) {
+    this.capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsMcpServers: options.supportsMcpServers === true,
+    };
     this.providerName = options.providerName;
     this.config = options.config;
     this.id = options.sessionId ?? randomUUID();
     this.memoryMarker = options.memoryMarker ?? null;
     this.closeSession = options.closeSession;
+    this.onStartTurn = options.onStartTurn;
     this.historyPath = path.join(
       tmpdir(),
       "paseo-fake-provider-history",
@@ -426,6 +439,7 @@ class FakeAgentSession implements AgentSession {
 
     const turnId = `fake-turn-${this.nextTurnOrdinal++}`;
     this.activeForegroundTurnId = turnId;
+    this.onStartTurn?.(prompt);
 
     void this.emitTurnEvents(prompt);
 
@@ -846,10 +860,14 @@ class FakeAgentSession implements AgentSession {
   }
 
   describePersistence(): AgentPersistenceHandle | null {
+    const metadata = {
+      ...(this.memoryMarker ? { marker: this.memoryMarker } : {}),
+      ...(this.config.mcpServers ? { mcpServers: this.config.mcpServers } : {}),
+    };
     return buildPersistence(
       this.providerName,
       this.id,
-      this.memoryMarker ? { marker: this.memoryMarker } : undefined,
+      Object.keys(metadata).length > 0 ? metadata : undefined,
     );
   }
 
@@ -1136,7 +1154,10 @@ class FakeAgentSession implements AgentSession {
 
   private needsPermissionForTool(toolName: string, toolInput: Record<string, unknown>): boolean {
     const mode = (this.config.modeId ?? "").toLowerCase();
-    const policy = (this.config.approvalPolicy ?? "").toLowerCase();
+    const policy =
+      typeof this.config.providerOptions?.approval_policy === "string"
+        ? this.config.providerOptions.approval_policy.toLowerCase()
+        : "";
 
     if (policy === "never" || mode.includes("bypass") || mode.includes("full")) {
       return false;
@@ -1166,11 +1187,16 @@ class FakeAgentSession implements AgentSession {
 }
 
 class FakeAgentClient implements AgentClient {
-  readonly capabilities = TEST_CAPABILITIES;
+  readonly capabilities: AgentCapabilityFlags;
   constructor(
     public readonly provider: string,
     private readonly options: TestAgentClientOptions,
-  ) {}
+  ) {
+    this.capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsMcpServers: options.supportsMcpServers === true,
+    };
+  }
 
   async createSession(
     config: AgentSessionConfig,
@@ -1179,7 +1205,9 @@ class FakeAgentClient implements AgentClient {
     return new FakeAgentSession({
       providerName: this.provider,
       config: { ...config },
+      supportsMcpServers: this.options.supportsMcpServers,
       closeSession: this.options.closeSession,
+      onStartTurn: this.options.onStartTurn,
     });
   }
 
@@ -1200,9 +1228,11 @@ class FakeAgentClient implements AgentClient {
     return new FakeAgentSession({
       providerName: this.provider,
       config: cfg,
+      supportsMcpServers: this.options.supportsMcpServers,
       sessionId: handle.sessionId,
       memoryMarker: typeof marker === "string" ? marker : null,
       closeSession: this.options.closeSession,
+      onStartTurn: this.options.onStartTurn,
     });
   }
 

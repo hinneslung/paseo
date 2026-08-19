@@ -59,6 +59,7 @@ export function useDictation(options: UseDictationOptions): UseDictationResult {
   useEffect(() => {
     isRecordingRef.current = isRecording;
   }, [isRecording]);
+  const isRecordingActive = useCallback(() => isRecordingRef.current, []);
 
   const isProcessingRef = useRef(isProcessing);
   useEffect(() => {
@@ -448,11 +449,13 @@ export function useDictation(options: UseDictationOptions): UseDictationResult {
       attemptGuard.cancel();
       stopDurationTracking();
       void audioStop.current().catch(() => undefined);
+      senderRef.current?.dispose();
     };
   }, [stopDurationTracking]);
 
   return {
     isRecording,
+    isRecordingActive,
     isProcessing,
     partialTranscript,
     volume: audio.volume,
