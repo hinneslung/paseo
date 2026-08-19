@@ -15,6 +15,7 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import type { Theme } from "@/styles/theme";
 import type { MarkdownFenceRendererProps } from "../types";
 import type { MermaidRenderRequest } from "./render-model";
+import { withMermaidRuntimeCspNonce } from "./runtime/csp-nonce";
 import { mermaidRuntimeHtml } from "./runtime/html.gen";
 import { parseMermaidRuntimeMessage, type MermaidRuntimeRenderMessage } from "./runtime/messages";
 import { MermaidRuntimeRequestDriver } from "./runtime/request-driver";
@@ -47,6 +48,12 @@ function MermaidIframeRuntime({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const driverRef = useRef<MermaidRuntimeRequestDriver | null>(null);
   driverRef.current ??= new MermaidRuntimeRequestDriver();
+  const runtimeHtml = useMemo(() => {
+    // srcdoc inherits the VS Code webview's nonce-only CSP. Reuse its nonce so
+    // the sandboxed Mermaid runtime can start without weakening that policy.
+    const nonce = document.querySelector<HTMLScriptElement>("script[nonce]")?.nonce;
+    return withMermaidRuntimeCspNonce(mermaidRuntimeHtml, nonce);
+  }, []);
   const iframeStyle = useMemo<React.CSSProperties>(
     () => ({
       display: "block",
@@ -109,7 +116,7 @@ function MermaidIframeRuntime({
       title=""
       aria-hidden
       sandbox="allow-scripts"
-      srcDoc={mermaidRuntimeHtml}
+      srcDoc={runtimeHtml}
       tabIndex={-1}
       style={iframeStyle}
     />
