@@ -2,10 +2,10 @@ import { useCallback, useRef } from "react";
 import { Alert } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import { useTranslation } from "react-i18next";
-import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
+import { getDesktopHost } from "@/desktop/host";
 import {
   normalizePickedImageAssets,
-  openImagePathsWithDesktopDialog,
+  pickImagesWithDesktopDialog,
   type PickedImageAttachmentInput,
 } from "@/hooks/image-attachment-picker";
 import { isWeb } from "@/constants/platform";
@@ -50,16 +50,13 @@ export function useImageAttachmentPicker(): UseImageAttachmentPickerResult {
     isPickingRef.current = true;
 
     try {
-      if (isWeb && isElectronRuntime()) {
-        const selectedPaths = await openImagePathsWithDesktopDialog(getDesktopHost()?.dialog);
-        if (selectedPaths.length === 0) {
+      const desktopDialog = isWeb ? getDesktopHost()?.dialog : null;
+      if (desktopDialog?.open) {
+        const selectedImages = await pickImagesWithDesktopDialog(desktopDialog);
+        if (selectedImages.length === 0) {
           return null;
         }
-        return selectedPaths.map((path) => ({
-          source: { kind: "file_uri" as const, uri: path },
-          mimeType: null,
-          fileName: null,
-        }));
+        return selectedImages;
       }
 
       const hasPermission = await ensurePermission();

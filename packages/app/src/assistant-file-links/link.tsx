@@ -1,21 +1,15 @@
-import { useMemo, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
-import {
-  Platform,
-  Pressable,
-  Text,
-  View,
-  type StyleProp,
-  type TextStyle,
-  type ViewStyle,
-} from "react-native";
+import { useMemo, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { Platform, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { isNative, isWeb } from "@/constants/platform";
 import { MarkdownTextSpan } from "@/components/markdown-text";
+import { MarkdownLinkText } from "@/components/markdown/link-text";
 import { AssistantLinkPressProvider, type AssistantLinkPress } from "./link-press-context";
 import { Shortcut } from "@/components/ui/shortcut";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
+import { markdownCopyDataSet } from "@/assistant-selection-copy/markup";
 import { useAssistantFileLinkResolverContext } from "./provider";
 import type { AssistantFileLinkSource } from "./resolver";
 import { useFileLink } from "./use-file-link";
@@ -27,13 +21,17 @@ interface AssistantMarkdownLinkProps {
   children: ReactNode;
 }
 
+const MARKDOWN_CODE_LINK_DATASET = {
+  ...CODE_SURFACE_DATASET,
+  ...markdownCopyDataSet.code,
+} as const;
+
 export function AssistantMarkdownLink({
   source,
   style,
   monoSurface,
   children,
 }: AssistantMarkdownLinkProps) {
-  const [hovered, setHovered] = useState(false);
   const { target, onHoverIn, onPress, onAuxPress } = useFileLink(source);
   const { configRef } = useAssistantFileLinkResolverContext();
   const workspaceRoot = configRef.current.workspaceRoot;
@@ -49,19 +47,11 @@ export function AssistantMarkdownLink({
     event.stopPropagation();
     onAuxPress();
   });
-  const handleHoverIn = useStableEvent(() => {
-    setHovered(true);
-    onHoverIn();
-  });
-  const handleHoverOut = useStableEvent(() => setHovered(false));
-  const hoveredTextStyle = useMemo<StyleProp<TextStyle>>(
-    () => [style, hovered && { textDecorationLine: "underline" as const }],
-    [style, hovered],
-  );
   const linkPress = useMemo<AssistantLinkPress>(
     () => ({ onPress, accessibilityRole: "link" }),
     [onPress],
   );
+  const unwrapForMarkdownCopy = source.sourceType === "inline-code" || source.markup === "linkify";
 
   if (isNative) {
     // Must be a MarkdownTextSpan, not a plain <Text>: on iOS the link renders
@@ -100,21 +90,21 @@ export function AssistantMarkdownLink({
 
   const anchor = (
     <a
+      {...(unwrapForMarkdownCopy ? { "data-paseo-markdown-unwrap": "true" } : {})}
       href={source.href}
+      title={source.title}
       onClickCapture={handleAnchorClickCapture}
       onAuxClickCapture={preventAnchorNavigation}
       style={LINK_ANCHOR_STYLE}
     >
-      <Pressable
-        accessibilityRole="link"
+      <MarkdownLinkText
+        dataSet={monoSurface ? MARKDOWN_CODE_LINK_DATASET : undefined}
+        style={style}
         onPress={onPress}
-        onHoverIn={handleHoverIn}
-        onHoverOut={handleHoverOut}
+        onHoverIn={onHoverIn}
       >
-        <Text dataSet={monoSurface ? CODE_SURFACE_DATASET : undefined} style={hoveredTextStyle}>
-          {children}
-        </Text>
-      </Pressable>
+        {children}
+      </MarkdownLinkText>
     </a>
   );
 

@@ -3,6 +3,7 @@ export type KeyboardFocusScope =
   | "message-input"
   | "command-center"
   | "editable"
+  | "browser"
   | "other";
 
 export type MessageInputKeyboardActionKind =
@@ -40,11 +41,14 @@ export type KeyboardActionId =
   | "sidebar.toggle.both"
   | "settings.toggle"
   | "command-center.toggle"
+  | "command-center.files"
   | "shortcuts.dialog.toggle"
   | "workspace.terminal.new"
   | "workspace.new"
+  | "workspace.project.pick"
   | "worktree.new"
-  | "worktree.archive"
+  | "workspace.archive"
+  | "workspace.pin"
   | "view.toggle.focus"
   | "theme.cycle"
   | "message-input.action";

@@ -1,6 +1,8 @@
 import type { ChildProcess } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import net from "node:net";
-import os from "node:os";
+import path from "node:path";
 import type { Logger } from "pino";
 
 import { findExecutable } from "../../../../executable-resolution/executable-resolution.js";
@@ -12,20 +14,21 @@ import {
   resolveProviderCommandPrefix,
   type ProviderRuntimeSettings,
 } from "../../provider-launch-config.js";
+import { resolveOpenCodeHomeDir } from "./paths.js";
 
 const OPENCODE_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5_000;
 const OPENCODE_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS = 1_000;
 
 export interface OpenCodeServerAcquisition {
   server: { port: number; url: string };
-  release: () => void;
+  release: () => Promise<void>;
 }
 
 export interface OpenCodeServerManagerLike {
-  ensureRunning(): Promise<{ port: number; url: string }>;
-  acquireCurrent(): Promise<OpenCodeServerAcquisition>;
-  acquireNew(): Promise<OpenCodeServerAcquisition>;
+  acquireCurrent(signal?: AbortSignal): Promise<OpenCodeServerAcquisition>;
+  acquireNew(signal?: AbortSignal): Promise<OpenCodeServerAcquisition>;
   acquireDedicated(env: Record<string, string>): Promise<OpenCodeServerAcquisition>;
+  acquireExisting(url: string): OpenCodeServerAcquisition | null;
   shutdown(): Promise<void>;
 }
 
@@ -50,11 +53,13 @@ export type OpenCodeServerProcessSpawner = (
 
 export interface OpenCodeServerManagerOptions {
   logger: Logger;
+  baseEnv?: SpawnProcessOptions["baseEnv"];
   runtimeSettings?: ProviderRuntimeSettings;
   managedProcesses?: ManagedProcessRegistry;
   terminateProcess?: ProcessTerminator;
   portAllocator?: OpenCodePortAllocator;
   resolveCommandPrefix?: OpenCodeCommandPrefixResolver;
+  resolveHomeDir?: () => string;
   spawnServerProcess?: OpenCodeServerProcessSpawner;
 }
 
@@ -66,16 +71,19 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private startPromise: Promise<OpenCodeServerGeneration> | null = null;
   private newServerPromise: Promise<OpenCodeServerGeneration> | null = null;
   private readonly logger: Logger;
+  private readonly baseEnv?: SpawnProcessOptions["baseEnv"];
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly runtimeSettingsKey: string;
   private readonly managedProcesses?: ManagedProcessRegistry;
   private readonly terminateProcess: ProcessTerminator;
   private readonly portAllocator: OpenCodePortAllocator;
   private readonly resolveCommandPrefix: OpenCodeCommandPrefixResolver;
+  private readonly resolveHomeDir: () => string;
   private readonly spawnServerProcess: OpenCodeServerProcessSpawner;
 
   constructor(options: OpenCodeServerManagerOptions) {
     this.logger = options.logger;
+    this.baseEnv = options.baseEnv;
     this.runtimeSettings = options.runtimeSettings;
     this.runtimeSettingsKey = JSON.stringify(this.runtimeSettings ?? {});
     this.managedProcesses = options.managedProcesses;
@@ -84,6 +92,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     this.resolveCommandPrefix =
       options.resolveCommandPrefix ??
       (() => resolveProviderCommandPrefix(this.runtimeSettings?.command, resolveOpenCodeBinary));
+    this.resolveHomeDir = options.resolveHomeDir ?? resolveOpenCodeHomeDir;
     this.spawnServerProcess = options.spawnServerProcess ?? spawnProcess;
   }
 
@@ -128,19 +137,17 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     process.on("SIGINT", cleanup);
   }
 
-  async ensureRunning(): Promise<{ port: number; url: string }> {
-    const acquisition = await this.acquireCurrent();
-    acquisition.release();
-    return acquisition.server;
-  }
-
-  async acquireCurrent(): Promise<OpenCodeServerAcquisition> {
-    const server = await this.getCurrentServer();
+  async acquireCurrent(signal?: AbortSignal): Promise<OpenCodeServerAcquisition> {
+    signal?.throwIfAborted();
+    const server = await waitForServerAcquisition(this.getCurrentServer(), signal);
+    signal?.throwIfAborted();
     return this.acquireServer(server);
   }
 
-  async acquireNew(): Promise<OpenCodeServerAcquisition> {
-    const server = await this.getNewServer();
+  async acquireNew(signal?: AbortSignal): Promise<OpenCodeServerAcquisition> {
+    signal?.throwIfAborted();
+    const server = await waitForServerAcquisition(this.getNewServer(), signal);
+    signal?.throwIfAborted();
     return this.acquireServer(server);
   }
 
@@ -153,25 +160,63 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       await server.ready;
       return acquisition;
     } catch (error) {
-      acquisition.release();
+      await acquisition.release();
       throw error;
     }
   }
 
+  acquireExisting(url: string): OpenCodeServerAcquisition | null {
+    const server = this.findLiveServerByUrl(url);
+    return server ? this.acquireServer(server) : null;
+  }
+
+  private findLiveServerByUrl(url: string): OpenCodeServerGeneration | null {
+    const servers = [
+      ...(this.currentServer ? [this.currentServer] : []),
+      ...Array.from(this.retiredServers),
+    ];
+    return servers.find((server) => server.url === url && this.isServerLive(server)) ?? null;
+  }
+
+  private isServerLive(server: OpenCodeServerGeneration): boolean {
+    return (
+      !server.process.killed &&
+      server.process.exitCode === null &&
+      server.process.signalCode === null
+    );
+  }
+
   private acquireServer(server: OpenCodeServerGeneration): OpenCodeServerAcquisition {
     server.refCount += 1;
-    let released = false;
+    let releasePromise: Promise<void> | null = null;
     return {
       server: { port: server.port, url: server.url },
-      release: () => {
-        if (released) {
-          return;
+      release: async () => {
+        if (releasePromise) {
+          return releasePromise;
         }
-        released = true;
-        server.refCount -= 1;
-        this.cleanupRetiredServers();
+        releasePromise = this.releaseServer(server);
+        return releasePromise;
       },
     };
+  }
+
+  private async releaseServer(server: OpenCodeServerGeneration): Promise<void> {
+    server.refCount = Math.max(0, server.refCount - 1);
+    if (server.refCount > 0) {
+      return;
+    }
+
+    if (this.currentServer === server) {
+      this.currentServer = null;
+      server.retired = true;
+    }
+    if (!server.retired) {
+      return;
+    }
+
+    this.retiredServers.delete(server);
+    await this.killServer(server);
   }
 
   private async getNewServer(): Promise<OpenCodeServerGeneration> {
@@ -233,14 +278,14 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       existing.retired = true;
       this.retiredServers.add(existing);
       this.currentServer = null;
-      this.cleanupRetiredServers();
+      await this.cleanupRetiredServers();
     }
     if (this.startPromise) {
       const pending = await this.startPromise;
       pending.retired = true;
       this.retiredServers.add(pending);
       this.currentServer = null;
-      this.cleanupRetiredServers();
+      await this.cleanupRetiredServers();
     }
   }
 
@@ -249,13 +294,18 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     const url = `http://127.0.0.1:${port}`;
     const launchPrefix = await this.resolveCommandPrefix();
     const serverArgs = [...launchPrefix.args, "serve", "--port", String(port)];
-    const serverCwd = os.homedir();
+    // Use a neutral OpenCode home as the server cwd. Launching from the user's
+    // home directory causes OpenCode to treat it as the default workspace and
+    // index the entire home tree.
+    const serverCwd = this.resolveHomeDir();
+    mkdirSync(serverCwd, { recursive: true });
 
     const serverProcess = this.spawnServerProcess(launchPrefix.command, serverArgs, {
       cwd: serverCwd,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
       ...createProviderEnvSpec({
+        baseEnv: this.baseEnv,
         runtimeSettings: this.runtimeSettings,
         overlays: [launchEnv],
       }),
@@ -385,13 +435,15 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     this.retiredServers.clear();
   }
 
-  private cleanupRetiredServers(): void {
+  private async cleanupRetiredServers(): Promise<void> {
+    const cleanup: Promise<void>[] = [];
     for (const server of Array.from(this.retiredServers)) {
       if (server.refCount === 0) {
         this.retiredServers.delete(server);
-        void this.killServer(server);
+        cleanup.push(this.killServer(server));
       }
     }
+    await Promise.all(cleanup);
   }
 
   private async killServer(server: OpenCodeServerGeneration): Promise<void> {
@@ -485,14 +537,69 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   }
 }
 
+async function waitForServerAcquisition<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return await operation;
+  let handleAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    handleAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", handleAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    if (handleAbort) signal.removeEventListener("abort", handleAbort);
+  }
+}
+
 async function resolveOpenCodeBinary(): Promise<string> {
   const found = await findExecutable("opencode");
-  if (found) {
-    return found;
+  if (!found) {
+    throw new Error(
+      "OpenCode binary not found. Install OpenCode (https://github.com/opencode-ai/opencode) and ensure it is available in your shell PATH.",
+    );
   }
-  throw new Error(
-    "OpenCode binary not found. Install OpenCode (https://github.com/opencode-ai/opencode) and ensure it is available in your shell PATH.",
-  );
+
+  if (process.platform === "win32" && path.extname(found).toLowerCase() === ".cmd") {
+    // Global npm: <prefix>/opencode.cmd → <prefix>/node_modules/opencode-ai/bin/opencode.exe
+    const globalCandidate = path.join(
+      path.dirname(found),
+      "node_modules",
+      "opencode-ai",
+      "bin",
+      "opencode.exe",
+    );
+    if (await pathExists(globalCandidate)) return globalCandidate;
+
+    // Local/pnpm: <project>/node_modules/.bin/opencode.cmd → <project>/node_modules/opencode-ai/bin/opencode.exe
+    const localCandidate = path.join(
+      path.dirname(found),
+      "..",
+      "opencode-ai",
+      "bin",
+      "opencode.exe",
+    );
+    if (await pathExists(localCandidate)) return localCandidate;
+
+    console.warn(
+      "[opencode-server] Found opencode.cmd but could not resolve the real opencode.exe. " +
+        "The process may not be properly terminated on exit. Path: %s",
+      found,
+    );
+  }
+
+  return found;
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function findAvailablePort(): Promise<number> {

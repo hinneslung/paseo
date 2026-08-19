@@ -1,5 +1,17 @@
 import { Platform } from "react-native";
 import { getElectronHost } from "@/desktop/electron/host";
+import type { BrowserKeyboardPolicy } from "@/desktop/browser/shortcuts";
+import { getVscodeHost, isVscodeRuntime } from "@/desktop/vscode/host";
+import type { SessionInboundMessage, SessionOutboundMessage } from "@getpaseo/protocol/messages";
+
+type BrowserAutomationExecuteRequest = Extract<
+  SessionOutboundMessage,
+  { type: "browser.automation.execute.request" }
+>;
+type BrowserAutomationExecuteResponse = Extract<
+  SessionInboundMessage,
+  { type: "browser.automation.execute.response" }
+>;
 
 export type DesktopNotificationPermission = "granted" | "denied" | "default";
 
@@ -14,6 +26,7 @@ export interface DesktopDialogOpenOptions {
   title?: string;
   defaultPath?: string;
   directory?: boolean;
+  createDirectory?: boolean;
   multiple?: boolean;
   filters?: Array<{
     name: string;
@@ -55,13 +68,23 @@ export interface DesktopEditorTargetDescriptor {
   id: string;
   label: string;
   kind: "editor" | "file-manager";
+  icon: { kind: "image"; dataUrl: string } | { kind: "symbol"; name: "folder" | "terminal" };
 }
 
 export interface DesktopEditorOpenTargetInput {
   editorId: string;
-  path: string;
-  cwd?: string;
-  mode?: "open" | "reveal";
+  workspacePath: string;
+  filePath?: string;
+  line?: number;
+  column?: number;
+  lineEnd?: number;
+}
+
+export interface VscodeRuntimeConfig {
+  endpoint: string | null;
+  hasPassword: boolean;
+  bridgeProtocol: number;
+  workspaceFolders: string[];
 }
 
 export interface DesktopEditorBridge {
@@ -75,17 +98,20 @@ export interface DesktopWebUtilsBridge {
 
 export interface DesktopMenuBridge {
   showContextMenu?: (input?: { kind?: "terminal"; hasSelection?: boolean }) => Promise<void>;
+  setCapturingShortcut?: (capturing: boolean) => Promise<void>;
 }
 
 export interface DesktopWindowControlsOverlayUpdate {
   height?: number;
   backgroundColor?: string;
   foregroundColor?: string;
+  trafficLightOffsetY?: number;
 }
 
 export interface DesktopWindowBridge {
   label?: string;
   toggleMaximize?: () => Promise<void>;
+  setFullscreen?: (fullscreen: boolean) => Promise<void>;
   isFullscreen?: () => Promise<boolean>;
   updateWindowControls?: (update: DesktopWindowControlsOverlayUpdate) => Promise<void>;
   onResized?: <TEvent = unknown>(
@@ -106,20 +132,47 @@ export interface DesktopEventsBridge {
   on?: (event: string, handler: (payload: unknown) => void) => Promise<() => void> | (() => void);
 }
 
-export interface DesktopBrowserShortcutEvent {
-  browserId?: string;
-  action: "focus-url";
+export interface DesktopAgentNavigationBridge {
+  ready?: () => Promise<{ serverId: string; agentId: string } | null>;
 }
+
+export type DesktopBrowserShortcutEvent =
+  | { browserId?: string; action: "focus-url" }
+  | { browserId: string; action: "new-tab" };
 
 export interface DesktopBrowserNewTabRequestEvent {
   sourceBrowserId: string;
   url: string;
 }
 
+export interface DesktopAttachedBrowserRegistration {
+  browserId: string;
+  workspaceId: string;
+  webContentsId: number;
+}
+
 export interface DesktopBrowserBridge {
-  setWorkspaceActiveBrowser?: (browserId: string | null) => Promise<void>;
+  setShortcutPolicy?: (input: BrowserKeyboardPolicy) => Promise<void>;
+  readonly profilePartition?: string;
+  registerAttachedBrowser?: (input: DesktopAttachedBrowserRegistration) => Promise<void>;
+  unregisterWorkspaceBrowser?: (browserId: string) => Promise<void>;
+  setWorkspaceActiveBrowser?: (input: {
+    workspaceId: string;
+    browserId: string | null;
+  }) => Promise<void>;
+  focus?: (browserId: string) => Promise<boolean>;
   openDevTools?: (browserId: string) => Promise<unknown>;
-  clearPartition?: (browserId: string) => Promise<void>;
+  clearProfile?: (legacyBrowserIds: string[]) => Promise<void>;
+  executeAutomationCommand?: (
+    request: BrowserAutomationExecuteRequest,
+  ) => Promise<BrowserAutomationExecuteResponse["payload"]>;
+  /** Capture a PNG screenshot of the guest viewport cropped to `rect`. */
+  captureElement?: (
+    browserId: string,
+    rect: { x: number; y: number; width: number; height: number },
+  ) => Promise<string | null>;
+  /** Copy element text and/or an image to the system clipboard from main. */
+  copyElement?: (payload: { text?: string; imageDataUrl?: string }) => Promise<boolean>;
 }
 
 export interface DesktopInvokeBridge {
@@ -130,6 +183,7 @@ export interface DesktopHostBridge {
   platform?: string;
   invoke?: DesktopInvokeBridge["invoke"];
   getPendingOpenProject?: () => Promise<string | null>;
+  agentNavigation?: DesktopAgentNavigationBridge;
   events?: DesktopEventsBridge;
   window?: DesktopWindowModuleBridge;
   dialog?: DesktopDialogBridge;
@@ -144,6 +198,7 @@ export interface DesktopHostBridge {
 declare global {
   interface Window {
     paseoDesktop?: DesktopHostBridge;
+    paseoVscode?: VscodeRuntimeConfig;
   }
 }
 
@@ -151,11 +206,11 @@ export function getDesktopHost(): DesktopHostBridge | null {
   if (Platform.OS !== "web") {
     return null;
   }
-  return getElectronHost();
+  return getVscodeHost() ?? getElectronHost();
 }
 
 export function isElectronRuntime(): boolean {
-  return getDesktopHost() !== null;
+  return getElectronHost() !== null && !isVscodeRuntime();
 }
 
 export function isElectronRuntimeMac(): boolean {

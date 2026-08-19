@@ -1,6 +1,6 @@
 import type {
   AgentAttachment,
-  GitHubSearchItem,
+  ForgeSearchItem,
   UploadedFileAttachment,
 } from "@getpaseo/protocol/messages";
 
@@ -42,10 +42,21 @@ export interface BrowserElementAttachment {
   } | null;
   parentChain: string[];
   children: string[];
+  /** Free-text review note the user wrote about this element, if any. */
+  comment?: string;
+  /**
+   * Cropped screenshot of the selected element, sent to the agent as an image
+   * alongside the textual element context. Persisted via the attachment store;
+   * referenced by id so the draft-store GC keeps it alive.
+   */
+  screenshot?: AttachmentMetadata;
   formatted: string;
 }
 
 export type PullRequestContextAttachmentKind =
+  | "forge.change_request_comment"
+  | "forge.change_request_review"
+  | "forge.change_request_check"
   | "github.pull_request_comment"
   | "github.pull_request_review"
   | "github.pull_request_check";
@@ -59,15 +70,51 @@ interface PullRequestContextAttachmentFields {
 }
 
 export type PullRequestContextAttachment =
+  | ({ kind: "forge.change_request_comment" } & PullRequestContextAttachmentFields)
+  | ({ kind: "forge.change_request_review" } & PullRequestContextAttachmentFields)
+  | ({ kind: "forge.change_request_check" } & PullRequestContextAttachmentFields)
   | ({ kind: "github.pull_request_comment" } & PullRequestContextAttachmentFields)
   | ({ kind: "github.pull_request_review" } & PullRequestContextAttachmentFields)
   | ({ kind: "github.pull_request_check" } & PullRequestContextAttachmentFields);
 
+export interface ChatHistoryContextAttachment {
+  kind: "chat_history";
+  id: string;
+  attachment: Extract<AgentAttachment, { type: "text" }>;
+  source: {
+    serverId: string;
+    agentId: string;
+    boundaryMessageId?: string | null;
+    boundaryCursor?: { epoch: string; seq: number } | null;
+    itemCount?: number;
+  };
+}
+
+export const NEW_WORKSPACE_PICKER_ATTACHMENT_OWNER = "new-workspace-picker";
+
+export type WorkspaceFileSelection =
+  | { kind: "whole_file" }
+  | { kind: "line_range"; startLine: number; endLine: number };
+
+export interface WorkspaceFileComposerAttachment {
+  kind: "workspace_file";
+  path: string;
+  selection: WorkspaceFileSelection;
+}
+
 export type UserComposerAttachment =
   | { kind: "image"; metadata: AttachmentMetadata }
   | { kind: "file"; attachment: UploadedFileAttachment }
-  | { kind: "github_issue"; item: GitHubSearchItem }
-  | { kind: "github_pr"; item: GitHubSearchItem };
+  | WorkspaceFileComposerAttachment
+  | { kind: "forge_issue"; item: ForgeSearchItem }
+  | { kind: "forge_change_request"; item: ForgeSearchItem }
+  // COMPAT(githubAttachmentKinds): added in v0.1.106, remove after 2026-12-28 once daemon floor >= v0.1.106
+  | { kind: "github_issue"; item: ForgeSearchItem }
+  | {
+      kind: "github_pr";
+      item: ForgeSearchItem;
+      owner?: typeof NEW_WORKSPACE_PICKER_ATTACHMENT_OWNER;
+    };
 
 export type WorkspaceComposerAttachment =
   | {
@@ -75,6 +122,7 @@ export type WorkspaceComposerAttachment =
       attachment: BrowserElementAttachment;
     }
   | PullRequestContextAttachment
+  | ChatHistoryContextAttachment
   | {
       kind: "review";
       attachment: Extract<AgentAttachment, { type: "review" }>;

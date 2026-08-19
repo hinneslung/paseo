@@ -21,6 +21,44 @@ describe("daemon relay config", () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
+  test("preserves implicit relay-on for a legacy config without enabled", async () => {
+    const home = await createPaseoHome({ version: 1, daemon: { relay: {} } });
+    expect(loadConfig(home, { env: {} }).relayEnabled).toBe(true);
+  });
+
+  test("keeps explicit persisted relay state and marks it mutable", async () => {
+    const home = await createPaseoHome({
+      version: 1,
+      daemon: { relay: { enabled: false } },
+    });
+    const config = loadConfig(home, { env: {} });
+    expect(config.relayEnabled).toBe(false);
+    expect(config.relayEnabledMutable).toBe(true);
+  });
+
+  test("marks environment relay overrides immutable", async () => {
+    const home = await createPaseoHome({
+      version: 1,
+      daemon: { relay: { enabled: false } },
+    });
+    const config = loadConfig(home, { env: { PASEO_RELAY_ENABLED: "true" } });
+    expect(config.relayEnabled).toBe(true);
+    expect(config.relayEnabledMutable).toBe(false);
+  });
+
+  test.each(["", "treu"])(
+    "ignores invalid relay override %j without locking config",
+    async (value) => {
+      const home = await createPaseoHome({
+        version: 1,
+        daemon: { relay: { enabled: false } },
+      });
+      const config = loadConfig(home, { env: { PASEO_RELAY_ENABLED: value } });
+      expect(config.relayEnabled).toBe(false);
+      expect(config.relayEnabledMutable).toBe(true);
+    },
+  );
+
   test("loads relay TLS from env, persisted config, and hosted relay fallback", async () => {
     const persistedHome = await createPaseoHome({
       version: 1,
@@ -147,6 +185,56 @@ describe("daemon service proxy config", () => {
         env: { PASEO_SERVICE_PROXY_PUBLIC_BASE_URL: "not-a-url" },
       }),
     ).toThrow("Invalid PASEO_SERVICE_PROXY_PUBLIC_BASE_URL: not-a-url");
+  });
+});
+
+describe("daemon trusted proxy config", () => {
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  });
+
+  test("trusts loopback proxies by default", async () => {
+    const home = await createPaseoHome({ version: 1 });
+
+    expect(loadConfig(home, { env: {} }).trustedProxies).toEqual(["loopback"]);
+  });
+
+  test("loads trusted proxies from persisted config", async () => {
+    const home = await createPaseoHome({
+      version: 1,
+      daemon: {
+        trustedProxies: ["loopback", "10.0.0.0/8"],
+      },
+    });
+
+    expect(loadConfig(home, { env: {} }).trustedProxies).toEqual(["loopback", "10.0.0.0/8"]);
+  });
+
+  test("PASEO_TRUSTED_PROXIES overrides persisted config", async () => {
+    const home = await createPaseoHome({
+      version: 1,
+      daemon: {
+        trustedProxies: ["loopback"],
+      },
+    });
+
+    const config = loadConfig(home, {
+      env: { PASEO_TRUSTED_PROXIES: "loopback,172.16.0.0/12" },
+    });
+
+    expect(config.trustedProxies).toEqual(["loopback", "172.16.0.0/12"]);
+  });
+
+  test("PASEO_TRUSTED_PROXIES supports explicit trust-all and trust-none modes", async () => {
+    const trustAllHome = await createPaseoHome({ version: 1 });
+    expect(
+      loadConfig(trustAllHome, { env: { PASEO_TRUSTED_PROXIES: "true" } }).trustedProxies,
+    ).toBe(true);
+
+    const trustNoneHome = await createPaseoHome({ version: 1 });
+    expect(
+      loadConfig(trustNoneHome, { env: { PASEO_TRUSTED_PROXIES: "false" } }).trustedProxies,
+    ).toEqual([]);
   });
 });
 

@@ -1,4 +1,5 @@
 import { Buffer } from "buffer";
+import { buildAgentDeepLinkRoute } from "@getpaseo/protocol/agent-deep-link";
 
 type NullableString = string | null | undefined;
 const BASE64_WORKSPACE_ID_PREFIX = "b64_";
@@ -21,6 +22,11 @@ function extractSearch(pathname: string): string {
   return hashIndex >= 0
     ? pathname.slice(queryIndex + 1, hashIndex)
     : pathname.slice(queryIndex + 1);
+}
+
+function extractHash(pathname: string): string {
+  const hashIndex = pathname.indexOf("#");
+  return hashIndex >= 0 ? pathname.slice(hashIndex) : "";
 }
 
 function trimNonEmpty(value: NullableString): string | null {
@@ -169,11 +175,16 @@ export function parseWorkspaceOpenIntent(
 export function parseHostWorkspaceOpenIntentFromPathname(
   pathname: string,
 ): WorkspaceOpenIntent | null {
+  return parseWorkspaceOpenIntent(getHostWorkspaceOpenParamFromPathname(pathname));
+}
+
+export function getHostWorkspaceOpenParamFromPathname(pathname: string): string | null {
   const search = extractSearch(pathname);
   if (!search) {
     return null;
   }
-  return parseWorkspaceOpenIntent(new URLSearchParams(search).get("open"));
+  const open = new URLSearchParams(search).get("open");
+  return parseWorkspaceOpenIntent(open) ? open : null;
 }
 
 export function encodeWorkspaceIdForPathSegment(workspaceId: string): string {
@@ -298,6 +309,43 @@ export function parseHostWorkspaceRouteFromPathname(
   return { serverId, workspaceId };
 }
 
+export function stripHostWorkspaceRouteEchoSearch(route: string): string {
+  const pathname = stripSearchAndHash(route);
+  const selection = parseHostWorkspaceRouteFromPathname(pathname);
+  const search = extractSearch(route);
+  if (!selection || !search) {
+    return route;
+  }
+
+  const params = new URLSearchParams(search);
+  let didStrip = false;
+
+  const serverId = params.get("serverId");
+  if (serverId && trimNonEmpty(decodeSegment(serverId)) === selection.serverId) {
+    params.delete("serverId");
+    didStrip = true;
+  }
+
+  const workspaceId = params.get("workspaceId");
+  if (workspaceId && decodeWorkspaceIdFromPathSegment(workspaceId) === selection.workspaceId) {
+    params.delete("workspaceId");
+    didStrip = true;
+  }
+
+  if (params.get("pop") === "true") {
+    params.delete("pop");
+    didStrip = true;
+  }
+
+  if (!didStrip) {
+    return route;
+  }
+
+  const nextSearch = params.toString();
+  const nextQuery = nextSearch ? `?${nextSearch}` : "";
+  return `${pathname}${nextQuery}${extractHash(route)}`;
+}
+
 export function buildHostWorkspaceRoute(serverId: string, workspaceId: string) {
   const normalizedServerId = trimNonEmpty(serverId);
   const normalizedWorkspaceId = trimNonEmpty(workspaceId);
@@ -342,7 +390,10 @@ export function buildHostAgentDetailRoute(serverId: string, agentId: string, wor
   if (!normalizedServerId || !normalizedAgentId) {
     return "/" as const;
   }
-  return `${buildHostRootRoute(normalizedServerId)}/agent/${encodeSegment(normalizedAgentId)}` as const;
+  return buildAgentDeepLinkRoute({
+    serverId: normalizedServerId,
+    agentId: normalizedAgentId,
+  });
 }
 
 export function buildHostRootRoute(serverId: string) {
@@ -353,14 +404,6 @@ export function buildHostRootRoute(serverId: string) {
   return `/h/${encodeSegment(normalized)}` as const;
 }
 
-export function buildHostSessionsRoute(serverId: string) {
-  const base = buildHostRootRoute(serverId);
-  if (base === "/") {
-    return "/" as const;
-  }
-  return `${base}/sessions` as const;
-}
-
 export function buildHostOpenProjectRoute(serverId: string) {
   const base = buildHostRootRoute(serverId);
   if (base === "/") {
@@ -369,38 +412,90 @@ export function buildHostOpenProjectRoute(serverId: string) {
   return `${base}/open-project` as const;
 }
 
-export function buildHostNewWorkspaceRoute(
-  serverId: string,
-  sourceDirectory?: string,
-  options?: { displayName?: string; projectId?: string },
-) {
+export function buildHostSessionsRoute(serverId: string) {
   const base = buildHostRootRoute(serverId);
   if (base === "/") {
     return "/" as const;
   }
+  return `${base}/sessions` as const;
+}
+
+export function buildSessionsRoute() {
+  return "/sessions" as const;
+}
+
+export function buildSchedulesRoute() {
+  return "/schedules" as const;
+}
+
+export function buildOpenProjectRoute() {
+  return "/open-project" as const;
+}
+
+interface NewWorkspaceRouteOptions {
+  serverId?: string;
+  sourceDirectory?: string;
+  displayName?: string;
+  projectId?: string;
+  draftId?: string;
+}
+
+function buildNewWorkspaceSearch(options: NewWorkspaceRouteOptions): string {
   const params = new URLSearchParams();
-  if (sourceDirectory) {
-    params.set("dir", sourceDirectory);
+  const serverId = trimNonEmpty(options.serverId);
+  if (serverId) {
+    params.set("serverId", serverId);
   }
-  if (options?.displayName) {
+  if (options.sourceDirectory) {
+    params.set("dir", options.sourceDirectory);
+  }
+  if (options.displayName) {
     params.set("name", options.displayName);
   }
-  if (options?.projectId) {
+  if (options.projectId) {
     params.set("projectId", options.projectId);
   }
-  const query = params.toString();
-  if (!query) {
-    return `${base}/new` as const;
+  if (options.draftId) {
+    params.set("draftId", options.draftId);
   }
-  return `${base}/new?${query}` as const;
+  return params.toString();
+}
+
+export function buildNewWorkspaceRoute(options: NewWorkspaceRouteOptions = {}) {
+  const query = buildNewWorkspaceSearch(options);
+  if (!query) {
+    return "/new" as const;
+  }
+  return `/new?${query}` as const;
+}
+
+export type KnownHostRouteResolution =
+  | { kind: "render" }
+  | { kind: "redirect"; href: ReturnType<typeof buildOpenProjectRoute> | "/welcome" };
+
+export function resolveKnownHostRoute(input: {
+  routeServerId: string | null | undefined;
+  hosts: readonly { serverId: string }[];
+}): KnownHostRouteResolution {
+  const routeServerId = trimNonEmpty(input.routeServerId);
+  if (routeServerId && input.hosts.some((host) => host.serverId === routeServerId)) {
+    return { kind: "render" };
+  }
+
+  if (input.hosts.length > 0) {
+    return { kind: "redirect", href: buildOpenProjectRoute() };
+  }
+
+  return { kind: "redirect", href: "/welcome" };
 }
 
 export const SETTINGS_SECTION_SLUGS = [
   "general",
-  "daemon",
   "appearance",
+  "editor",
   "shortcuts",
   "integrations",
+  "notifications",
   "permissions",
   "diagnostics",
   "about",
@@ -413,8 +508,11 @@ export function isSettingsSectionSlug(value: string): value is SettingsSectionSl
 }
 
 export const HOST_SECTION_SLUGS = [
+  "projects",
   "connections",
+  "pair-device",
   "agents",
+  "metadata",
   "workspaces",
   "providers",
   "usage",
@@ -448,6 +546,10 @@ export function buildSettingsSectionRoute(section: SettingsSectionSlug) {
   return `/settings/${section}` as const;
 }
 
+export function buildSettingsAddHostRoute(intentId: string | number = "1") {
+  return `/settings/general?addHost=${encodeURIComponent(String(intentId))}` as const;
+}
+
 export function buildSettingsHostRoute(serverId: string) {
   const normalized = trimNonEmpty(serverId);
   if (!normalized) {
@@ -464,41 +566,22 @@ export function buildSettingsHostSectionRoute(serverId: string, section: HostSec
   return `/settings/hosts/${encodeSegment(normalized)}/${section}` as const;
 }
 
-export function buildProjectsSettingsRoute() {
-  return "/settings/projects" as const;
+export function buildProjectsSettingsRoute(serverId: string) {
+  const normalized = trimNonEmpty(serverId);
+  if (!normalized) {
+    throw new Error("buildProjectsSettingsRoute requires a non-empty serverId");
+  }
+  return `/settings/hosts/${encodeSegment(normalized)}/projects` as const;
 }
 
-export function buildProjectSettingsRoute(projectKey: string) {
-  const normalized = trimNonEmpty(projectKey);
-  if (!normalized) {
-    throw new Error("buildProjectSettingsRoute requires a non-empty projectKey");
+export function buildProjectSettingsRoute(serverId: string, projectId: string) {
+  if (!serverId.trim() || !projectId.trim()) {
+    throw new Error("buildProjectSettingsRoute requires a serverId and projectId");
   }
-  return `/settings/projects/${encodeSegment(normalized)}` as const;
+  return `/settings/hosts/${encodeSegment(serverId)}/projects/${encodeSegment(projectId)}` as const;
 }
 
-export function mapPathnameToServer(pathname: string, nextServerId: string) {
-  const normalized = trimNonEmpty(nextServerId);
-  if (!normalized) {
-    return "/" as const;
-  }
-
-  const suffix = pathname.replace(/^\/h\/[^/]+\/?/, "");
-  const base = buildHostRootRoute(normalized);
-  if (suffix.startsWith("settings")) {
-    return buildSettingsHostRoute(normalized);
-  }
-  if (suffix.startsWith("sessions")) {
-    return `${base}/sessions` as const;
-  }
-  if (suffix.startsWith("open-project")) {
-    return `${base}/open-project` as const;
-  }
-  const workspaceRoute = parseHostWorkspaceRouteFromPathname(pathname);
-  if (workspaceRoute) {
-    return buildHostWorkspaceRoute(normalized, workspaceRoute.workspaceId);
-  }
-  if (suffix.startsWith("agent/")) {
-    return `${base}/${suffix}` as const;
-  }
-  return base;
+export function normalizeProjectSettingsRouteId(value: string | string[] | undefined): string {
+  const id = Array.isArray(value) ? value[0] : value;
+  return typeof id === "string" ? id : "";
 }

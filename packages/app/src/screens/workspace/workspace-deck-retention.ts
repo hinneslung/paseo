@@ -14,6 +14,11 @@ interface WorkspaceDeckEntryMountInput {
   workspaceExists: boolean;
 }
 
+interface ResolveWorkspaceDeckEntriesInput {
+  selections: ActiveWorkspaceSelection[];
+  activeSelection: ActiveWorkspaceSelection | null;
+}
+
 export function getWorkspaceSelectionKey(selection: ActiveWorkspaceSelection): string {
   return `${selection.serverId}:${selection.workspaceId}`;
 }
@@ -43,7 +48,7 @@ export function pruneMountedWorkspaceSelections({
   maxMountedWorkspaces = WORKSPACE_DECK_MAX_MOUNTED_WORKSPACES,
 }: PruneMountedWorkspaceSelectionsInput): ActiveWorkspaceSelection[] {
   if (!activeSelection) {
-    return [];
+    return currentSelections;
   }
 
   const maxSelections = Math.max(1, maxMountedWorkspaces);
@@ -72,6 +77,27 @@ export function pruneMountedWorkspaceSelections({
   }
 
   return nextSelections;
+}
+
+export function orderWorkspaceSelectionsForStableRender(
+  selections: ActiveWorkspaceSelection[],
+): ActiveWorkspaceSelection[] {
+  return [...selections].sort((left, right) =>
+    getWorkspaceSelectionKey(left).localeCompare(getWorkspaceSelectionKey(right)),
+  );
+}
+
+export function resolveWorkspaceDeckEntries({
+  selections,
+  activeSelection,
+}: ResolveWorkspaceDeckEntriesInput): Array<{
+  selection: ActiveWorkspaceSelection;
+  active: boolean;
+}> {
+  return selections.map((selection) => ({
+    selection,
+    active: areWorkspaceSelectionsEqual(selection, activeSelection),
+  }));
 }
 
 export function shouldKeepWorkspaceDeckEntryMounted({

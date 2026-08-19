@@ -12,6 +12,7 @@ import {
   buildLocalDaemonTransportUrl,
   createDesktopLocalDaemonTransportFactory,
 } from "@/desktop/daemon/desktop-daemon-transport";
+import type { LocalTransportTarget } from "@/desktop/daemon/desktop-daemon";
 
 export interface DaemonProbeClient {
   readonly lastError: string | null;
@@ -20,16 +21,11 @@ export interface DaemonProbeClient {
   getLastServerInfoMessage(): { serverId: string; hostname: string | null } | null;
 }
 
-interface LocalTransportUrlInput {
-  transportType: "socket" | "pipe";
-  transportPath: string;
-}
-
 export interface DaemonConnectionDependencies<TClient extends DaemonProbeClient> {
   getClientId(): Promise<string>;
   resolveAppVersion(): string | null;
   createLocalTransportFactory(): DaemonClientConfig["transportFactory"] | null;
-  buildLocalTransportUrl(input: LocalTransportUrlInput): string;
+  buildLocalTransportUrl(input: LocalTransportTarget): string;
   createClient(config: DaemonClientConfig): TClient;
 }
 
@@ -97,6 +93,10 @@ export class DaemonConnectionTestError extends Error {
 export async function buildClientConfig(
   connection: HostConnection,
   serverId?: string,
+  options?: {
+    capabilities?: DaemonClientConfig["capabilities"];
+    trace?: DaemonClientConfig["trace"];
+  },
   deps: Pick<
     DaemonConnectionDependencies<DaemonProbeClient>,
     "getClientId" | "resolveAppVersion" | "createLocalTransportFactory" | "buildLocalTransportUrl"
@@ -110,7 +110,11 @@ export async function buildClientConfig(
     appVersion: deps.resolveAppVersion() ?? undefined,
     suppressSendErrors: true,
     reconnect: { enabled: false },
-    ...((connection.type === "directSocket" || connection.type === "directPipe") &&
+    ...(options?.capabilities ? { capabilities: options.capabilities } : {}),
+    ...(options?.trace ? { trace: options.trace } : {}),
+    ...((connection.type === "directSocket" ||
+      connection.type === "directPipe" ||
+      connection.type === "directTcpBridge") &&
     localTransportFactory
       ? { transportFactory: localTransportFactory }
       : {}),
@@ -122,6 +126,16 @@ export async function buildClientConfig(
       url: deps.buildLocalTransportUrl({
         transportType: connection.type === "directSocket" ? "socket" : "pipe",
         transportPath: connection.path,
+      }),
+    };
+  }
+
+  if (connection.type === "directTcpBridge") {
+    return {
+      ...base,
+      url: deps.buildLocalTransportUrl({
+        transportType: "tcp",
+        endpoint: connection.endpoint,
       }),
     };
   }
@@ -221,6 +235,8 @@ export function connectAndProbe(
 interface ProbeOptions {
   serverId?: string;
   timeoutMs?: number;
+  capabilities?: DaemonClientConfig["capabilities"];
+  trace?: DaemonClientConfig["trace"];
 }
 
 function resolveTimeout(connection: HostConnection, options?: ProbeOptions): number {
@@ -242,6 +258,6 @@ export async function connectToDaemon(
   options?: ProbeOptions,
   deps: DaemonConnectionDependencies<DaemonProbeClient> = defaultDaemonConnectionDependencies,
 ): Promise<{ client: DaemonProbeClient; serverId: string; hostname: string | null }> {
-  const config = await buildClientConfig(connection, options?.serverId, deps);
+  const config = await buildClientConfig(connection, options?.serverId, options, deps);
   return connectAndProbe(config, resolveTimeout(connection, options), deps);
 }

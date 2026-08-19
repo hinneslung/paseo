@@ -20,14 +20,21 @@ import { Button } from "@/components/ui/button";
 import { getDesktopDaemonLogs, type DesktopDaemonLogs } from "@/desktop/daemon/desktop-daemon";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { isNative, isWeb } from "@/constants/platform";
-import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
+
+export interface VscodeStartupError {
+  message: string;
+  onRetry: () => void;
+}
 
 interface StartupSplashScreenProps {
   bootstrapState?: {
     splashError: string | null;
     retry: () => void;
   };
+  statusMessage?: string | null;
+  statusDetail?: string | null;
+  vscodeError?: VscodeStartupError | null;
 }
 
 const GITHUB_ISSUE_URL = "https://github.com/getpaseo/paseo/issues/new";
@@ -274,6 +281,24 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[3],
     flexWrap: "wrap",
   },
+  statusContent: {
+    alignItems: "center",
+    gap: theme.spacing[2],
+    marginTop: theme.spacing[6],
+    maxWidth: 360,
+  },
+  statusMessage: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.base,
+    lineHeight: 22,
+    textAlign: "center",
+  },
+  statusDetail: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    lineHeight: 18,
+    textAlign: "center",
+  },
   shimmerMask: {
     width: LOGO_SIZE,
     height: LOGO_SIZE,
@@ -297,26 +322,24 @@ const styles = StyleSheet.create((theme) => ({
   },
 }));
 
-export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps) {
+export function StartupSplashScreen({
+  bootstrapState,
+  statusMessage,
+  statusDetail,
+  vscodeError,
+}: StartupSplashScreenProps) {
   const { t } = useTranslation();
   const { theme } = useUnistyles();
-  const webScrollbarStyle = useWebScrollbarStyle();
-  const errorScrollViewStyle = useMemo(
-    () => [styles.errorScrollView, webScrollbarStyle],
-    [webScrollbarStyle],
-  );
-  const logsScrollStyle = useMemo(
-    () => [styles.logsScroll, webScrollbarStyle],
-    [webScrollbarStyle],
-  );
   const [daemonLogs, setDaemonLogs] = useState<DesktopDaemonLogs | null>(null);
   const [logsError, setLogsError] = useState<string | null>(null);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
 
-  const isError = bootstrapState !== undefined && bootstrapState.splashError !== null;
+  const desktopError = bootstrapState?.splashError ?? null;
+  const isDesktopError = desktopError !== null;
+  const isVscodeError = !isDesktopError && vscodeError !== null && vscodeError !== undefined;
 
   useEffect(() => {
-    if (!isError) {
+    if (!isDesktopError) {
       setDaemonLogs(null);
       setLogsError(null);
       setIsLoadingLogs(false);
@@ -352,7 +375,7 @@ export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps
     return () => {
       isCancelled = true;
     };
-  }, [isError, t]);
+  }, [isDesktopError, t]);
 
   const logsText = useMemo(() => {
     if (isLoadingLogs) {
@@ -391,20 +414,67 @@ export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps
     [theme.colors.palette.white],
   );
 
-  if (!isError) {
+  if (!isDesktopError && !isVscodeError) {
     return (
       <View testID="startup-splash" style={styles.container}>
         <TitlebarDragRegion />
         <LogoShimmer />
+        {statusMessage || statusDetail ? (
+          <View style={styles.statusContent}>
+            {statusMessage ? <Text style={styles.statusMessage}>{statusMessage}</Text> : null}
+            {statusDetail ? <Text style={styles.statusDetail}>{statusDetail}</Text> : null}
+          </View>
+        ) : null}
       </View>
     );
+  }
+
+  if (isVscodeError) {
+    return (
+      <View style={styles.errorScreen}>
+        <TitlebarDragRegion />
+        <ScrollView
+          style={styles.errorScrollView}
+          contentContainerStyle={styles.errorScrollContent}
+          showsVerticalScrollIndicator
+        >
+          <View style={styles.errorContent}>
+            <View style={styles.errorHeader}>
+              <PaseoLogo size={64} />
+              <Text style={styles.title}>{t("startup.errorTitle")}</Text>
+            </View>
+
+            <Text dataSet={CODE_SURFACE_DATASET} style={styles.errorMessage}>
+              {vscodeError.message}
+            </Text>
+
+            <View style={styles.actionRow}>
+              <Button variant="default" leftIcon={retryIcon} onPress={vscodeError.onRetry}>
+                Retry
+              </Button>
+              <Button variant="outline" leftIcon={warningIcon} onPress={openGithubIssue}>
+                Open GitHub issue
+              </Button>
+              <Button variant="outline" leftIcon={bookIcon} onPress={openDocs}>
+                Docs
+              </Button>
+            </View>
+          </View>
+        </ScrollView>
+      </View>
+    );
+  }
+
+  const desktopBootstrapState = bootstrapState;
+  if (!desktopBootstrapState) {
+    return null;
   }
 
   return (
     <View style={styles.errorScreen}>
       <TitlebarDragRegion />
       <ScrollView
-        style={errorScrollViewStyle}
+        style={styles.errorScrollView}
         contentContainerStyle={styles.errorScrollContent}
         showsVerticalScrollIndicator
       >
@@ -417,14 +487,14 @@ export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps
           <Text style={styles.errorDescription}>{t("startup.errorDescription")}</Text>
 
           <Text dataSet={CODE_SURFACE_DATASET} style={styles.errorMessage}>
-            {bootstrapState.splashError}
+            {desktopError}
           </Text>
 
           {daemonLogs?.logPath ? <Text style={styles.logsMeta}>{daemonLogs.logPath}</Text> : null}
 
           <View style={styles.logsContainer}>
             <ScrollView
-              style={logsScrollStyle}
+              style={styles.logsScroll}
               contentContainerStyle={styles.logsContent}
               showsVerticalScrollIndicator
             >
@@ -444,7 +514,7 @@ export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps
             <Button variant="outline" leftIcon={bookIcon} onPress={openDocs}>
               Docs
             </Button>
-            <Button variant="default" leftIcon={retryIcon} onPress={bootstrapState.retry}>
+            <Button variant="default" leftIcon={retryIcon} onPress={desktopBootstrapState.retry}>
               Retry
             </Button>
           </View>

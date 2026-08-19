@@ -1,9 +1,10 @@
 import { useCallback, useMemo, useState, type ReactElement } from "react";
-import { Pressable, ScrollView, Text, View, type PressableStateCallbackType } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, ChevronDown, ChevronRight, Unlink } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { getProviderIcon } from "@/components/provider-icons";
+import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useIsCompactFormFactor, MAX_CONTENT_WIDTH } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
@@ -13,11 +14,13 @@ import {
 } from "@/screens/workspace/workspace-tab-presentation";
 import type { Theme } from "@/styles/theme";
 import type { SubagentRow } from "./select";
-import { buildSubagentRowPresentationData, formatHeaderLabel } from "./track-presentation";
+import {
+  buildSubagentRowPresentationData,
+  countFinishedSubagents,
+  formatHeaderLabel,
+} from "./track-presentation";
 
 const ThemedArchive = withUnistyles(Archive);
-const ThemedChevronDown = withUnistyles(ChevronDown);
-const ThemedChevronRight = withUnistyles(ChevronRight);
 const ThemedUnlink = withUnistyles(Unlink);
 
 const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
@@ -28,15 +31,20 @@ const foregroundMutedColorMapping = (theme: Theme) => ({
 export interface SubagentsTrackProps {
   rows: SubagentRow[];
   onOpenSubagent: (id: string) => void;
+  onOpenProviderSubagent: (parentAgentId: string, subagentId: string) => void;
   onArchiveSubagent: (id: string) => void;
+  onArchiveFinished?: () => void;
   onDetachSubagent?: (id: string) => void;
 }
 
 const SUBAGENTS_LIST_MAX_HEIGHT = 200;
 
 function buildRowPresentation(row: SubagentRow): WorkspaceTabPresentation {
+  const data = buildSubagentRowPresentationData(row);
   return {
-    ...buildSubagentRowPresentationData(row),
+    ...data,
+    tooltip: data.label,
+    modified: false,
     icon: getProviderIcon(row.provider),
   };
 }
@@ -44,9 +52,12 @@ function buildRowPresentation(row: SubagentRow): WorkspaceTabPresentation {
 export function SubagentsTrack({
   rows,
   onOpenSubagent,
+  onOpenProviderSubagent,
   onArchiveSubagent,
+  onArchiveFinished,
   onDetachSubagent,
 }: SubagentsTrackProps): ReactElement | null {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
 
   const toggleExpanded = useCallback(() => {
@@ -58,41 +69,50 @@ export function SubagentsTrack({
     [expanded],
   );
 
-  const headerStyle = useCallback(
-    ({ hovered, pressed }: PressableStateCallbackType) => [
-      styles.header,
-      expanded ? styles.headerDivider : styles.headerCollapsed,
-      (hovered || pressed) && styles.headerActive,
-    ],
+  const headerContainerStyle = useMemo(
+    () => [styles.header, expanded ? styles.headerDivider : styles.headerCollapsed],
     [expanded],
   );
+  const headerAccessibilityState = useMemo(() => ({ expanded }), [expanded]);
 
   if (rows.length === 0) {
     return null;
   }
 
   const headerLabel = formatHeaderLabel(rows);
+  const finishedCount = countFinishedSubagents(rows);
 
   return (
     <View style={styles.outer} testID="subagents-track">
       <View style={styles.track}>
         <View style={surfaceStyle}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={headerLabel}
-            testID="subagents-track-header"
-            onPress={toggleExpanded}
-            style={headerStyle}
-          >
-            {expanded ? (
-              <ThemedChevronDown size={12} uniProps={foregroundMutedColorMapping} />
-            ) : (
-              <ThemedChevronRight size={12} uniProps={foregroundMutedColorMapping} />
-            )}
-            <Text style={styles.headerLabel} numberOfLines={1}>
+          <View style={headerContainerStyle}>
+            <Button
+              variant="ghost"
+              size="xs"
+              accessibilityLabel={headerLabel}
+              accessibilityState={headerAccessibilityState}
+              testID="subagents-track-header"
+              onPress={toggleExpanded}
+              leftIcon={expanded ? ChevronDown : ChevronRight}
+              style={styles.headerToggle}
+              textStyle={styles.headerLabel}
+            >
               {headerLabel}
-            </Text>
-          </Pressable>
+            </Button>
+            {finishedCount > 0 && onArchiveFinished ? (
+              <View style={styles.headerAction}>
+                <SubagentActionButton
+                  accessibilityLabel={t("subagents.archiveFinishedAction")}
+                  testID="subagents-track-archive-finished"
+                  tooltipLabel={t("subagents.archiveFinishedTooltip")}
+                  icon="archive"
+                  visible
+                  onPress={onArchiveFinished}
+                />
+              </View>
+            ) : null}
+          </View>
           {expanded ? (
             <ScrollView
               style={styles.scroll}
@@ -105,6 +125,7 @@ export function SubagentsTrack({
                   key={row.id}
                   row={row}
                   onOpenSubagent={onOpenSubagent}
+                  onOpenProviderSubagent={onOpenProviderSubagent}
                   onArchiveSubagent={onArchiveSubagent}
                   onDetachSubagent={onDetachSubagent}
                 />
@@ -120,6 +141,7 @@ export function SubagentsTrack({
 interface SubagentsTrackRowProps {
   row: SubagentRow;
   onOpenSubagent: (id: string) => void;
+  onOpenProviderSubagent: (parentAgentId: string, subagentId: string) => void;
   onArchiveSubagent: (id: string) => void;
   onDetachSubagent?: (id: string) => void;
 }
@@ -127,6 +149,7 @@ interface SubagentsTrackRowProps {
 function SubagentsTrackRow({
   row,
   onOpenSubagent,
+  onOpenProviderSubagent,
   onArchiveSubagent,
   onDetachSubagent,
 }: SubagentsTrackRowProps): ReactElement {
@@ -137,8 +160,12 @@ function SubagentsTrackRow({
   const displayLabel =
     presentation.titleState === "loading" ? t("common.states.loading") : presentation.label;
   const handlePress = useCallback(() => {
-    onOpenSubagent(row.id);
-  }, [onOpenSubagent, row.id]);
+    if (row.kind === "provider") {
+      onOpenProviderSubagent(row.parentAgentId, row.id);
+    } else {
+      onOpenSubagent(row.id);
+    }
+  }, [onOpenProviderSubagent, onOpenSubagent, row]);
   const handleArchivePress = useCallback(() => {
     onArchiveSubagent(row.id);
   }, [onArchiveSubagent, row.id]);
@@ -163,17 +190,27 @@ function SubagentsTrackRow({
       >
         {({ pressed }) => (
           <View style={hovered || pressed ? styles.rowActive : styles.row}>
-            <WorkspaceTabIcon presentation={presentation} />
+            <WorkspaceTabIcon
+              presentation={presentation}
+              backdrop={hovered || pressed ? "surface2" : "surface1"}
+            />
             <Text style={styles.rowLabel} numberOfLines={1}>
               {displayLabel}
             </Text>
-            <SubagentRowActions
-              rowId={row.id}
-              displayLabel={displayLabel}
-              visible={actionsVisible}
-              onDetachPress={onDetachSubagent ? handleDetachPress : undefined}
-              onArchivePress={handleArchivePress}
-            />
+            {presentation.subtitle ? (
+              <Text style={styles.rowSubtitle} numberOfLines={1}>
+                {presentation.subtitle}
+              </Text>
+            ) : null}
+            {row.kind === "paseo" ? (
+              <SubagentRowActions
+                rowId={row.id}
+                displayLabel={displayLabel}
+                visible={actionsVisible}
+                onDetachPress={onDetachSubagent ? handleDetachPress : undefined}
+                onArchivePress={handleArchivePress}
+              />
+            ) : null}
           </View>
         )}
       </Pressable>
@@ -295,15 +332,21 @@ const styles = StyleSheet.create((theme) => ({
   header: {
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[2],
-    paddingHorizontal: theme.spacing[3],
+  },
+  headerToggle: {
+    flex: 1,
+    minWidth: 0,
+    justifyContent: "flex-start",
+    borderRadius: 0,
+    paddingLeft: theme.spacing[3],
+    paddingRight: theme.spacing[1],
     paddingVertical: theme.spacing[2],
   },
-  headerCollapsed: {
-    paddingBottom: theme.spacing[6],
+  headerAction: {
+    paddingRight: theme.spacing[2],
   },
-  headerActive: {
-    backgroundColor: theme.colors.surface2,
+  headerCollapsed: {
+    paddingBottom: theme.spacing[4],
   },
   headerDivider: {
     borderBottomWidth: theme.borderWidth[1],
@@ -341,6 +384,14 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 0,
     fontSize: theme.fontSize.sm,
     color: theme.colors.foreground,
+  },
+  // Keep provider context secondary and bounded so the task remains readable on compact screens.
+  rowSubtitle: {
+    flexShrink: 1,
+    minWidth: 0,
+    maxWidth: "45%",
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.foregroundMuted,
   },
   actionClusterVisible: {
     flexDirection: "row",

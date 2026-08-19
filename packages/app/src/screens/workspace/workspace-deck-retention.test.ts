@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import {
+  orderWorkspaceSelectionsForStableRender,
   pruneMountedWorkspaceSelections,
+  resolveWorkspaceDeckEntries,
   shouldKeepWorkspaceDeckEntryMounted,
 } from "@/screens/workspace/workspace-deck-retention";
 
@@ -14,6 +16,17 @@ function mountedWorkspaceIds(selections: ActiveWorkspaceSelection[]): string[] {
 }
 
 describe("pruneMountedWorkspaceSelections", () => {
+  it("retains the deck while an app-wide route temporarily clears the active workspace", () => {
+    const mountedSelections = [workspace("A"), workspace("B")];
+
+    expect(
+      pruneMountedWorkspaceSelections({
+        currentSelections: mountedSelections,
+        activeSelection: null,
+      }),
+    ).toBe(mountedSelections);
+  });
+
   it("keeps the active workspace and the two most recent inactive workspaces", () => {
     const mountedAfterA = pruneMountedWorkspaceSelections({
       currentSelections: [],
@@ -61,6 +74,36 @@ describe("pruneMountedWorkspaceSelections", () => {
     });
 
     expect(mountedWorkspaceIds(mountedSelections)).toEqual(["C"]);
+  });
+});
+
+describe("orderWorkspaceSelectionsForStableRender", () => {
+  it("does not move retained native roots when the active LRU order changes", () => {
+    const activeA = [workspace("A"), workspace("B")];
+    const activeB = [workspace("B"), workspace("A")];
+
+    expect(mountedWorkspaceIds(orderWorkspaceSelectionsForStableRender(activeA))).toEqual([
+      "A",
+      "B",
+    ]);
+    expect(mountedWorkspaceIds(orderWorkspaceSelectionsForStableRender(activeB))).toEqual([
+      "A",
+      "B",
+    ]);
+  });
+});
+
+describe("resolveWorkspaceDeckEntries", () => {
+  it("keeps retained workspaces rendered but inactive on an app-wide route", () => {
+    expect(
+      resolveWorkspaceDeckEntries({
+        selections: [workspace("A"), workspace("B")],
+        activeSelection: null,
+      }),
+    ).toEqual([
+      { selection: workspace("A"), active: false },
+      { selection: workspace("B"), active: false },
+    ]);
   });
 });
 

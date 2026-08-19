@@ -1,0 +1,110 @@
+{
+  "name": "paseo-vscode",
+  "displayName": "Paseo (Unofficial)",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Use Paseo inside VS Code - auto-opens the matching project/worktree, drag files to mention, open file in editor, and chat with your AI coding agents (Claude Code, Codex, Copilot, OpenCode, Pi, and more).",
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "keywords": [
+    "agent",
+    "ai",
+    "claude code",
+    "codex",
+    "coding agent",
+    "copilot",
+    "opencode",
+    "paseo"
+  ],
+  "homepage": "https://github.com/hinneslung/paseo",
+  "bugs": {
+    "url": "https://github.com/hinneslung/paseo/issues"
+  },
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hinneslung/paseo.git",
+    "directory": "packages/vscode"
+  },
+  "publisher": "hinnes",
+  "main": "dist/extension.js",
+  "scripts": {
+    "copy:app-dist": "node scripts/copy-app-dist.mjs",
+    "build:esbuild": "node esbuild.mjs",
+    "build": "npm run copy:app-dist && npm run build:esbuild && vsce package --no-dependencies -o paseo.vsix",
+    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "test": "npm run copy:app-dist && npm run build:esbuild && vitest run src/**/*.test.ts --bail=1 && node src/test/run-vscode-smoke.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "24.6.0",
+    "@types/vscode": "^1.96.0",
+    "@types/ws": "^8.18.1",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.2",
+    "esbuild": "^0.25.12",
+    "typescript": "5.9.3",
+    "vitest": "^4.1.6",
+    "ws": "^8.20.0"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "paseo",
+          "title": "Paseo",
+          "icon": "media/paseo-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "paseo": [
+        {
+          "id": "paseo.webview",
+          "name": "Paseo",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "paseo.open",
+        "title": "Paseo: Open"
+      },
+      {
+        "command": "paseo.setPassword",
+        "title": "Paseo: Set Daemon Password"
+      },
+      {
+        "command": "paseo.clearPassword",
+        "title": "Paseo: Clear Daemon Password"
+      }
+    ],
+    "configuration": {
+      "title": "Paseo",
+      "properties": {
+        "paseo.endpoint": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional Paseo daemon endpoint override for the VS Code extension. Example: `127.0.0.1:6768`."
+        }
+      }
+    }
+  },
+  "activationEvents": [
+    "onCommand:paseo.clearPassword",
+    "onCommand:paseo.open",
+    "onCommand:paseo.setPassword",
+    "onView:paseo.webview"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.96.0"
+  }
+}

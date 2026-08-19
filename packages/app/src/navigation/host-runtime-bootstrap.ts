@@ -1,63 +1,44 @@
 import type { ActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
-import type { DaemonStartResult } from "@/runtime/daemon-start-service";
+import type {
+  DaemonStartCondition,
+  DaemonStartResult,
+  StartDaemonIfEnabledInput,
+} from "@/runtime/daemon-start-service";
 import type { Href } from "expo-router";
 import {
-  buildHostOpenProjectRoute,
   buildHostRootRoute,
   buildHostWorkspaceRoute,
+  buildOpenProjectRoute,
 } from "@/utils/host-routes";
+import {
+  buildVscodeWorkspaceMatchHref,
+  type VscodeWorkspaceMatchState,
+} from "@/desktop/vscode/initial-target";
 
 export interface HostRuntimeBootstrapStore {
-  boot: () => void;
+  boot: () => Promise<void>;
 }
 
 export interface HostRuntimeBootstrapDaemonStartService {
-  start: () => Promise<DaemonStartResult>;
+  startIfEnabled: (input: StartDaemonIfEnabledInput) => Promise<DaemonStartResult>;
 }
-
-type HostRuntimeBootstrapStartGate = boolean | (() => boolean | Promise<boolean>);
 
 export interface StartHostRuntimeBootstrapInput {
   store: HostRuntimeBootstrapStore;
   daemonStartService: HostRuntimeBootstrapDaemonStartService;
-  shouldStartDaemon: HostRuntimeBootstrapStartGate;
-  onGateError?: (message: string) => void;
+  shouldStartDaemon: DaemonStartCondition;
 }
 
 export function startHostRuntimeBootstrap(input: StartHostRuntimeBootstrapInput): void {
-  input.store.boot();
-  startDaemonIfGateAllows({
-    daemonStartService: input.daemonStartService,
-    shouldStartDaemon: input.shouldStartDaemon,
-    onGateError: input.onGateError,
+  const registryReady = input.store.boot();
+  void input.daemonStartService.startIfEnabled({
+    shouldStart: async () => {
+      await registryReady;
+      return typeof input.shouldStartDaemon === "boolean"
+        ? input.shouldStartDaemon
+        : input.shouldStartDaemon();
+    },
   });
-}
-
-export function startDaemonIfGateAllows(input: {
-  daemonStartService: HostRuntimeBootstrapDaemonStartService;
-  shouldStartDaemon: HostRuntimeBootstrapStartGate;
-  onGateError?: (message: string) => void;
-}): void {
-  const gate = input.shouldStartDaemon;
-  if (typeof gate === "boolean") {
-    if (gate) {
-      void input.daemonStartService.start();
-    }
-    return;
-  }
-
-  void Promise.resolve()
-    .then(() => gate())
-    .then((shouldStartDaemon) => {
-      if (shouldStartDaemon) {
-        void input.daemonStartService.start();
-      }
-      return null;
-    })
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      input.onGateError?.(`Failed to evaluate desktop daemon settings: ${message}`);
-    });
 }
 
 const WELCOME_ROUTE: Href = "/welcome";
@@ -139,6 +120,8 @@ export interface ResolveIndexStartupRouteInput extends ResolveStartupRouteBaseIn
   workspaceSelectionStatus: WorkspaceSelectionStatus;
   isWorkspaceSelectionLoaded: boolean;
   hasGivenUpWaitingForHost: boolean;
+  isVscodeRuntime?: boolean;
+  vscodeWorkspaceMatchState?: VscodeWorkspaceMatchState;
 }
 
 export interface ResolveHostStartupRouteInput extends ResolveStartupRouteBaseInput {
@@ -185,7 +168,7 @@ export function resolveHostIndexRoute(input: {
   ) {
     return buildHostWorkspaceRoute(input.serverId, input.workspaceSelection.workspaceId);
   }
-  return buildHostOpenProjectRoute(input.serverId);
+  return buildOpenProjectRoute();
 }
 
 function isIndexPathname(pathname: string) {
@@ -208,16 +191,31 @@ function resolveReadyIndexStartupRoute(input: ResolveIndexStartupRouteInput): St
     return { kind: "splash" };
   }
 
+  if (input.isVscodeRuntime && input.vscodeWorkspaceMatchState?.status === "loading") {
+    return { kind: "splash" };
+  }
+
+  const vscodeWorkspaceMatchState = input.vscodeWorkspaceMatchState;
+  if (
+    input.isVscodeRuntime &&
+    vscodeWorkspaceMatchState?.status === "ready" &&
+    vscodeWorkspaceMatchState.match
+  ) {
+    return {
+      kind: "redirect",
+      href: buildVscodeWorkspaceMatchHref(vscodeWorkspaceMatchState.match),
+    };
+  }
+
   if (
     shouldRestoreWorkspaceSelection(input) &&
     hostExists(input.hosts, input.workspaceSelection.serverId)
   ) {
+    // Native cold launch must enter the host boundary first. The host index
+    // owns workspace restore after its local dynamic params exist.
     return {
       kind: "redirect",
-      href: buildHostWorkspaceRoute(
-        input.workspaceSelection.serverId,
-        input.workspaceSelection.workspaceId,
-      ),
+      href: buildHostRootRoute(input.workspaceSelection.serverId),
     };
   }
 
@@ -244,7 +242,7 @@ function resolveReadyHostStartupRoute(input: ResolveHostStartupRouteInput): Star
 
   const fallbackServerId = input.hosts[0]?.serverId ?? null;
   if (fallbackServerId) {
-    return { kind: "redirect", href: buildHostOpenProjectRoute(fallbackServerId) };
+    return { kind: "redirect", href: buildOpenProjectRoute() };
   }
 
   return { kind: "redirect", href: WELCOME_ROUTE };

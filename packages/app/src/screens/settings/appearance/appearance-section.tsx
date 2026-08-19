@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { Text, TextInput, View, type PressableStateCallbackType } from "react-native";
@@ -16,6 +16,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
 import { SettingsSection } from "@/screens/settings/settings-section";
 import {
   MAX_CODE_FONT_SIZE,
@@ -31,6 +32,7 @@ import {
   DEFAULT_MONO_FONT_STACK,
   DEFAULT_UI_FONT_STACK,
   ICON_SIZE,
+  THEME_OPTIONS,
   THEME_SWATCHES,
   type Theme,
 } from "@/styles/theme";
@@ -52,25 +54,8 @@ const ThemedChevronDown = withUnistyles(ChevronDown);
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
 function getThemeLabel(t: TFunction, value: AppSettings["theme"]): string {
-  const labelKeys: Record<AppSettings["theme"], string> = {
-    light: "settings.appearance.theme.options.light",
-    dark: "settings.appearance.theme.options.dark",
-    zinc: "settings.appearance.theme.options.zinc",
-    midnight: "settings.appearance.theme.options.midnight",
-    claude: "settings.appearance.theme.options.claude",
-    ghostty: "settings.appearance.theme.options.ghostty",
-    auto: "settings.appearance.theme.options.auto",
-  };
-  return t(labelKeys[value]);
+  return t(`settings.appearance.theme.options.${value}`);
 }
-
-const PRIMARY_THEMES: readonly AppSettings["theme"][] = ["light", "dark", "auto"];
-const DARK_VARIANT_THEMES: readonly AppSettings["theme"][] = [
-  "zinc",
-  "midnight",
-  "claude",
-  "ghostty",
-];
 
 // Platform default stacks can be the bare native tokens ("normal"/"monospace");
 // those read as a bug, so show a human label in the placeholder instead.
@@ -166,20 +151,133 @@ function ThemeRow({ value, onChange }: ThemeRowProps) {
           <ThemedChevronDown size={ICON_SIZE.sm} uniProps={mutedColorMapping} />
         </DropdownMenuTrigger>
         <DropdownMenuContent side="bottom" align="end" width={200}>
-          {PRIMARY_THEMES.map((themeValue) => (
-            <ThemeMenuItem
-              key={themeValue}
-              themeValue={themeValue}
-              selected={value === themeValue}
-              onChange={onChange}
-            />
-          ))}
-          <DropdownMenuSeparator />
-          {DARK_VARIANT_THEMES.map((themeValue) => (
-            <ThemeMenuItem
-              key={themeValue}
-              themeValue={themeValue}
-              selected={value === themeValue}
+          {THEME_OPTIONS.map((option, index) => {
+            const previousOption = THEME_OPTIONS[index - 1];
+            return (
+              <Fragment key={option.name}>
+                {previousOption && previousOption.group !== option.group ? (
+                  <DropdownMenuSeparator />
+                ) : null}
+                <ThemeMenuItem
+                  themeValue={option.name}
+                  selected={value === option.name}
+                  onChange={onChange}
+                />
+              </Fragment>
+            );
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </View>
+  );
+}
+
+interface AutoExpandReasoningRowProps {
+  value: boolean;
+  onChange: (value: boolean) => void;
+}
+
+function AutoExpandReasoningRow({ value, onChange }: AutoExpandReasoningRowProps) {
+  const { t } = useTranslation();
+  return (
+    <View style={settingsStyles.row}>
+      <View style={settingsStyles.rowContent}>
+        <Text style={settingsStyles.rowTitle}>
+          {t("settings.general.autoExpandReasoning.label")}
+        </Text>
+        <Text style={settingsStyles.rowHint}>
+          {t("settings.general.autoExpandReasoning.description")}
+        </Text>
+      </View>
+      <Switch value={value} onValueChange={onChange} />
+    </View>
+  );
+}
+
+interface ChatOutlineRowProps {
+  value: boolean;
+  onChange: (value: boolean) => void;
+}
+
+function ChatOutlineRow({ value, onChange }: ChatOutlineRowProps) {
+  const { t } = useTranslation();
+  return (
+    <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
+      <View style={settingsStyles.rowContent}>
+        <Text style={settingsStyles.rowTitle}>{t("settings.appearance.chatOutline.title")}</Text>
+        <Text style={settingsStyles.rowHint}>
+          {t("settings.appearance.chatOutline.description")}
+        </Text>
+      </View>
+      <Switch
+        value={value}
+        onValueChange={onChange}
+        accessibilityLabel={t("settings.appearance.chatOutline.title")}
+      />
+    </View>
+  );
+}
+
+const TOOL_CALL_DETAIL_LEVELS: readonly AppSettings["toolCallDetailLevel"][] = [
+  "detailed",
+  "overview",
+];
+
+function getToolCallDetailLevelLabel(
+  t: TFunction,
+  value: AppSettings["toolCallDetailLevel"],
+): string {
+  return t(`settings.general.toolCallDetail.options.${value}`);
+}
+
+interface ToolCallDetailMenuItemProps {
+  value: AppSettings["toolCallDetailLevel"];
+  selected: boolean;
+  onChange: (value: AppSettings["toolCallDetailLevel"]) => void;
+}
+
+function ToolCallDetailMenuItem({ value, selected, onChange }: ToolCallDetailMenuItemProps) {
+  const { t } = useTranslation();
+  const handleSelect = useCallback(() => onChange(value), [onChange, value]);
+  return (
+    <DropdownMenuItem selected={selected} onSelect={handleSelect}>
+      {getToolCallDetailLevelLabel(t, value)}
+    </DropdownMenuItem>
+  );
+}
+
+interface ToolCallDetailRowProps {
+  value: AppSettings["toolCallDetailLevel"];
+  onChange: (value: AppSettings["toolCallDetailLevel"]) => void;
+}
+
+function ToolCallDetailRow({ value, onChange }: ToolCallDetailRowProps) {
+  const { t } = useTranslation();
+  const selectedLabel = getToolCallDetailLevelLabel(t, value);
+  return (
+    <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
+      <View style={settingsStyles.rowContent}>
+        <Text style={settingsStyles.rowTitle}>{t("settings.general.toolCallDetail.label")}</Text>
+        <Text style={settingsStyles.rowHint}>
+          {t("settings.general.toolCallDetail.description")}
+        </Text>
+      </View>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          style={dropdownTriggerStyle}
+          accessibilityLabel={t("settings.general.toolCallDetail.accessibilityLabel", {
+            value: selectedLabel,
+          })}
+        >
+          <Text style={styles.triggerText}>{selectedLabel}</Text>
+          <ThemedChevronDown size={ICON_SIZE.sm} uniProps={mutedColorMapping} />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="bottom" align="end" width={200}>
+          {TOOL_CALL_DETAIL_LEVELS.map((option) => (
+            <ToolCallDetailMenuItem
+              key={option}
+              value={option}
+              selected={value === option}
               onChange={onChange}
             />
           ))}
@@ -397,6 +495,27 @@ export function AppearanceSection() {
     [updateSettings],
   );
 
+  const handleAutoExpandReasoningChange = useCallback(
+    (autoExpandReasoning: boolean) => {
+      void updateSettings({ autoExpandReasoning });
+    },
+    [updateSettings],
+  );
+
+  const handleToolCallDetailLevelChange = useCallback(
+    (toolCallDetailLevel: AppSettings["toolCallDetailLevel"]) => {
+      void updateSettings({ toolCallDetailLevel });
+    },
+    [updateSettings],
+  );
+
+  const handleChatOutlineChange = useCallback(
+    (chatOutlineEnabled: boolean) => {
+      void updateSettings({ chatOutlineEnabled });
+    },
+    [updateSettings],
+  );
+
   const commitUiFontFamily = useCallback(
     (value: string) => {
       const sanitized = sanitizeFontFamily(value);
@@ -475,6 +594,24 @@ export function AppearanceSection() {
       <SettingsSection title={t("settings.appearance.theme.title")}>
         <View style={settingsStyles.card}>
           <ThemeRow value={settings.theme} onChange={handleThemeChange} />
+        </View>
+      </SettingsSection>
+      <SettingsSection title={t("settings.appearance.detailLevel.title")}>
+        <View style={settingsStyles.card}>
+          <AutoExpandReasoningRow
+            value={settings.autoExpandReasoning}
+            onChange={handleAutoExpandReasoningChange}
+          />
+          <ToolCallDetailRow
+            value={settings.toolCallDetailLevel}
+            onChange={handleToolCallDetailLevelChange}
+          />
+          {!isNative ? (
+            <ChatOutlineRow
+              value={settings.chatOutlineEnabled}
+              onChange={handleChatOutlineChange}
+            />
+          ) : null}
         </View>
       </SettingsSection>
       <SettingsSection title={t("settings.appearance.fonts.title")}>

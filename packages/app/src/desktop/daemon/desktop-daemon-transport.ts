@@ -30,7 +30,11 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
 
 export function buildLocalDaemonTransportUrl(target: LocalTransportTarget): string {
   const url = new URL(`${LOCAL_TRANSPORT_SCHEME}//${target.transportType}`);
-  url.searchParams.set("path", target.transportPath);
+  if (target.transportType === "tcp") {
+    url.searchParams.set("endpoint", target.endpoint);
+  } else {
+    url.searchParams.set("path", target.transportPath);
+  }
   return url.toString();
 }
 
@@ -40,21 +44,37 @@ function parseLocalDaemonTransportUrl(url: string): LocalTransportTarget {
     throw new Error(`Unsupported local transport URL: ${url}`);
   }
   const transportType = parsed.hostname;
-  const transportPath = parsed.searchParams.get("path")?.trim() ?? "";
-  if ((transportType !== "socket" && transportType !== "pipe") || !transportPath) {
-    throw new Error(`Invalid local transport target: ${url}`);
+  if (transportType === "tcp") {
+    const endpoint = parsed.searchParams.get("endpoint")?.trim() ?? "";
+    if (!endpoint) {
+      throw new Error(`Invalid local transport target: ${url}`);
+    }
+    return { transportType, endpoint };
   }
-  return {
-    transportType,
-    transportPath,
-  };
+  if (transportType === "socket" || transportType === "pipe") {
+    const transportPath = parsed.searchParams.get("path")?.trim() ?? "";
+    if (transportPath) {
+      return { transportType, transportPath };
+    }
+  }
+  throw new Error(`Invalid local transport target: ${url}`);
+}
+
+function withProtocols(
+  target: LocalTransportTarget,
+  protocols: string[] | undefined,
+): LocalTransportTarget {
+  if (!protocols || protocols.length === 0) {
+    return target;
+  }
+  return { ...target, protocols };
 }
 
 export function createDesktopLocalDaemonTransportFactory(
   rpc: LocalDaemonTransportRpc = defaultLocalDaemonTransportRpc,
 ): DaemonTransportFactory | null {
-  return ({ url }) => {
-    const target = parseLocalDaemonTransportUrl(url);
+  return ({ url, protocols }) => {
+    const target = withProtocols(parseLocalDaemonTransportUrl(url), protocols);
     let sessionId: string | null = null;
     let unlisten: (() => void) | null = null;
     let disposed = false;
@@ -63,7 +83,7 @@ export function createDesktopLocalDaemonTransportFactory(
     const openHandlers = new Set<() => void>();
     const closeHandlers = new Set<(event?: unknown) => void>();
     const errorHandlers = new Set<(event?: unknown) => void>();
-    const messageHandlers = new Set<(data: unknown) => void>();
+    const messageHandlers = new Set<(data: unknown, isBinary: boolean) => void>();
 
     const emitOpen = () => {
       if (didEmitOpen || disposed) {
@@ -84,9 +104,9 @@ export function createDesktopLocalDaemonTransportFactory(
         handler(event);
       }
     };
-    const emitMessage = (data: unknown) => {
+    const emitMessage = (data: unknown, isBinary: boolean) => {
       for (const handler of messageHandlers) {
-        handler(data);
+        handler(data, isBinary);
       }
     };
 
@@ -101,11 +121,11 @@ export function createDesktopLocalDaemonTransportFactory(
         }
         if (payload.kind === "message") {
           if (payload.text) {
-            emitMessage({ data: payload.text });
+            emitMessage(payload.text, false);
             return;
           }
           if (payload.binaryBase64) {
-            emitMessage({ data: decodeBase64ToBytes(payload.binaryBase64) });
+            emitMessage(decodeBase64ToBytes(payload.binaryBase64), true);
           }
           return;
         }

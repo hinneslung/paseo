@@ -5,10 +5,9 @@ import type { AgentManager } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
 import type { DaemonConfigStore } from "./daemon-config-store.js";
-import type { FileBackedChatService } from "./chat/chat-service.js";
-import type { LoopService } from "./loop-service.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
+import type { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { asInternals, createStub } from "./test-utils/class-mocks.js";
 import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
 import {
@@ -51,7 +50,12 @@ const sessionMock = vi.hoisted(() => {
     handleMessage = vi.fn(async () => {});
     handleBinaryFrame = vi.fn((_frame: unknown) => {});
     supports = vi.fn((capability: string) => this.args.clientCapabilities?.[capability] === true);
+    updateClientCapabilities = vi.fn((capabilities: Record<string, unknown> | null) => {
+      this.args.clientCapabilities = capabilities;
+    });
+    clearAgentTimelineSubscription = vi.fn();
     getClientActivity = vi.fn(() => null);
+    getSessionId = vi.fn(() => "mock-session-id");
     resetPeakInflight = vi.fn(() => {});
     getRuntimeMetrics = vi.fn(() => ({
       checkoutDiffTargetCount: 0,
@@ -82,20 +86,12 @@ vi.mock("./session.js", () => ({
   Session: sessionMock.MockSession,
 }));
 
-vi.mock("./push/token-store.js", () => ({
-  PushTokenStore: class {
-    getAllTokens(): string[] {
-      return [];
-    }
-  },
-}));
-
-vi.mock("./push/push-service.js", () => ({
-  PushService: class {
-    async sendPush(): Promise<void> {
-      // no-op
-    }
-  },
+vi.mock("./push/index.js", () => ({
+  createPushNotifications: () => ({
+    renew: () => undefined,
+    revoke: () => undefined,
+    send: async () => undefined,
+  }),
 }));
 
 import { z } from "zod";
@@ -105,7 +101,6 @@ import type { SpeechReadinessSnapshot } from "./speech/speech-runtime.js";
 
 interface WebSocketServerInternals {
   attachSocket(ws: unknown, req: unknown): Promise<void>;
-  socketMessageQueues: Map<unknown, Promise<void>>;
 }
 
 const TEST_DAEMON_VERSION = "1.2.3-test";
@@ -215,14 +210,25 @@ function createLogger() {
   return logger;
 }
 
-function createServer(options?: { speechReadiness?: SpeechReadinessSnapshot | null }) {
+function createWorkspaceAutoNameStub(): WorkspaceAutoName {
+  return createStub<WorkspaceAutoName>({
+    scheduleForWorktree: () => {},
+    scheduleForDirectory: () => {},
+  });
+}
+
+function createServer(options?: {
+  speechReadiness?: SpeechReadinessSnapshot | null;
+  logger?: ReturnType<typeof createLogger>;
+}) {
   const speechReadiness = options?.speechReadiness ?? null;
   const daemonConfigStore = {
     onChange: vi.fn(() => () => {}),
   };
+  const logger = options?.logger ?? createLogger();
   return new VoiceAssistantWebSocketServer(
     createStub<HTTPServer>({}),
-    createStub<pino.Logger>(createLogger()),
+    createStub<pino.Logger>(logger),
     "srv_test",
     createStub<AgentManager>({
       subscribe: vi.fn(() => () => {}),
@@ -242,6 +248,7 @@ function createServer(options?: { speechReadiness?: SpeechReadinessSnapshot | nu
     createStub<DaemonConfigStore>(daemonConfigStore),
     null,
     { allowedOrigins: new Set() },
+    createWorkspaceAutoNameStub(),
     undefined,
     speechReadiness
       ? {
@@ -264,8 +271,6 @@ function createServer(options?: { speechReadiness?: SpeechReadinessSnapshot | nu
     undefined,
     undefined,
     undefined,
-    createStub<FileBackedChatService>({}),
-    createStub<LoopService>({}),
     createStub<ScheduleService>({}),
     createStub<CheckoutDiffManager>({
       subscribe: vi.fn(),
@@ -398,7 +403,6 @@ async function attachRelayAndHello(params: {
 }) {
   await params.server.attachExternalSocket(params.socket, { transport: "relay" });
   params.socket.emit("message", JSON.stringify(createHelloMessage(params.clientId)));
-  await waitForSocketMessages(params.server, params.socket);
   expect(params.socket.sent.length).toBeGreaterThan(0);
   const envelope = parseSentEnvelope(params.socket.sent[0]);
   expect(envelope.type).toBe("session");
@@ -418,7 +422,6 @@ async function attachDirectAndHello(params: {
     createDirectRequest(),
   );
   params.socket.emit("message", JSON.stringify(createHelloMessage(params.clientId)));
-  await waitForSocketMessages(params.server, params.socket);
   expect(params.socket.sent.length).toBeGreaterThan(0);
   const envelope = parseSentEnvelope(params.socket.sent[0]);
   expect(envelope.type).toBe("session");
@@ -428,11 +431,34 @@ async function attachDirectAndHello(params: {
   return serverInfo!;
 }
 
-async function waitForSocketMessages(
-  server: VoiceAssistantWebSocketServer,
-  socket: MockSocket,
-): Promise<void> {
-  await asInternals<WebSocketServerInternals>(server).socketMessageQueues.get(socket);
+function holdNextSessionMessage(session: (typeof sessionMock.instances)[number]): {
+  finish: () => void;
+} {
+  let finish = () => {};
+  session.handleMessage.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  return {
+    finish: () => finish(),
+  };
+}
+
+function holdSessionCleanup(session: (typeof sessionMock.instances)[number]): {
+  finish: () => void;
+} {
+  let finish = () => {};
+  session.cleanup.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  return {
+    finish: () => finish(),
+  };
 }
 
 describe("relay external socket reconnect behavior", () => {
@@ -489,8 +515,6 @@ describe("relay external socket reconnect behavior", () => {
         }),
       ),
     );
-    await waitForSocketMessages(server, socket);
-
     expect(sessionMock.instances).toHaveLength(1);
     const session = sessionMock.instances[0];
     expect(session.args.clientCapabilities).toEqual({
@@ -498,6 +522,36 @@ describe("relay external socket reconnect behavior", () => {
     });
 
     await server.close();
+  });
+
+  test("rejects sockets attached after shutdown begins", async () => {
+    const server = createServer();
+    const existingSocket = new MockSocket();
+    await attachRelayAndHello({
+      server,
+      socket: existingSocket,
+      clientId: "existing-client",
+    });
+
+    const heldCleanup = holdSessionCleanup(sessionMock.instances[0]);
+    const closePromise = server.close();
+
+    const lateSocket = new MockSocket();
+    try {
+      await server.attachExternalSocket(lateSocket, { transport: "relay" });
+      lateSocket.emit("message", JSON.stringify(createHelloMessage("late-client")));
+
+      expect({
+        readyState: lateSocket.readyState,
+        sessionCount: sessionMock.instances.length,
+      }).toEqual({
+        readyState: 3,
+        sessionCount: 1,
+      });
+    } finally {
+      heldCleanup.finish();
+      await closePromise;
+    }
   });
 
   test("closes pending connection when hello timeout elapses", async () => {
@@ -586,11 +640,176 @@ describe("relay external socket reconnect behavior", () => {
         },
       }),
     );
-    await waitForSocketMessages(server, socket);
-
     expect(closeCode).toBe(4002);
     expect(["Invalid hello", "Session message before hello"]).toContain(closeReason);
     expect(sessionMock.instances).toHaveLength(0);
+
+    await server.close();
+  });
+
+  test("logs control RPCs with the socket identity", async () => {
+    const logger = createLogger();
+    const server = createServer({ logger });
+    const socket = new MockSocket();
+
+    await server.attachExternalSocket(socket, {
+      transport: "relay",
+      relayConnectionId: "relay-conn-1",
+    });
+    socket.emit("message", JSON.stringify(createHelloMessage("cid-control-log")));
+    socket.emit(
+      "message",
+      JSON.stringify({
+        type: "session",
+        message: {
+          type: "shutdown_server_request",
+          requestId: "shutdown-1",
+        },
+      }),
+    );
+    await Promise.resolve();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: expect.stringMatching(/^conn_/),
+        transport: "relay",
+        relayConnectionId: "relay-conn-1",
+        clientId: "cid-control-log",
+        sessionId: "mock-session-id",
+        requestType: "shutdown_server_request",
+        requestId: "shutdown-1",
+        reason: "client_shutdown_rpc",
+      }),
+      "ws_control_rpc_received",
+    );
+
+    await server.close();
+  });
+
+  test("responds to top-level ping while provider diagnostic is still running", async () => {
+    const server = createServer();
+    const socket = new MockSocket();
+    await attachRelayAndHello({
+      server,
+      socket,
+      clientId: "cid-ping-during-provider-diagnostic",
+    });
+
+    const session = sessionMock.instances[0];
+    const providerDiagnostic = holdNextSessionMessage(session);
+
+    const sentBeforeDiagnostic = socket.sent.length;
+    socket.emit(
+      "message",
+      JSON.stringify({
+        type: "session",
+        message: {
+          type: "provider_diagnostic_request",
+          provider: "grok",
+          requestId: "slow-provider-diagnostic",
+        },
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(session.handleMessage).toHaveBeenCalledTimes(1);
+    });
+
+    socket.emit("message", JSON.stringify({ type: "ping" }));
+    await Promise.resolve();
+
+    expect(sentEnvelopes(socket).slice(sentBeforeDiagnostic)).toContainEqual({ type: "pong" });
+
+    providerDiagnostic.finish();
+    await Promise.resolve();
+    await server.close();
+  });
+
+  test("routes later session requests while provider diagnostic is still running", async () => {
+    const server = createServer();
+    const socket = new MockSocket();
+    await attachRelayAndHello({
+      server,
+      socket,
+      clientId: "cid-session-request-during-provider-diagnostic",
+    });
+
+    const session = sessionMock.instances[0];
+    const providerDiagnostic = holdNextSessionMessage(session);
+
+    socket.emit(
+      "message",
+      JSON.stringify({
+        type: "session",
+        message: {
+          type: "provider_diagnostic_request",
+          provider: "grok",
+          requestId: "slow-provider-diagnostic",
+        },
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(session.handleMessage).toHaveBeenCalledTimes(1);
+    });
+
+    socket.emit(
+      "message",
+      JSON.stringify({
+        type: "session",
+        message: {
+          type: "ping",
+          requestId: "second-session-request",
+          clientSentAt: Date.now(),
+        },
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(session.handleMessage).toHaveBeenCalledTimes(2);
+    });
+
+    providerDiagnostic.finish();
+    await Promise.resolve();
+    await server.close();
+  });
+
+  test("sends rpc_error when an async session request fails", async () => {
+    const server = createServer();
+    const socket = new MockSocket();
+    await attachRelayAndHello({
+      server,
+      socket,
+      clientId: "cid-session-request-failure",
+    });
+
+    const session = sessionMock.instances[0];
+    session.handleMessage.mockRejectedValueOnce(new Error("handler exploded"));
+
+    const sentBeforeRequest = socket.sent.length;
+    socket.emit(
+      "message",
+      JSON.stringify({
+        type: "session",
+        message: {
+          type: "provider_diagnostic_request",
+          provider: "grok",
+          requestId: "failing-provider-diagnostic",
+        },
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(sentEnvelopes(socket).slice(sentBeforeRequest)).toContainEqual({
+        type: "session",
+        message: {
+          type: "rpc_error",
+          payload: {
+            requestId: "failing-provider-diagnostic",
+            requestType: "provider_diagnostic_request",
+            error: "Invalid message",
+            code: "invalid_message",
+          },
+        },
+      });
+    });
 
     await server.close();
   });
@@ -687,6 +906,25 @@ describe("relay external socket reconnect behavior", () => {
     await vi.advanceTimersByTimeAsync(90_000);
     expect(session.cleanup).toHaveBeenCalledTimes(1);
 
+    await server.close();
+  });
+
+  test("advertises current features in initial server_info", async () => {
+    const server = createServer();
+    const socket = new MockSocket();
+
+    const serverInfo = await attachRelayAndHello({
+      server,
+      socket,
+      clientId: "cid-stable-project-identity",
+    });
+
+    expect(serverInfo.features?.stableProjectIdentity).toBe(true);
+    expect(serverInfo.features?.canonicalSubmittedPrompts).toBe(true);
+    expect(serverInfo.features?.providersSnapshotCwd).toBe(true);
+    expect(serverInfo.features?.["terminal-input-mode-replay"]).toBe(true);
+    expect(serverInfo.features?.["terminal-size-ownership"]).toBe(true);
+    expect(serverInfo.features?.agentTurnIdentity).toBeUndefined();
     await server.close();
   });
 
@@ -793,13 +1031,52 @@ describe("relay external socket reconnect behavior", () => {
         }),
       ),
     );
-    await waitForSocketMessages(server, socket);
-
     expect(session.handleBinaryFrame).toHaveBeenCalledTimes(1);
     const { frame } = BinaryFrameSchema.parse(session.handleBinaryFrame.mock.calls[0]?.[0]);
     expect(frame.opcode).toBe(TerminalStreamOpcode.Input);
     expect(frame.slot).toBe(9);
     expect(new TextDecoder().decode(frame.payload)).toBe("ls\r");
+
+    await server.close();
+  });
+
+  test("sends status error when async binary frame handling fails", async () => {
+    const server = createServer();
+
+    const socket = new MockSocket();
+    await attachRelayAndHello({
+      server,
+      socket,
+      clientId: "cid-binary-inbound-failure",
+    });
+    expect(sessionMock.instances).toHaveLength(1);
+    const session = sessionMock.instances[0];
+    session.handleBinaryFrame.mockRejectedValueOnce(new Error("binary exploded"));
+
+    const sentBeforeFrame = socket.sent.length;
+    socket.emit(
+      "message",
+      Buffer.from(
+        encodeTerminalStreamFrame({
+          opcode: TerminalStreamOpcode.Input,
+          slot: 11,
+          payload: new TextEncoder().encode("pwd\r"),
+        }),
+      ),
+    );
+
+    await vi.waitFor(() => {
+      expect(sentEnvelopes(socket).slice(sentBeforeFrame)).toContainEqual({
+        type: "session",
+        message: {
+          type: "status",
+          payload: {
+            status: "error",
+            message: "Invalid message: binary exploded",
+          },
+        },
+      });
+    });
 
     await server.close();
   });

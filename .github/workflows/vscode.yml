@@ -1,0 +1,121 @@
+name: VS Code Extension
+
+on:
+  # vscode-extension is transitional; narrow to [main] once the extension lands on main.
+  push:
+    branches: [main, vscode-extension]
+  pull_request:
+    branches: [main, vscode-extension]
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # CI does not use the CUDA execution provider, and the onnxruntime-node
+  # postinstall download from NuGet is large enough to make npm ci flaky.
+  ONNXRUNTIME_NODE_INSTALL: skip
+
+jobs:
+  # vscode-smoke covers Layers 1 + 2; vscode-e2e covers Layer 3 per docs/vscode-ci.md.
+  vscode-build:
+    runs-on: ubuntu-latest
+    env:
+      # This workflow does not run Electron; skipping the hosted binary avoids
+      # unrelated npm ci failures when Electron's CDN returns 504.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: ./.github/actions/npm-install
+
+      - name: Build and package VS Code extension
+        run: npm run build:vscode
+
+      - name: Typecheck VS Code extension
+        run: npm run typecheck --workspace=paseo-vscode
+
+      # The package test script also runs @vscode/test-electron smoke tests,
+      # which need a display. Keep CI scoped to unit tests for now.
+      - name: Run VS Code unit tests
+        run: cd packages/vscode && npx vitest run src/**/*.test.ts --bail=1
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paseo-vsix
+          path: packages/vscode/paseo.vsix
+
+  vscode-smoke:
+    name: vscode-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: ./.github/actions/npm-install
+
+      - name: Build VS Code extension
+        run: npm run build:vscode
+
+      - name: Build server and CLI for smoke
+        run: npm run build:server
+
+      - name: Cache VS Code test download
+        uses: actions/cache@v4
+        with:
+          path: packages/vscode/.vscode-test
+          key: vscode-test-${{ runner.os }}
+
+      - name: Run VS Code smoke test (Linux)
+        if: runner.os == 'Linux'
+        working-directory: packages/vscode
+        run: xvfb-run -a node scripts/run-smoke-with-daemon.mjs
+
+      - name: Run VS Code smoke test (Windows)
+        if: runner.os == 'Windows'
+        working-directory: packages/vscode
+        run: node scripts/run-smoke-with-daemon.mjs
+
+  vscode-e2e:
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: ./.github/actions/npm-install
+
+      - name: Build VS Code extension
+        run: npm run build:vscode
+
+      - name: Build server and CLI for e2e
+        run: npm run build:server
+
+      - name: Cache VS Code test download
+        uses: actions/cache@v4
+        with:
+          path: packages/vscode/.vscode-test
+          key: vscode-test-e2e-${{ runner.os }}
+
+      - name: Run VS Code e2e tests
+        working-directory: packages/vscode
+        run: xvfb-run -a node scripts/vscode-e2e.mjs
+
+      - name: Upload VS Code e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-e2e-artifacts
+          path: packages/vscode/artifacts/vscode-e2e
+          if-no-files-found: ignore

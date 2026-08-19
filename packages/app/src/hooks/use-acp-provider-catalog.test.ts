@@ -34,6 +34,10 @@ describe("ACP provider catalog", () => {
     }
   });
 
+  it("does not offer Pi's unsupported ACP adapter", () => {
+    expect(ACP_PROVIDER_CATALOG.some((entry) => entry.id === "pi-acp")).toBe(false);
+  });
+
   it("uses PATH commands for entries that were binary distributions upstream", () => {
     expect(findProvider("amp-acp").command).toEqual(["amp-acp"]);
     expect(findProvider("cursor").command).toEqual(["cursor-agent", "acp"]);
@@ -43,6 +47,7 @@ describe("ACP provider catalog", () => {
     expect(findProvider("junie").command).toEqual(["junie", "--acp", "true"]);
     expect(findProvider("kiro").command).toEqual(["kiro-cli", "acp"]);
     expect(findProvider("poolside").command).toEqual(["pool", "acp"]);
+    expect(findProvider("traecli").command).toEqual(["traecli", "acp", "serve"]);
   });
 
   it("maps a catalog entry to the daemon provider config patch", () => {

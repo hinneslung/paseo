@@ -13,7 +13,7 @@ describe("useDraftAgentCreateFlow", () => {
     useCreateFlowStore.setState({ pendingByDraftId: {} });
   });
 
-  it("renders a prepared new-workspace create attempt as optimistic chat before continuing it", async () => {
+  it("renders a prepared new-workspace submission before continuing it", async () => {
     const image: UserMessageImageAttachment = {
       id: "image-1",
       mimeType: "image/png",
@@ -60,13 +60,13 @@ describe("useDraftAgentCreateFlow", () => {
 
     expect(result.current.isSubmitting).toBe(true);
     expect(result.current.draftAgent).toEqual({ currentAttempt: attempt });
-    expect(result.current.optimisticStreamItems).toEqual([
+    expect(result.current.submittedStreamItems).toEqual([
       {
         kind: "user_message",
         id: "msg-prepared",
+        clientMessageId: "msg-prepared",
         text: "build this",
         timestamp: attempt.timestamp,
-        optimistic: true,
         images: [image],
         attachments: [attachment],
       },
@@ -83,6 +83,65 @@ describe("useDraftAgentCreateFlow", () => {
       text: "build this",
       images: [image],
       attachments: [attachment],
+      cwd: "/repo",
+    });
+    expect(onCreateSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows retrying an empty prompt when the draft still has context attachments", async () => {
+    const attachment = {
+      kind: "chat_history",
+      id: "chat-history-1",
+      attachment: {
+        type: "text",
+        mimeType: "text/plain",
+        contextKind: "chat_history",
+        title: "Chat history",
+        text: "Previous conversation",
+      },
+      source: {
+        serverId: "server-1",
+        agentId: "agent-source",
+      },
+    } as const;
+    const createRequest = vi.fn(async () => ({
+      agentId: "agent-1",
+      result: { id: "agent-1" },
+    }));
+    const onCreateSuccess = vi.fn();
+    const validateBeforeSubmit = vi.fn(() => null);
+
+    const { result } = renderHook(() =>
+      useDraftAgentCreateFlow({
+        draftId: "draft-1",
+        getPendingServerId: () => "server-1",
+        buildDraftAgent: (currentAttempt) => ({ currentAttempt }),
+        createRequest,
+        onCreateSuccess,
+        validateBeforeSubmit,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleCreateFromInput({
+        text: "   ",
+        attachments: [attachment],
+        cwd: "/repo",
+      });
+    });
+
+    expect(validateBeforeSubmit).toHaveBeenCalledWith({
+      text: "",
+      attachments: [attachment],
+      cwd: "/repo",
+    });
+    expect(createRequest).toHaveBeenCalledWith({
+      attempt: expect.objectContaining({
+        text: "",
+        attachments: [attachment.attachment],
+      }),
+      text: "",
+      attachments: [attachment.attachment],
       cwd: "/repo",
     });
     expect(onCreateSuccess).toHaveBeenCalledTimes(1);

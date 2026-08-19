@@ -4,6 +4,7 @@ import {
 } from "@/contexts/session-workspace-upserts";
 import { useSessionStore, type WorkspaceDescriptor } from "@/stores/session-store";
 import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
+import { i18n } from "@/i18n/i18next";
 
 export interface WorkspaceArchiveTarget {
   serverId: string;
@@ -19,6 +20,7 @@ interface OptimisticWorkspaceArchiveSnapshot {
 }
 
 export interface WorkspaceArchiveFailure {
+  serverId: string;
   workspaceId: string;
   error: unknown;
 }
@@ -27,6 +29,8 @@ function isWorkspaceArchiveFailure(error: unknown): error is WorkspaceArchiveFai
   return (
     typeof error === "object" &&
     error !== null &&
+    "serverId" in error &&
+    typeof error.serverId === "string" &&
     "workspaceId" in error &&
     typeof error.workspaceId === "string" &&
     "error" in error
@@ -77,10 +81,8 @@ async function archiveWorkspaceOrThrow(input: {
 export async function archiveWorkspaceOptimistically(input: {
   client: WorkspaceArchiveClient;
   workspace: WorkspaceArchiveTarget;
-  afterHide?: () => void;
 }): Promise<void> {
   const snapshot = hideWorkspaceOptimistically(input.workspace);
-  input.afterHide?.();
 
   try {
     await archiveWorkspaceOrThrow({
@@ -98,18 +100,31 @@ export async function archiveWorkspaceOptimistically(input: {
 }
 
 export async function archiveWorkspacesOptimistically(input: {
-  client: WorkspaceArchiveClient;
+  getClient: (serverId: string) => WorkspaceArchiveClient | null;
   workspaces: WorkspaceArchiveTarget[];
 }): Promise<WorkspaceArchiveFailure[]> {
   const results = await Promise.allSettled(
     input.workspaces.map(async (workspace) => {
+      const client = input.getClient(workspace.serverId);
+      if (!client) {
+        throw {
+          serverId: workspace.serverId,
+          workspaceId: workspace.workspaceId,
+          error: new Error(i18n.t("sidebar.workspace.toasts.hostDisconnected")),
+        } satisfies WorkspaceArchiveFailure;
+      }
+
       try {
         await archiveWorkspaceOptimistically({
-          client: input.client,
+          client,
           workspace,
         });
       } catch (error) {
-        throw { workspaceId: workspace.workspaceId, error } satisfies WorkspaceArchiveFailure;
+        throw {
+          serverId: workspace.serverId,
+          workspaceId: workspace.workspaceId,
+          error,
+        } satisfies WorkspaceArchiveFailure;
       }
     }),
   );

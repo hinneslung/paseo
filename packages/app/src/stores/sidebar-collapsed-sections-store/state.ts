@@ -1,11 +1,26 @@
+import { z } from "zod";
+
 export interface CollapsedProjectsState {
   collapsedProjectKeys: Set<string>;
   collapsedStatusGroupKeys: Set<string>;
+  collapsedPinned: boolean;
 }
 
 export interface PersistedCollapsedProjects {
-  collapsedProjectKeys?: unknown;
-  collapsedStatusGroupKeys?: unknown;
+  collapsedProjectKeys?: string[];
+  collapsedStatusGroupKeys?: string[];
+  collapsedPinned?: boolean;
+}
+
+export const PersistedCollapsedProjectsSchema: z.ZodType<PersistedCollapsedProjects> =
+  z.strictObject({
+    collapsedProjectKeys: z.array(z.string()).optional(),
+    collapsedStatusGroupKeys: z.array(z.string()).optional(),
+    collapsedPinned: z.boolean().optional(),
+  });
+
+export function togglePinnedCollapsed(state: CollapsedProjectsState): CollapsedProjectsState {
+  return { ...state, collapsedPinned: !state.collapsedPinned };
 }
 
 export function toggleProjectCollapsed(
@@ -51,25 +66,35 @@ export function setProjectCollapsed(
 export function serializeCollapsedProjects(state: CollapsedProjectsState): {
   collapsedProjectKeys: string[];
   collapsedStatusGroupKeys: string[];
+  collapsedPinned: boolean;
 } {
   return {
     collapsedProjectKeys: Array.from(state.collapsedProjectKeys),
     collapsedStatusGroupKeys: Array.from(state.collapsedStatusGroupKeys),
+    collapsedPinned: state.collapsedPinned,
   };
 }
 
 export function mergePersistedCollapsedProjects<S extends CollapsedProjectsState>(
-  persisted: PersistedCollapsedProjects | undefined,
+  persistedValue: unknown,
   current: S,
 ): S {
-  if (!persisted?.collapsedProjectKeys) {
-    if (!persisted?.collapsedStatusGroupKeys) return current;
+  const result = PersistedCollapsedProjectsSchema.safeParse(persistedValue);
+  if (!result.success) {
+    return current;
   }
-  const restoredProjects = deserializeCollapsedKeys(persisted.collapsedProjectKeys);
-  const restoredStatusGroups = deserializeCollapsedKeys(persisted.collapsedStatusGroupKeys);
+  const persisted = result.data;
+  const restoredProjects = deserializeCollapsedKeys(
+    persisted.collapsedProjectKeys ?? Array.from(current.collapsedProjectKeys),
+  );
+  const restoredStatusGroups = deserializeCollapsedKeys(
+    persisted.collapsedStatusGroupKeys ?? Array.from(current.collapsedStatusGroupKeys),
+  );
+  const restoredPinned = persisted.collapsedPinned ?? current.collapsedPinned;
   if (
     areSetsEqual(current.collapsedProjectKeys, restoredProjects) &&
-    areSetsEqual(current.collapsedStatusGroupKeys, restoredStatusGroups)
+    areSetsEqual(current.collapsedStatusGroupKeys, restoredStatusGroups) &&
+    current.collapsedPinned === restoredPinned
   ) {
     return current;
   }
@@ -77,14 +102,12 @@ export function mergePersistedCollapsedProjects<S extends CollapsedProjectsState
     ...current,
     collapsedProjectKeys: restoredProjects,
     collapsedStatusGroupKeys: restoredStatusGroups,
+    collapsedPinned: restoredPinned,
   };
 }
 
-function deserializeCollapsedKeys(value: unknown): Set<string> {
-  if (!Array.isArray(value)) {
-    return new Set();
-  }
-  return new Set(value.filter((key): key is string => typeof key === "string"));
+function deserializeCollapsedKeys(value: string[]): Set<string> {
+  return new Set(value);
 }
 
 function areSetsEqual(left: Set<string>, right: Set<string>): boolean {

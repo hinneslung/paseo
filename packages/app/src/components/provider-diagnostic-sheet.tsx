@@ -3,14 +3,7 @@ import { AlertTriangle, Copy, FileText, Plus, RotateCw, Trash2 } from "lucide-re
 import type { TFunction } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  ActivityIndicator,
-  Pressable,
-  type PressableStateCallbackType,
-  ScrollView,
-  Text,
-  View,
-} from "react-native";
+import { Pressable, type PressableStateCallbackType, Text, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import {
   AdaptiveModalSheet,
@@ -19,6 +12,7 @@ import {
 } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { ScrollableCodeSurface, SurfaceCard } from "@/components/ui/scrollable-code-surface";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isWeb } from "@/constants/platform";
 import { useToast } from "@/contexts/toast-context";
@@ -29,9 +23,13 @@ import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { settingsStyles } from "@/styles/settings";
 import { resolveProviderLabel } from "@/utils/provider-definitions";
 import { formatTimeAgo } from "@/utils/time";
-import { compareMatchScores, scoreTextFields } from "@/utils/score-match";
+import { compareMatchScores, scoreTextFields } from "@getpaseo/protocol/search/text-match";
 import type { AgentModelDefinition, AgentProvider } from "@getpaseo/protocol/agent-types";
 import type { ProviderProfileModel } from "@getpaseo/protocol/provider-config";
+import {
+  resolveProviderDiscoveredModels,
+  type ProviderDiscoveredModelsCache,
+} from "./provider-diagnostic-models";
 
 interface ProviderDiagnosticSheetProps {
   provider: string;
@@ -221,7 +219,7 @@ function AddCustomModelSubSheet({
           autoCorrect={false}
           returnKeyType="done"
           // @ts-expect-error - outlineStyle is web-only
-          style={FORM_INPUT_STYLE}
+          style={[sheetStyles.formInput, isWeb && { outlineStyle: "none" }]}
         />
         {error ? <Text style={sheetStyles.errorText}>{error}</Text> : null}
         <View style={sheetStyles.formActions}>
@@ -359,26 +357,26 @@ function DiagnosticSubSheet({
   let body: React.ReactNode;
   if (loading && !diagnostic) {
     body = (
-      <View style={sheetStyles.codeBlockLoading}>
-        <ActivityIndicator size="small" color={theme.colors.foregroundMuted} />
-        <Text style={sheetStyles.mutedText}>{t("settings.providers.diagnostic.running")}</Text>
-      </View>
+      <SurfaceCard key={visible ? "visible" : "hidden"}>
+        <View style={sheetStyles.codeBlockLoading}>
+          <LoadingSpinner size="small" color={theme.colors.foregroundMuted} />
+          <Text style={sheetStyles.mutedText}>{t("settings.providers.diagnostic.running")}</Text>
+        </View>
+      </SurfaceCard>
     );
   } else if (diagnostic) {
     body = (
-      <ScrollView style={sheetStyles.codeScroll} contentContainerStyle={sheetStyles.codeContent}>
-        <ScrollView horizontal showsHorizontalScrollIndicator>
-          <Text style={sheetStyles.codeText} selectable dataSet={CODE_SURFACE_DATASET}>
-            {diagnostic}
-          </Text>
-        </ScrollView>
-      </ScrollView>
+      <ScrollableCodeSurface key={visible ? "visible" : "hidden"} maxHeight={480}>
+        {diagnostic}
+      </ScrollableCodeSurface>
     );
   } else {
     body = (
-      <View style={sheetStyles.codeBlockLoading}>
-        <Text style={sheetStyles.mutedText}>{t("settings.providers.diagnostic.none")}</Text>
-      </View>
+      <SurfaceCard key={visible ? "visible" : "hidden"}>
+        <View style={sheetStyles.codeBlockLoading}>
+          <Text style={sheetStyles.mutedText}>{t("settings.providers.diagnostic.none")}</Text>
+        </View>
+      </SurfaceCard>
     );
   }
 
@@ -391,7 +389,7 @@ function DiagnosticSubSheet({
       scrollable={false}
       testID="provider-diagnostic-sheet"
     >
-      <View style={DIAGNOSTIC_CARD_STYLE}>{body}</View>
+      {body}
     </AdaptiveModalSheet>
   );
 }
@@ -433,7 +431,9 @@ function renderProviderSheetFooter({
   const contentStyle = isCompact ? sheetStyles.compactFooterContent : sheetStyles.footerContent;
   const actionsStyle = isCompact ? sheetStyles.compactFooterActions : sheetStyles.footerActions;
   const buttonStyle = isCompact ? sheetStyles.compactFooterButton : null;
-  const metaStyle = isCompact ? COMPACT_FOOTER_META_STYLE : sheetStyles.footerMeta;
+  const metaStyle = isCompact
+    ? [sheetStyles.footerMeta, sheetStyles.compactFooterMeta]
+    : sheetStyles.footerMeta;
 
   return (
     <View style={contentStyle}>
@@ -498,7 +498,7 @@ function ProviderModalBody(props: ProviderModalBodyProps) {
   if (discoveredCount === 0 && additionalCount === 0 && providerSnapshotRefreshing) {
     return (
       <View style={sheetStyles.emptyState}>
-        <ActivityIndicator size="small" color={theme.colors.foregroundMuted} />
+        <LoadingSpinner size="small" color={theme.colors.foregroundMuted} />
         <Text style={sheetStyles.mutedText}>{t("settings.providers.models.loading")}</Text>
       </View>
     );
@@ -599,21 +599,16 @@ export function ProviderDiagnosticSheet({
       : null;
   const modelsRefreshing = isRefreshing || providerSnapshotRefreshing;
 
-  const stableDiscoveredRef = useRef<AgentModelDefinition[]>([]);
+  const stableDiscoveredRef = useRef<ProviderDiscoveredModelsCache | null>(null);
   const currentModels = providerEntry?.models;
-  if (currentModels && currentModels.length > 0) {
-    stableDiscoveredRef.current = currentModels;
-  }
-
-  const discoveredModels = useMemo(() => {
-    if (currentModels && currentModels.length > 0) {
-      return currentModels;
-    }
-    if (providerSnapshotRefreshing) {
-      return stableDiscoveredRef.current;
-    }
-    return [];
-  }, [currentModels, providerSnapshotRefreshing]);
+  const { models: discoveredModels, cache: nextDiscoveredCache } = resolveProviderDiscoveredModels({
+    serverId,
+    provider,
+    currentModels,
+    providerSnapshotRefreshing,
+    previousCache: stableDiscoveredRef.current,
+  });
+  stableDiscoveredRef.current = nextDiscoveredCache;
 
   const [clockTick, setClockTick] = useState(0);
   useEffect(() => {
@@ -863,22 +858,6 @@ const sheetStyles = StyleSheet.create((theme) => ({
     justifyContent: "flex-end",
     gap: theme.spacing[2],
   },
-  diagnosticCard: {
-    overflow: "hidden",
-  },
-  codeScroll: {
-    maxHeight: 480,
-  },
-  codeContent: {
-    paddingVertical: theme.spacing[3],
-    paddingHorizontal: theme.spacing[4],
-  },
-  codeText: {
-    fontFamily: theme.fontFamily.mono,
-    fontSize: theme.fontSize.code,
-    color: theme.colors.foreground,
-    lineHeight: 18,
-  },
   codeBlockLoading: {
     paddingVertical: theme.spacing[4],
     paddingHorizontal: theme.spacing[4],
@@ -888,10 +867,6 @@ const sheetStyles = StyleSheet.create((theme) => ({
   },
 }));
 
-const FORM_INPUT_STYLE = [sheetStyles.formInput, isWeb && { outlineStyle: "none" }];
-const COMPACT_FOOTER_META_STYLE = [sheetStyles.footerMeta, sheetStyles.compactFooterMeta];
-
 const MAIN_SNAP_POINTS = ["65%", "92%"];
 const ADD_SNAP_POINTS = ["40%"];
 const DIAGNOSTIC_SNAP_POINTS = ["50%", "85%"];
-const DIAGNOSTIC_CARD_STYLE = [settingsStyles.card, sheetStyles.diagnosticCard];

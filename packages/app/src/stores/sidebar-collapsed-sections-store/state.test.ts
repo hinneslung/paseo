@@ -4,12 +4,17 @@ import {
   mergePersistedCollapsedProjects,
   serializeCollapsedProjects,
   setProjectCollapsed,
+  togglePinnedCollapsed,
   toggleProjectCollapsed,
   toggleStatusGroupCollapsed,
 } from "@/stores/sidebar-collapsed-sections-store/state";
 
 function emptyState(): CollapsedProjectsState {
-  return { collapsedProjectKeys: new Set(), collapsedStatusGroupKeys: new Set() };
+  return {
+    collapsedProjectKeys: new Set(),
+    collapsedStatusGroupKeys: new Set(),
+    collapsedPinned: false,
+  };
 }
 
 describe("sidebar collapsed projects transitions", () => {
@@ -29,21 +34,31 @@ describe("sidebar collapsed projects transitions", () => {
     const state: CollapsedProjectsState = {
       collapsedProjectKeys: new Set(["project-a", "project-b"]),
       collapsedStatusGroupKeys: new Set(["running"]),
+      collapsedPinned: true,
     };
 
     expect(serializeCollapsedProjects(state)).toEqual({
       collapsedProjectKeys: ["project-a", "project-b"],
       collapsedStatusGroupKeys: ["running"],
+      collapsedPinned: true,
     });
   });
 
-  it("restores collapsed project keys from persisted preferences", () => {
+  it("toggles and restores the pinned section collapse flag", () => {
+    const toggled = togglePinnedCollapsed(emptyState());
+    expect(toggled.collapsedPinned).toBe(true);
+
+    const restored = mergePersistedCollapsedProjects({ collapsedPinned: true }, emptyState());
+    expect(restored.collapsedPinned).toBe(true);
+  });
+
+  it("rejects the complete value when a persisted project key is invalid", () => {
     const restored = mergePersistedCollapsedProjects(
       { collapsedProjectKeys: ["project-a", "project-b", 42] },
       emptyState(),
     );
 
-    expect(Array.from(restored.collapsedProjectKeys)).toEqual(["project-a", "project-b"]);
+    expect(Array.from(restored.collapsedProjectKeys)).toEqual([]);
     expect(Array.from(restored.collapsedStatusGroupKeys)).toEqual([]);
   });
 

@@ -12,6 +12,7 @@ import {
 } from "@/workspace/workspace-archive";
 
 const SERVER_ID = "workspace-archive-test";
+const SECOND_SERVER_ID = "workspace-archive-test-2";
 
 type ArchiveWorkspacePayload = Awaited<ReturnType<DaemonClient["archiveWorkspace"]>>;
 
@@ -75,8 +76,12 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
+function storedWorkspaceOn(serverId: string, id: string): WorkspaceDescriptor | undefined {
+  return useSessionStore.getState().sessions[serverId]?.workspaces.get(id);
+}
+
 function storedWorkspace(id: string): WorkspaceDescriptor | undefined {
-  return useSessionStore.getState().sessions[SERVER_ID]?.workspaces.get(id);
+  return storedWorkspaceOn(SERVER_ID, id);
 }
 
 beforeEach(() => {
@@ -86,6 +91,8 @@ beforeEach(() => {
 afterEach(() => {
   clearWorkspaceArchivePending({ serverId: SERVER_ID, workspaceId: "workspace-1" });
   clearWorkspaceArchivePending({ serverId: SERVER_ID, workspaceId: "workspace-2" });
+  clearWorkspaceArchivePending({ serverId: SECOND_SERVER_ID, workspaceId: "workspace-1" });
+  clearWorkspaceArchivePending({ serverId: SECOND_SERVER_ID, workspaceId: "workspace-2" });
   useSessionStore.setState((state) => ({ ...state, sessions: {} }));
 });
 
@@ -137,23 +144,6 @@ describe("archiveWorkspaceOptimistically", () => {
       }),
     ).toBe(false);
   });
-
-  it("runs the after-hide hook after local state is hidden", async () => {
-    const archived = workspace();
-    useSessionStore.getState().mergeWorkspaces(SERVER_ID, [archived]);
-    const client = createClient(vi.fn(async () => archivePayload({ workspaceId: archived.id })));
-    const afterHide = vi.fn(() => {
-      expect(storedWorkspace(archived.id)).toBeUndefined();
-    });
-
-    await archiveWorkspaceOptimistically({
-      client,
-      workspace: target(),
-      afterHide,
-    });
-
-    expect(afterHide).toHaveBeenCalledOnce();
-  });
 });
 
 describe("archiveWorkspacesOptimistically", () => {
@@ -175,7 +165,7 @@ describe("archiveWorkspacesOptimistically", () => {
     );
 
     const failures = await archiveWorkspacesOptimistically({
-      client,
+      getClient: () => client,
       workspaces: [target({ workspaceId: first.id }), target({ workspaceId: second.id })],
     });
 
@@ -183,5 +173,48 @@ describe("archiveWorkspacesOptimistically", () => {
     expect(failures[0]?.workspaceId).toBe(second.id);
     expect(storedWorkspace(first.id)).toBeUndefined();
     expect(storedWorkspace(second.id)).toEqual(second);
+  });
+
+  it("archives each workspace through its own server client", async () => {
+    const first = workspace({ id: "workspace-1" });
+    const second = workspace({
+      id: "workspace-2",
+      workspaceDirectory: "/repo/project/workspace-2",
+      name: "workspace-2",
+    });
+    useSessionStore.getState().initializeSession(SECOND_SERVER_ID, {} as DaemonClient);
+    useSessionStore.getState().mergeWorkspaces(SERVER_ID, [first]);
+    useSessionStore.getState().mergeWorkspaces(SECOND_SERVER_ID, [second]);
+
+    const archivedByServer = new Map<string, string[]>();
+    const clientFor = (serverId: string) =>
+      createClient(async (workspaceId) => {
+        archivedByServer.set(serverId, [...(archivedByServer.get(serverId) ?? []), workspaceId]);
+        return archivePayload({ workspaceId });
+      });
+
+    const failures = await archiveWorkspacesOptimistically({
+      getClient: (serverId) => clientFor(serverId),
+      workspaces: [
+        target({
+          serverId: SERVER_ID,
+          workspaceId: first.id,
+        }),
+        target({
+          serverId: SECOND_SERVER_ID,
+          workspaceId: second.id,
+        }),
+      ],
+    });
+
+    expect(failures).toEqual([]);
+    expect(archivedByServer).toEqual(
+      new Map([
+        [SERVER_ID, [first.id]],
+        [SECOND_SERVER_ID, [second.id]],
+      ]),
+    );
+    expect(storedWorkspaceOn(SERVER_ID, first.id)).toBeUndefined();
+    expect(storedWorkspaceOn(SECOND_SERVER_ID, second.id)).toBeUndefined();
   });
 });

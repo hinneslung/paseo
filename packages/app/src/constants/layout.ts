@@ -1,5 +1,5 @@
 import { useUnistyles } from "react-native-unistyles";
-import { isWeb } from "@/constants/platform";
+import { getIsVscode, isWeb } from "@/constants/platform";
 
 export const FOOTER_HEIGHT = 75;
 
@@ -15,6 +15,13 @@ export const HEADER_TOP_PADDING_MOBILE = 8;
 export const MAX_CONTENT_WIDTH = 820;
 export const COMPACT_FORM_FACTOR_WIDTH = 500;
 
+// Settings uses the canonical desktop list + detail layout. Its sidebar and
+// detail target must fit together before it can share width with app navigation.
+export const SETTINGS_DESKTOP_SIDEBAR_WIDTH = 320;
+export const SETTINGS_DESKTOP_DETAIL_MIN_WIDTH = 400;
+export const SETTINGS_DESKTOP_SPLIT_MIN_WIDTH =
+  SETTINGS_DESKTOP_SIDEBAR_WIDTH + SETTINGS_DESKTOP_DETAIL_MIN_WIDTH;
+
 // Desktop app constants for macOS traffic light buttons
 // These buttons (close/minimize/maximize) overlay the top-left corner
 export const DESKTOP_TRAFFIC_LIGHT_WIDTH = 78;
@@ -29,13 +36,25 @@ export {
   getIsElectronMac as getIsElectronRuntimeMac,
 } from "./platform";
 
+interface CompactFormFactorInput {
+  breakpoint: string | undefined;
+  isVscode: boolean;
+}
+
+export function resolveIsCompactFormFactor(input: CompactFormFactorInput): boolean {
+  if (input.isVscode) {
+    return false;
+  }
+  return input.breakpoint === "xs" || input.breakpoint === "sm";
+}
+
 /**
  * Reactive hook — re-renders the component when the breakpoint changes.
  * Always use this instead of reading UnistylesRuntime.breakpoint directly.
  */
 export function useIsCompactFormFactor(): boolean {
   const { rt } = useUnistyles();
-  return rt.breakpoint === "xs" || rt.breakpoint === "sm";
+  return resolveIsCompactFormFactor({ breakpoint: rt.breakpoint, isVscode: getIsVscode() });
 }
 
 // SplitContainer relies on dnd-kit and DOM-backed accessibility helpers.

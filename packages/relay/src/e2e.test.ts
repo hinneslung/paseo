@@ -4,6 +4,8 @@ import net from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { Buffer } from "node:buffer";
+import { dirname, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   generateKeyPair,
   exportPublicKey,
@@ -16,6 +18,7 @@ import {
 const nodeMajor = Number((process.versions.node ?? "0").split(".")[0] ?? "0");
 const shouldRunRelayE2e = process.env.FORCE_RELAY_E2E === "1" || nodeMajor < 25;
 const wranglerCliPath = createRequire(import.meta.url).resolve("wrangler/bin/wrangler.js");
+const relayPackageRoot = resolvePath(dirname(fileURLToPath(import.meta.url)), "..");
 const STARTUP_HOOK_TIMEOUT_MS = 90_000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
@@ -61,7 +64,7 @@ function spawnRelayDevServer(port: number): ChildProcess {
       "--show-interactive-dev-session=false",
     ],
     {
-      cwd: process.cwd(),
+      cwd: relayPackageRoot,
       env: { ...process.env },
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
@@ -345,7 +348,7 @@ async function stopRelayProcess(relayProcess: ChildProcess): Promise<void> {
           clientReceivedReady.byteOffset + clientReceivedReady.byteLength,
         ),
       );
-      expect(JSON.parse(decryptedReady as string)).toEqual({ type: "ready" });
+      expect(JSON.parse(new TextDecoder().decode(decryptedReady))).toEqual({ type: "ready" });
 
       // Client sends encrypted message
       const clientMessage = "Hello from client!";
@@ -363,7 +366,7 @@ async function stopRelayProcess(relayProcess: ChildProcess): Promise<void> {
           daemonReceivedMsg.byteOffset + daemonReceivedMsg.byteLength,
         ),
       );
-      expect(decryptedClientMsg).toBe(clientMessage);
+      expect(new TextDecoder().decode(decryptedClientMsg)).toBe(clientMessage);
 
       // Daemon sends encrypted response
       const daemonMessage = "Hello from daemon!";
@@ -381,7 +384,7 @@ async function stopRelayProcess(relayProcess: ChildProcess): Promise<void> {
           clientReceivedMsg.byteOffset + clientReceivedMsg.byteLength,
         ),
       );
-      expect(decryptedDaemonMsg).toBe(daemonMessage);
+      expect(new TextDecoder().decode(decryptedDaemonMsg)).toBe(daemonMessage);
 
       // Cleanup
       daemonWs.close();
@@ -475,7 +478,7 @@ async function stopRelayProcess(relayProcess: ChildProcess): Promise<void> {
       daemonSharedKey,
       received.buffer.slice(received.byteOffset, received.byteOffset + received.byteLength),
     );
-    expect(decrypted).toBe(secret);
+    expect(new TextDecoder().decode(decrypted)).toBe(secret);
 
     daemonControlWs.close();
     daemonWs.close();

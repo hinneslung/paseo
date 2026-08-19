@@ -1,0 +1,84 @@
+name: Publish VS Code Extension
+
+# Publishes packages/vscode to the VS Code Marketplace when a namespaced VS Code
+# extension tag is pushed, e.g. `vscode-v0.1.0`. The tag must match
+# packages/vscode/package.json and point at a commit reachable from
+# `vscode-extension`. Gated on the `marketplace` environment so a human can
+# approve the run. Auth uses the VSCE_PAT secret (a global Azure DevOps PAT,
+# Marketplace > Manage). The PAT path is the temporary bootstrap; migrate to
+# Microsoft Entra (workload identity federation) before global PATs retire on
+# 2026-12-01.
+
+on:
+  push:
+    tags:
+      - "vscode-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "vscode-v* tag to publish"
+        required: true
+        type: string
+
+concurrency:
+  group: vscode-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: marketplace
+    env:
+      # This workflow does not run Electron; skipping the hosted binary avoids
+      # unrelated npm ci failures when Electron's CDN is flaky.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+      - name: Validate publish tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^vscode-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Publish tag must look like vscode-v0.1.0 or vscode-v0.1.0-beta.1, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin +refs/heads/vscode-extension:refs/remotes/origin/vscode-extension
+
+          tag_commit="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$tag_commit" origin/vscode-extension; then
+            echo "Publish tag $RELEASE_TAG must point at a commit reachable from origin/vscode-extension." >&2
+            exit 1
+          fi
+
+          package_version="$(node -p "require('./packages/vscode/package.json').version")"
+          expected_tag="vscode-v${package_version}"
+          if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
+            echo "Publish tag $RELEASE_TAG does not match packages/vscode version $package_version; expected $expected_tag." >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        uses: ./.github/actions/npm-install
+
+      - name: Build and package VS Code extension
+        run: npm run build:vscode
+
+      - name: Publish to VS Code Marketplace
+        # vsce reads the token from the VSCE_PAT environment variable, so the
+        # secret never appears in the command line / process args.
+        run: cd packages/vscode && npx @vscode/vsce publish --packagePath paseo.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}

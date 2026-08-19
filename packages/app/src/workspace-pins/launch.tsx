@@ -7,9 +7,14 @@ import {
   resolveTerminalProfiles,
 } from "@getpaseo/protocol/terminal-profiles";
 import { getProviderIcon } from "@/components/provider-icons";
+import { getIsElectron } from "@/constants/platform";
 import { useDaemonConfig } from "@/hooks/use-daemon-config";
 import type { Theme } from "@/styles/theme";
-import { pinnedTargetKey, type PinnedTabTarget } from "@/workspace-pins/target";
+import {
+  isPinnedTargetAvailable,
+  pinnedTargetKey,
+  type PinnedTabTarget,
+} from "@/workspace-pins/target";
 import { usePinnedTargetsStore } from "@/workspace-pins/store";
 
 export interface ResolvedPin {
@@ -22,6 +27,7 @@ export interface ResolvedPin {
 interface UsePinnedLaunchersInput {
   serverId: string;
   onLaunch: (target: PinnedTabTarget) => void;
+  showBrowser?: boolean;
 }
 
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
@@ -52,7 +58,11 @@ export function ProfileIcon({ iconKey }: { iconKey: string | undefined }): React
   return <ThemedProviderPinIcon iconKey={iconKey} size={14} uniProps={mutedColorMapping} />;
 }
 
-export function usePinnedLaunchers({ serverId, onLaunch }: UsePinnedLaunchersInput): ResolvedPin[] {
+export function usePinnedLaunchers({
+  serverId,
+  onLaunch,
+  showBrowser = true,
+}: UsePinnedLaunchersInput): ResolvedPin[] {
   const { t } = useTranslation();
   const pinned = usePinnedTargetsStore((state) => state.pinned);
   const { config } = useDaemonConfig(serverId);
@@ -64,6 +74,9 @@ export function usePinnedLaunchers({ serverId, onLaunch }: UsePinnedLaunchersInp
   return useMemo(() => {
     const resolved: ResolvedPin[] = [];
     for (const target of pinned) {
+      if (!isPinnedTargetAvailable(target, { isElectron: getIsElectron() })) {
+        continue;
+      }
       if (target.kind === "draft") {
         resolved.push({
           key: pinnedTargetKey(target),
@@ -83,6 +96,9 @@ export function usePinnedLaunchers({ serverId, onLaunch }: UsePinnedLaunchersInp
         continue;
       }
       if (target.kind === "browser") {
+        if (!showBrowser) {
+          continue;
+        }
         resolved.push({
           key: pinnedTargetKey(target),
           label: t("workspace.tabs.actions.newBrowser"),
@@ -103,5 +119,5 @@ export function usePinnedLaunchers({ serverId, onLaunch }: UsePinnedLaunchersInp
       });
     }
     return resolved;
-  }, [onLaunch, pinned, profiles, t]);
+  }, [onLaunch, pinned, profiles, showBrowser, t]);
 }

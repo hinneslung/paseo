@@ -8,15 +8,17 @@ import {
   buildOpenFileExplorerPatch,
   buildToggleFileExplorerPatch,
   migratePanelState,
+  resolveDefaultAgentListOpen,
   selectIsAgentListOpen,
   selectIsFileExplorerOpen,
+  setMobilePanelTarget,
   selectPanelVisibility,
   type PanelCoreState,
 } from "./state";
 
 function makePanelState(overrides: Partial<PanelCoreState> = {}): PanelCoreState {
   return {
-    mobileView: "agent",
+    mobilePanel: { target: "agent", revision: 0 },
     desktop: {
       agentListOpen: false,
       fileExplorerOpen: false,
@@ -103,12 +105,60 @@ describe("panel-store migration", () => {
 
     expect(state.explorerShowHiddenFiles).toBe(true);
   });
+
+  it("initializes diffCollapsedFoldersByWorkspace for pre-v12 state", () => {
+    const state = migratePanelState({}, 11, { isWeb: false });
+
+    expect(state.diffCollapsedFoldersByWorkspace).toEqual({});
+  });
+
+  it("preserves an existing diffCollapsedFoldersByWorkspace map", () => {
+    const state = migratePanelState({ diffCollapsedFoldersByWorkspace: { ws: ["src/app"] } }, 12, {
+      isWeb: false,
+    });
+
+    expect(state.diffCollapsedFoldersByWorkspace).toEqual({ ws: ["src/app"] });
+  });
+
+  it("drops persisted compact panel state so cold starts return to content", () => {
+    const state = migratePanelState(
+      { mobileView: "agent-list", mobilePanel: { target: "file-explorer", revision: 42 } },
+      11,
+      { isWeb: false },
+    );
+
+    expect(state.mobileView).toBeUndefined();
+    expect(state.mobilePanel).toBeUndefined();
+  });
+});
+
+describe("resolveDefaultAgentListOpen", () => {
+  it.each([
+    { isVscode: true, isWeb: true, expected: false },
+    { isVscode: true, isWeb: false, expected: false },
+    { isVscode: false, isWeb: true, expected: true },
+    { isVscode: false, isWeb: false, expected: false },
+  ])("returns $expected for isVscode=$isVscode and isWeb=$isWeb", (testCase) => {
+    expect(
+      resolveDefaultAgentListOpen({ isWeb: testCase.isWeb, isVscode: testCase.isVscode }),
+    ).toBe(testCase.expected);
+  });
 });
 
 describe("panel-store visibility selectors", () => {
-  it("uses mobileView for compact layout visibility", () => {
+  it("increments the mobile panel revision only when the target changes", () => {
+    const initial = { target: "agent" as const, revision: 4 };
+
+    expect(setMobilePanelTarget(initial, "agent")).toBe(initial);
+    expect(setMobilePanelTarget(initial, "agent-list")).toEqual({
+      target: "agent-list",
+      revision: 5,
+    });
+  });
+
+  it("uses the mobile panel target for compact layout visibility", () => {
     const state = makePanelState({
-      mobileView: "file-explorer",
+      mobilePanel: { target: "file-explorer", revision: 1 },
       desktop: { agentListOpen: true, fileExplorerOpen: false, focusModeEnabled: false },
     });
 
@@ -122,7 +172,7 @@ describe("panel-store visibility selectors", () => {
 
   it("uses desktop flags for expanded layout visibility", () => {
     const state = makePanelState({
-      mobileView: "file-explorer",
+      mobilePanel: { target: "file-explorer", revision: 1 },
       desktop: { agentListOpen: true, fileExplorerOpen: false, focusModeEnabled: false },
     });
 
@@ -146,7 +196,7 @@ describe("panel-store checkout-intent file explorer actions", () => {
 
     const patch = buildOpenFileExplorerPatch(state, { isCompact: true, checkout });
 
-    expect(patch.mobileView).toBe("file-explorer");
+    expect(patch.mobilePanel).toEqual({ target: "file-explorer", revision: 1 });
     expect(patch.desktop).toBeUndefined();
     expect(patch.explorerTab).toBe("files");
   });
@@ -161,7 +211,7 @@ describe("panel-store checkout-intent file explorer actions", () => {
 
     const patch = buildOpenFileExplorerPatch(state, { isCompact: false, checkout });
 
-    expect(patch.mobileView).toBeUndefined();
+    expect(patch.mobilePanel).toBeUndefined();
     expect(patch.desktop?.fileExplorerOpen).toBe(true);
     expect(patch.explorerTab).toBe("files");
   });

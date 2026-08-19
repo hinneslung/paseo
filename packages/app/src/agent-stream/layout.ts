@@ -26,6 +26,7 @@ export interface StreamLayoutItem {
   isLastInUserGroup: boolean;
   isLastInToolSequence: boolean;
   frameOrder: StreamFrameChildOrder;
+  phase: "streaming" | "complete";
 }
 
 export interface StreamLayout {
@@ -36,7 +37,7 @@ export interface StreamLayout {
 
 export interface StreamLayoutInput {
   strategy: StreamStrategy;
-  agentStatus: string;
+  isTurnActive: boolean;
   history: StreamItem[];
   liveHead: StreamItem[];
   timingByAssistantId: Map<string, TurnTiming>;
@@ -44,7 +45,6 @@ export interface StreamLayoutInput {
 
 interface LayoutSegmentInput {
   strategy: StreamStrategy;
-  agentStatus: string;
   items: StreamItem[];
   timingByAssistantId: Map<string, TurnTiming>;
   auxiliaryTurnFooter: TurnFooterHost | null;
@@ -52,6 +52,15 @@ interface LayoutSegmentInput {
   boundaryIndex: number | null;
   boundaryAboveItem: StreamItem | null;
   boundaryBelowItem: StreamItem | null;
+  boundaryAboveItems: StreamItem[] | null;
+  boundaryAboveIndex: number | null;
+  phase: "streaming" | "complete";
+}
+
+interface AssistantFooterSource {
+  item: Extract<StreamItem, { kind: "assistant_message" }>;
+  items: StreamItem[];
+  index: number;
 }
 
 function createTurnFooterHost(input: {
@@ -68,45 +77,111 @@ function createTurnFooterHost(input: {
   };
 }
 
+function findLatestAssistantInTurn(input: {
+  strategy: StreamStrategy;
+  items: StreamItem[];
+  startIndex: number;
+  boundaryAboveItems?: StreamItem[] | null;
+  boundaryAboveIndex?: number | null;
+}): AssistantFooterSource | null {
+  let items = input.items;
+  let index = input.startIndex;
+  let canCrossBoundary = true;
+
+  while (true) {
+    for (
+      ;
+      index >= 0 && index < items.length;
+      index = input.strategy.getNeighborIndex(index, "above")
+    ) {
+      const item = items[index];
+      if (!item || item.kind === "user_message") {
+        return null;
+      }
+      if (item.kind === "assistant_message") {
+        return { item, items, index };
+      }
+    }
+
+    if (
+      !canCrossBoundary ||
+      !input.boundaryAboveItems ||
+      input.boundaryAboveIndex === null ||
+      input.boundaryAboveIndex === undefined
+    ) {
+      return null;
+    }
+
+    items = input.boundaryAboveItems;
+    index = input.boundaryAboveIndex;
+    canCrossBoundary = false;
+  }
+}
+
 function resolveAuxiliaryTurnFooter(input: StreamLayoutInput): TurnFooterHost | null {
-  if (input.agentStatus === "running") {
+  if (input.isTurnActive) {
     return null;
   }
 
   const footerItems = input.liveHead.length > 0 ? input.liveHead : input.history;
-  const startIndex = input.strategy.getLatestItemIndex(footerItems);
-  if (startIndex === null) {
+  const latestIndex = input.strategy.getLatestItemIndex(footerItems);
+  if (latestIndex === null) {
     return null;
   }
 
-  const item = footerItems[startIndex];
-  if (!item || item.kind !== "assistant_message") {
+  const assistant = findLatestAssistantInTurn({
+    strategy: input.strategy,
+    items: footerItems,
+    startIndex: latestIndex,
+  });
+  if (!assistant) {
     return null;
   }
 
   return createTurnFooterHost({
-    item,
-    items: footerItems,
-    index: startIndex,
+    item: assistant.item,
+    items: assistant.items,
+    index: assistant.index,
     timingByAssistantId: input.timingByAssistantId,
   });
 }
 
-function shouldRenderCompletedFooter(input: {
+function resolveCompletedFooter(input: {
+  strategy: StreamStrategy;
+  items: StreamItem[];
+  index: number;
   item: StreamItem;
   belowItem: StreamItem | null;
-  agentStatus: string;
+  timingByAssistantId: Map<string, TurnTiming>;
   auxiliaryTurnFooter: TurnFooterHost | null;
-}): boolean {
-  return (
-    input.item.kind === "assistant_message" &&
-    input.auxiliaryTurnFooter?.itemId !== input.item.id &&
-    (input.belowItem?.kind === "user_message" ||
-      (input.belowItem === null && input.agentStatus !== "running"))
-  );
+  boundaryAboveItems: StreamItem[] | null;
+  boundaryAboveIndex: number | null;
+}): TurnFooterHost | null {
+  if (input.item.kind === "user_message" || input.belowItem?.kind !== "user_message") {
+    return null;
+  }
+
+  const assistant = findLatestAssistantInTurn({
+    strategy: input.strategy,
+    items: input.items,
+    startIndex: input.index,
+    boundaryAboveItems: input.boundaryAboveItems,
+    boundaryAboveIndex: input.boundaryAboveIndex,
+  });
+  if (!assistant || input.auxiliaryTurnFooter?.itemId === assistant.item.id) {
+    return null;
+  }
+  return createTurnFooterHost({
+    item: assistant.item,
+    items: assistant.items,
+    index: assistant.index,
+    timingByAssistantId: input.timingByAssistantId,
+  });
 }
 
-function isToolSequenceItem(item: StreamItem | null): boolean {
+function isToolSequenceItem(
+  item: StreamItem | null,
+): item is Extract<StreamItem, { kind: "tool_call" | "thought" | "todo_list" }> {
   return item?.kind === "tool_call" || item?.kind === "thought" || item?.kind === "todo_list";
 }
 
@@ -174,19 +249,17 @@ function layoutSegment(input: LayoutSegmentInput): StreamLayoutItem[] {
       aboveItem,
       belowItem,
     });
-    const completedFooter = shouldRenderCompletedFooter({
+    const completedFooter = resolveCompletedFooter({
+      strategy: input.strategy,
+      items: input.items,
+      index,
       item,
       belowItem,
-      agentStatus: input.agentStatus,
+      timingByAssistantId: input.timingByAssistantId,
       auxiliaryTurnFooter: input.auxiliaryTurnFooter,
-    })
-      ? createTurnFooterHost({
-          item,
-          items: input.items,
-          index,
-          timingByAssistantId: input.timingByAssistantId,
-        })
-      : null;
+      boundaryAboveItems: input.boundaryAboveItems,
+      boundaryAboveIndex: input.boundaryAboveIndex,
+    });
 
     return {
       item,
@@ -202,6 +275,7 @@ function layoutSegment(input: LayoutSegmentInput): StreamLayoutItem[] {
       isLastInUserGroup: item.kind === "user_message" && belowItem?.kind !== "user_message",
       isLastInToolSequence: isToolSequenceItem(item) && !isToolSequenceItem(belowItem),
       frameOrder: input.frameOrder,
+      phase: input.phase,
     };
   });
 }
@@ -227,7 +301,6 @@ export function layoutStream(input: StreamLayoutInput): StreamLayout {
     // and .kind are stable across text-only flushes (text growth doesn't change what kind of
     // item borders history), so cached layout stays valid between flushes.
     const historyCacheKey = [
-      input.agentStatus,
       frameOrder,
       historyBoundaryIndex ?? "null",
       liveHeadBoundaryItem?.id ?? "null",
@@ -245,7 +318,6 @@ export function layoutStream(input: StreamLayoutInput): StreamLayout {
     } else {
       history = layoutSegment({
         strategy: input.strategy,
-        agentStatus: input.agentStatus,
         items: input.history,
         timingByAssistantId: input.timingByAssistantId,
         auxiliaryTurnFooter,
@@ -253,6 +325,9 @@ export function layoutStream(input: StreamLayoutInput): StreamLayout {
         boundaryIndex: historyBoundaryIndex,
         boundaryAboveItem: null,
         boundaryBelowItem: liveHeadBoundaryItem,
+        boundaryAboveItems: null,
+        boundaryAboveIndex: null,
+        phase: "complete",
       });
       byKey.set(historyCacheKey, history);
     }
@@ -262,7 +337,6 @@ export function layoutStream(input: StreamLayoutInput): StreamLayout {
 
   const liveHead = layoutSegment({
     strategy: input.strategy,
-    agentStatus: input.agentStatus,
     items: input.liveHead,
     timingByAssistantId: input.timingByAssistantId,
     auxiliaryTurnFooter,
@@ -270,6 +344,9 @@ export function layoutStream(input: StreamLayoutInput): StreamLayout {
     boundaryIndex: liveHeadBoundaryIndex,
     boundaryAboveItem: historyBoundaryItem,
     boundaryBelowItem: null,
+    boundaryAboveItems: input.history,
+    boundaryAboveIndex: historyBoundaryIndex,
+    phase: input.isTurnActive ? "streaming" : "complete",
   });
 
   return {

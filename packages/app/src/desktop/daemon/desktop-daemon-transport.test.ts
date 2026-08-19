@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopLocalDaemonTransportFactory } from "./desktop-daemon-transport";
+import {
+  buildLocalDaemonTransportUrl,
+  createDesktopLocalDaemonTransportFactory,
+} from "./desktop-daemon-transport";
 import { createFakeLocalDaemonTransportRpc } from "./test-local-daemon-transport-rpc";
 
 const LOCAL_URL = "paseo+local://socket?path=%2Ftmp%2Fpaseo.sock";
@@ -42,5 +45,32 @@ describe("desktop-daemon-transport", () => {
 
     expect(rpc.closedSessions).toEqual(["local-session-2"]);
     expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens TCP bridge targets and forwards WebSocket subprotocols", async () => {
+    const rpc = createFakeLocalDaemonTransportRpc();
+    const transportFactory = createDesktopLocalDaemonTransportFactory(rpc);
+    expect(transportFactory).not.toBeNull();
+
+    const transport = transportFactory!({
+      url: buildLocalDaemonTransportUrl({
+        transportType: "tcp",
+        endpoint: "192.168.1.194:6768",
+      }),
+      protocols: ["paseo.extra"],
+    });
+
+    expect(rpc.openCalls).toEqual([
+      {
+        transportType: "tcp",
+        endpoint: "192.168.1.194:6768",
+        protocols: ["paseo.extra"],
+      },
+    ]);
+
+    rpc.resolveOpen("local-session-3");
+    rpc.resolveListen(() => {});
+    await Promise.resolve();
+    transport.close();
   });
 });

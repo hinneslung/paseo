@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { isLanguageSupported, getSupportedExtensions, getParserForFile } from "../parsers.js";
+import {
+  isLanguageSupported,
+  getSupportedExtensions,
+  getParserForFile,
+  getLanguageForFile,
+} from "../parsers.js";
 
 describe("isLanguageSupported", () => {
   it("returns true for supported file extensions", () => {
@@ -15,6 +20,7 @@ describe("isLanguageSupported", () => {
     expect(isLanguageSupported("test.java")).toBe(true);
     expect(isLanguageSupported("test.swift")).toBe(true);
     expect(isLanguageSupported("test.dart")).toBe(true);
+    expect(isLanguageSupported("test.cs")).toBe(true);
     expect(isLanguageSupported("test.ex")).toBe(true);
   });
 
@@ -53,11 +59,19 @@ describe("getSupportedExtensions", () => {
     expect(extensions).toContain("rs");
     expect(extensions).toContain("swift");
     expect(extensions).toContain("dart");
+    expect(extensions).toContain("cs");
     expect(extensions).toContain("json");
   });
 });
 
 describe("getParserForFile", () => {
+  it("projects the parser retained by the editor language registry", () => {
+    for (const extension of getSupportedExtensions()) {
+      const filename = `source.${extension}`;
+      expect(getParserForFile(filename)).toBe(getLanguageForFile(filename)?.parser);
+    }
+  });
+
   it("returns a parser for supported files", () => {
     expect(getParserForFile("test.js")).not.toBeNull();
     expect(getParserForFile("test.py")).not.toBeNull();

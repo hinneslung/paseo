@@ -5,8 +5,14 @@ import {
   type ExplorerTab,
 } from "../explorer-tab-memory";
 import { type ExplorerCheckoutContext } from "../explorer-checkout-context";
+import { z } from "zod";
 
 export type MobilePanelView = "agent" | "agent-list" | "file-explorer";
+
+export interface MobilePanelSelection {
+  target: MobilePanelView;
+  revision: number;
+}
 
 export interface DesktopSidebarState {
   agentListOpen: boolean;
@@ -29,6 +35,14 @@ export const DEFAULT_EXPLORER_FILES_SPLIT_RATIO = 0.38;
 export const MIN_EXPLORER_FILES_SPLIT_RATIO = 0.2;
 export const MAX_EXPLORER_FILES_SPLIT_RATIO = 0.8;
 
+export function resolveDefaultAgentListOpen(input: { isWeb: boolean; isVscode: boolean }): boolean {
+  // VS Code extension: hide the left navigation panel by default on first open.
+  if (input.isVscode) {
+    return false;
+  }
+  return input.isWeb;
+}
+
 export interface PanelVisibilityState {
   isAgentListOpen: boolean;
   isFileExplorerOpen: boolean;
@@ -43,7 +57,7 @@ export interface ExplorerPanelIntent extends PanelLayoutInput {
 }
 
 export interface PanelCoreState {
-  mobileView: MobilePanelView;
+  mobilePanel: MobilePanelSelection;
   desktop: DesktopSidebarState;
   explorerTab: ExplorerTab;
   explorerTabByCheckout: Record<string, ExplorerTab>;
@@ -74,8 +88,8 @@ export function selectPanelVisibility(
 ): PanelVisibilityState {
   if (input.isCompact) {
     return {
-      isAgentListOpen: state.mobileView === "agent-list",
-      isFileExplorerOpen: state.mobileView === "file-explorer",
+      isAgentListOpen: state.mobilePanel.target === "agent-list",
+      isFileExplorerOpen: state.mobilePanel.target === "file-explorer",
     };
   }
   return {
@@ -92,6 +106,16 @@ export function selectIsFileExplorerOpen(state: PanelCoreState, input: PanelLayo
   return selectPanelVisibility(state, input).isFileExplorerOpen;
 }
 
+export function setMobilePanelTarget(
+  selection: MobilePanelSelection,
+  target: MobilePanelView,
+): MobilePanelSelection {
+  if (selection.target === target) {
+    return selection;
+  }
+  return { target, revision: selection.revision + 1 };
+}
+
 function resolveExplorerTabFromCheckout(
   state: PanelCoreState,
   checkout: ExplorerCheckoutContext,
@@ -105,7 +129,7 @@ function resolveExplorerTabFromCheckout(
 }
 
 export interface OpenFileExplorerPatch {
-  mobileView?: MobilePanelView;
+  mobilePanel?: MobilePanelSelection;
   desktop?: DesktopSidebarState;
   explorerTab: ExplorerTab;
 }
@@ -117,7 +141,7 @@ export function buildOpenFileExplorerPatch(
   const resolvedTab = resolveExplorerTabFromCheckout(state, input.checkout);
   if (input.isCompact) {
     return {
-      mobileView: "file-explorer",
+      mobilePanel: setMobilePanelTarget(state.mobilePanel, "file-explorer"),
       explorerTab: resolvedTab,
     };
   }
@@ -129,7 +153,7 @@ export function buildOpenFileExplorerPatch(
 
 export type ToggleFileExplorerPatch =
   | OpenFileExplorerPatch
-  | { mobileView: MobilePanelView }
+  | { mobilePanel: MobilePanelSelection }
   | { desktop: DesktopSidebarState };
 
 export function buildToggleFileExplorerPatch(
@@ -141,12 +165,42 @@ export function buildToggleFileExplorerPatch(
     return buildOpenFileExplorerPatch(state, input);
   }
   if (input.isCompact) {
-    return { mobileView: "agent" };
+    return { mobilePanel: setMobilePanelTarget(state.mobilePanel, "agent") };
   }
   return { desktop: { ...state.desktop, fileExplorerOpen: false } };
 }
 
-type MigratablePanelState = Record<string, unknown>;
+const ExplorerTabSchema = z.enum(["changes", "files", "pr"]);
+const DesktopSidebarStorageSchema = z.strictObject({
+  agentListOpen: z.boolean().optional(),
+  fileExplorerOpen: z.boolean().optional(),
+  focusModeEnabled: z.boolean().optional(),
+  zoomed: z.boolean().optional(),
+  focused: z.boolean().optional(),
+});
+
+export const PanelPersistedStateSchema = z.strictObject({
+  mobileView: z.enum(["agent", "agent-list", "file-explorer"]).optional(),
+  mobilePanel: z
+    .strictObject({
+      target: z.enum(["agent", "agent-list", "file-explorer"]),
+      revision: z.number().int().nonnegative(),
+    })
+    .optional(),
+  desktop: DesktopSidebarStorageSchema.optional(),
+  explorerTab: ExplorerTabSchema.optional(),
+  explorerTabByCheckout: z.record(z.string(), ExplorerTabSchema).optional(),
+  expandedPathsByWorkspace: z.record(z.string(), z.array(z.string())).optional(),
+  diffExpandedPathsByWorkspace: z.record(z.string(), z.array(z.string())).optional(),
+  diffCollapsedFoldersByWorkspace: z.record(z.string(), z.array(z.string())).optional(),
+  sidebarWidth: z.number().optional(),
+  explorerWidth: z.number().optional(),
+  explorerSortOption: z.enum(["name", "modified", "size"]).optional(),
+  explorerShowHiddenFiles: z.boolean().optional(),
+  explorerFilesSplitRatio: z.number().optional(),
+});
+
+type MigratablePanelState = z.infer<typeof PanelPersistedStateSchema>;
 
 function migratePanelV2Explorer(state: MigratablePanelState, isWeb: boolean): void {
   if (isWeb && typeof state.explorerWidth === "number" && state.explorerWidth === 400) {
@@ -178,7 +232,7 @@ function migratePanelExplorerTabByCheckout(state: MigratablePanelState, version:
     state.explorerTabByCheckout = {};
     return;
   }
-  const entries = Object.entries(state.explorerTabByCheckout as Record<string, unknown>);
+  const entries = Object.entries(state.explorerTabByCheckout);
   const next: Record<string, ExplorerTab> = {};
   for (const [key, value] of entries) {
     if (!isExplorerTab(value)) {
@@ -190,7 +244,7 @@ function migratePanelExplorerTabByCheckout(state: MigratablePanelState, version:
 }
 
 function migratePanelDesktopFocusMode(state: MigratablePanelState): void {
-  const desktop = state.desktop as Record<string, unknown> | undefined;
+  const desktop = state.desktop;
   if (!desktop) {
     return;
   }
@@ -212,7 +266,8 @@ export function migratePanelState(
   version: number,
   options: { isWeb: boolean },
 ): MigratablePanelState {
-  const state = (persistedState ?? {}) as MigratablePanelState;
+  const result = PanelPersistedStateSchema.safeParse(persistedState);
+  const state: MigratablePanelState = result.success ? result.data : {};
   const { isWeb } = options;
 
   if (version < 2) {
@@ -245,8 +300,21 @@ export function migratePanelState(
   ) {
     state.diffExpandedPathsByWorkspace = {};
   }
+  if (
+    version < 12 ||
+    typeof state.diffCollapsedFoldersByWorkspace !== "object" ||
+    !state.diffCollapsedFoldersByWorkspace
+  ) {
+    state.diffCollapsedFoldersByWorkspace = {};
+  }
   if (typeof state.explorerShowHiddenFiles !== "boolean") {
     state.explorerShowHiddenFiles = true;
+  }
+  if (version < 12) {
+    // Compact panel position is transient UI state. Cold starts always begin
+    // at content, regardless of what an older version persisted.
+    delete state.mobileView;
+    delete state.mobilePanel;
   }
 
   return state;

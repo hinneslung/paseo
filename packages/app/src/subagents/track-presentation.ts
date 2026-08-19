@@ -1,6 +1,12 @@
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { deriveSidebarStateBucket } from "@/utils/sidebar-agent-state";
 import type { SubagentRow } from "./select";
+import { providerSubagentLifecycleStatus } from "./provider-store";
+
+function presentationStatus(row: SubagentRow) {
+  if (row.kind === "paseo") return row.status;
+  return providerSubagentLifecycleStatus(row.status);
+}
 
 export interface SubagentRowPresentationData {
   key: string;
@@ -12,15 +18,22 @@ export interface SubagentRowPresentationData {
 }
 
 export function buildSubagentRowPresentationData(row: SubagentRow): SubagentRowPresentationData {
-  const label = resolveRowLabel(row.title);
+  // The task distinguishes siblings in a fan-out, so it names the row when present. Providers
+  // own the compact secondary context because model, effort, and usage semantics differ.
+  const description = resolveRowLabel(row.description);
+  const title = resolveRowLabel(row.title);
+  const label = description ?? title;
+  const providerSubtitle = row.kind === "provider" ? resolveRowLabel(row.subtitle) : null;
+  const subtitle = providerSubtitle ?? (description ? title : null);
+  const status = presentationStatus(row);
   return {
-    key: `subagent_${row.id}`,
+    key: `${row.kind}_subagent_${row.id}`,
     kind: "agent",
     label: label ?? "",
-    subtitle: "",
+    subtitle: subtitle ?? "",
     titleState: label ? "ready" : "loading",
     statusBucket: deriveSidebarStateBucket({
-      status: row.status,
+      status,
       requiresAttention: false,
     }),
   };
@@ -41,7 +54,11 @@ export function formatHeaderLabel(rows: readonly SubagentRow[]): string {
   return parts.join(" · ");
 }
 
-export function resolveRowLabel(title: SubagentRow["title"]): string | null {
+export function countFinishedSubagents(rows: readonly SubagentRow[]): number {
+  return rows.filter((row) => row.kind === "provider" && row.status !== "running").length;
+}
+
+export function resolveRowLabel(title: string | null | undefined): string | null {
   if (typeof title !== "string") {
     return null;
   }

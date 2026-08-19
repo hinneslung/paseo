@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import pino from "pino";
 import {
   ProviderCatalogSession,
@@ -8,17 +8,19 @@ import { createStub } from "../../test-utils/class-mocks.js";
 import { findByType } from "../../test-utils/session-stubs.js";
 import type { SessionOutboundMessage } from "../../messages.js";
 import {
-  resolveSnapshotCwd,
+  GLOBAL_PROVIDER_SNAPSHOT_KEY,
   type ProviderSnapshotManager,
 } from "../../agent/provider-snapshot-manager.js";
 import type { ProviderSnapshotEntry } from "../../agent/agent-sdk-types.js";
 import type { ProviderUsageService } from "../../../services/quota-fetcher/service.js";
+import { expandProviderSnapshot } from "@getpaseo/protocol/provider-snapshot-codec";
 
 type SnapshotChangeHandler = (entries: ProviderSnapshotEntry[], cwd: string) => void;
 
 interface MakeOptions {
   visibleProviders?: Set<string>;
   supportsCustomModeIcons?: boolean;
+  supportsCompactProviderSnapshots?: boolean;
   snapshot?: { [K in keyof ProviderSnapshotManager]?: unknown };
   usage?: { [K in keyof ProviderUsageService]?: unknown };
   host?: Partial<ProviderCatalogSessionHost>;
@@ -49,6 +51,7 @@ function makeSubsystem(options: MakeOptions = {}) {
     emit: (msg) => emitted.push(msg),
     isProviderVisibleToClient: (provider) => visible.has(provider),
     supportsCustomModeIcons: () => options.supportsCustomModeIcons ?? false,
+    supportsCompactProviderSnapshots: () => options.supportsCompactProviderSnapshots ?? false,
     listProviderAvailability: async () => [],
     listDraftFeatures: async () => [],
     ...options.host,
@@ -66,7 +69,10 @@ function makeSubsystem(options: MakeOptions = {}) {
     providerUsageService: createStub<ProviderUsageService>(options.usage ?? {}),
     logger: pino({ level: "silent" }),
   });
-  function pushSnapshotChange(entries: ProviderSnapshotEntry[], cwd = resolveSnapshotCwd()): void {
+  function pushSnapshotChange(
+    entries: ProviderSnapshotEntry[],
+    cwd = GLOBAL_PROVIDER_SNAPSHOT_KEY,
+  ): void {
     if (!changeHandler) throw new Error("start() must run before a snapshot change");
     changeHandler(entries, cwd);
   }
@@ -110,6 +116,38 @@ describe("ProviderCatalogSession", () => {
     expect(pull?.payload.entries).toEqual(push?.payload.entries);
   });
 
+  it("returns the canonical cwd used by snapshot updates", async () => {
+    const getSnapshot = vi.fn((_cwd?: string) => makeEntries());
+    const { subsystem, emitted } = makeSubsystem({
+      snapshot: { getSnapshot },
+    });
+
+    await subsystem.handleGetProvidersSnapshotRequest({
+      type: "get_providers_snapshot_request",
+      requestId: "canonical-cwd",
+      cwd: "/repo/./sdk",
+    });
+
+    const canonicalCwd = getSnapshot.mock.calls[0]?.[0];
+    expect(canonicalCwd).toEqual(expect.any(String));
+    expect(findByType(emitted, "get_providers_snapshot_response")?.payload.cwd).toBe(canonicalCwd);
+  });
+
+  it("pushes the compact encoding to capable clients", () => {
+    const { subsystem, emitted, pushSnapshotChange } = makeSubsystem({
+      supportsCustomModeIcons: true,
+      supportsCompactProviderSnapshots: true,
+    });
+
+    subsystem.start();
+    pushSnapshotChange(makeEntries());
+
+    const push = findByType(emitted, "providers_snapshot_update");
+    expect(push?.payload.entries).toEqual([]);
+    expect(push?.payload.snapshotHash).toEqual(expect.any(String));
+    expect(expandProviderSnapshot(push!.payload.compactSnapshot!)).toEqual([makeEntries()[0]]);
+  });
+
   it("preserves custom mode icons when the client supports them", async () => {
     const { subsystem, emitted } = makeSubsystem({
       supportsCustomModeIcons: true,
@@ -123,6 +161,60 @@ describe("ProviderCatalogSession", () => {
 
     const pull = findByType(emitted, "get_providers_snapshot_response");
     expect(pull?.payload.entries[0]?.modes?.[0]?.icon).toBe("Sparkles");
+  });
+
+  it("sends capable clients a compact snapshot and returns not-modified for its hash", async () => {
+    const thinkingOptions = [
+      { id: "low", label: "Low" },
+      { id: "high", label: "High", isDefault: true },
+    ];
+    const entries: ProviderSnapshotEntry[] = [
+      {
+        provider: "codex",
+        status: "ready",
+        enabled: true,
+        models: ["one", "two"].map((id) => ({
+          provider: "codex",
+          id,
+          label: id,
+          thinkingOptions,
+          defaultThinkingOptionId: "high",
+        })),
+      },
+    ];
+    const { subsystem, emitted } = makeSubsystem({
+      supportsCompactProviderSnapshots: true,
+      snapshot: { getSnapshot: () => entries },
+    });
+
+    await subsystem.handleGetProvidersSnapshotRequest({
+      type: "get_providers_snapshot_request",
+      requestId: "compact-1",
+    });
+
+    const first = findByType(emitted, "get_providers_snapshot_response");
+    expect(first?.payload.entries).toEqual([]);
+    expect(first?.payload.snapshotHash).toEqual(expect.any(String));
+    expect(first?.payload.compactSnapshot?.thinkingSets).toHaveLength(1);
+    expect(expandProviderSnapshot(first!.payload.compactSnapshot!)).toEqual(entries);
+
+    await subsystem.handleGetProvidersSnapshotRequest({
+      type: "get_providers_snapshot_request",
+      requestId: "compact-2",
+      ifNoneMatch: first?.payload.snapshotHash,
+    });
+
+    const responses = emitted.filter(
+      (message) => message.type === "get_providers_snapshot_response",
+    );
+    const second = responses[1];
+    expect(second?.payload).toMatchObject({
+      entries: [],
+      snapshotHash: first?.payload.snapshotHash,
+      notModified: true,
+      requestId: "compact-2",
+    });
+    expect(second?.payload.compactSnapshot).toBeUndefined();
   });
 
   it("reports a disabled provider on list_provider_models without warming the snapshot", async () => {
@@ -140,6 +232,58 @@ describe("ProviderCatalogSession", () => {
 
     const res = findByType(emitted, "list_provider_models_response");
     expect(res?.payload.error).toBe("Provider codex is disabled");
+  });
+
+  it("hides compatibility-only entries from list_provider_models", async () => {
+    const { subsystem, emitted } = makeSubsystem({
+      snapshot: {
+        getSnapshot: () => [
+          {
+            provider: "codex",
+            status: "ready",
+            enabled: true,
+            models: [
+              { provider: "codex", id: "gpt-5.4", label: "GPT 5.4" },
+              {
+                provider: "codex",
+                id: "gpt-5.4-legacy",
+                label: "GPT 5.4 legacy",
+                isSelectable: false,
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    await subsystem.handleListProviderModelsRequest({
+      type: "list_provider_models_request",
+      provider: "codex",
+      requestId: "m-selectable",
+    });
+
+    const response = findByType(emitted, "list_provider_models_response");
+    expect(response?.payload.models?.map((model) => model.id)).toEqual(["gpt-5.4"]);
+  });
+
+  it("preserves missing cwd as the semantic global snapshot for model list reads", async () => {
+    const getSnapshot = vi.fn(() => [{ provider: "codex", status: "loading", enabled: true }]);
+    const warmUpSnapshotForCwd = vi.fn(async () => {});
+    const { subsystem } = makeSubsystem({
+      snapshot: { getSnapshot, warmUpSnapshotForCwd },
+    });
+
+    await subsystem.handleListProviderModelsRequest({
+      type: "list_provider_models_request",
+      provider: "codex",
+      requestId: "m-global",
+    });
+
+    expect(getSnapshot).toHaveBeenCalledWith(undefined);
+    expect(warmUpSnapshotForCwd).toHaveBeenCalledWith({
+      cwd: undefined,
+      providers: ["codex"],
+    });
   });
 
   it("surfaces a usage-list failure as an rpc_error envelope", async () => {

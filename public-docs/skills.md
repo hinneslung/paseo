@@ -3,12 +3,14 @@ title: Orchestration skills
 description: "Paseo orchestration skills: teach coding agents to spawn, coordinate, and manage other agents using slash commands."
 nav: Skills
 order: 32
-category: Automation
+category: Orchestration
 ---
 
 # Orchestration skills
 
-Paseo ships orchestration skills that teach coding agents (Claude Code, Codex) how to use the Paseo CLI to spawn, coordinate, and manage other agents. Skills are slash commands your agent can invoke, they provide the prompts, context, and workflows so agents know how to orchestrate without you writing boilerplate. Install them from the desktop app's Integrations settings or via the CLI.
+Paseo ships orchestration skills that teach coding agents how to use Paseo tools and the CLI to spawn, coordinate, and manage other agents. Skills package common workflows as slash commands, so agents know how to orchestrate without you writing the briefing and safety rails each time.
+
+Start with [Orchestration](/docs/orchestration) if you want the mental model, or [Common workflows](/docs/orchestration-workflows) for prompts you can use without installing skills.
 
 ## Installation
 
@@ -21,34 +23,23 @@ When the desktop app finds installed Paseo skills, it keeps the bundled skills u
 
 ## `/paseo`, Paseo Reference
 
-The foundational skill. Paseo reference for managing agents and worktrees. Load it when an agent needs to create agents, send them prompts, or manage worktrees.
+The foundational skill. Paseo reference for managing agents and workspaces. Load it when an agent needs to create agents, send them prompts, or manage workspace isolation.
 
 Not typically invoked directly by users, it's a reference that other skills depend on.
 
 ```
-/paseo show me the Paseo CLI surface for creating an agent in a worktree
+/paseo show me the Paseo CLI surface for creating an agent in a worktree-isolated workspace
 ```
 
 ## `/paseo-handoff`, Task Handoff
 
 Hands off the current task to another agent with full context. Use it when you say "handoff", "hand off", "hand this to", or want to pass work to another agent.
 
-The receiving agent gets a self-contained briefing with the task, context, relevant files, current state, what's been tried, decisions, acceptance criteria, and constraints. Provider comes from orchestration preferences unless you name one. Supports worktrees when you ask for one.
+The receiving agent gets a self-contained briefing with the task, context, relevant files, current state, what's been tried, decisions, acceptance criteria, and constraints. Provider comes from orchestration preferences unless you name one. Supports worktree-isolated workspaces when you ask for one.
 
 ```
-/paseo-handoff hand off the auth fix to codex in a worktree
+/paseo-handoff hand off the auth fix to codex in a worktree-isolated workspace
 /paseo-handoff hand this to claude opus for review
-```
-
-## `/paseo-loop`, Iterative Loops
-
-Runs an agent loop until an exit condition is met. Use it when you say "loop", "babysit", "keep trying until", "check every X", "watch", or want iterative autonomous execution.
-
-A loop is a worker/verifier cycle: launch a worker, check verification, repeat until done or limits hit. It can use a shell check, a verifier prompt, or both. Set a sensible `--max-iterations` or `--max-time`.
-
-```
-/paseo-loop keep trying until the changed test file passes, max 5 iterations
-/paseo-loop babysit PR 123 until checks are green, check every 2m, max-time 1h
 ```
 
 ## `/paseo-committee`, Committee Planning

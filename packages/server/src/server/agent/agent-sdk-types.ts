@@ -1,8 +1,13 @@
-import type { Options as ClaudeAgentOptions } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentProviderNotice } from "@getpaseo/protocol/agent-types";
+import type {
+  AgentProviderNotice,
+  AgentTaskItem,
+  ProviderOptions,
+  ToolPolicy,
+} from "@getpaseo/protocol/agent-types";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
+import type { PaseoToolCatalog } from "./tools/types.js";
 
-export type { AgentProviderNotice };
+export type { AgentProviderNotice, AgentTaskItem };
 
 export type AgentProvider = string;
 
@@ -74,10 +79,13 @@ export type ProviderStatus = "ready" | "loading" | "error" | "unavailable";
 export interface AgentModelDefinition {
   provider: AgentProvider;
   id: string;
+  aliases?: string[];
+  isSelectable?: boolean;
   label: string;
   description?: string;
   isDefault?: boolean;
   metadata?: AgentMetadata;
+  contextWindowMaxTokens?: number;
   thinkingOptions?: AgentSelectOption[];
   defaultThinkingOptionId?: string;
 }
@@ -99,10 +107,17 @@ export function normalizeAgentModelDefinition(model: AgentModelDefinition): Agen
   return { ...model, defaultThinkingOptionId };
 }
 
+export function filterSelectableAgentModels(
+  models: AgentModelDefinition[] | undefined,
+): AgentModelDefinition[] {
+  return models?.filter((model) => model.isSelectable !== false) ?? [];
+}
+
 export interface ProviderSnapshotEntry {
   provider: AgentProvider;
   status: ProviderStatus;
   enabled: boolean;
+  source?: "builtin" | "custom";
   error?: string;
   models?: AgentModelDefinition[];
   modes?: AgentMode[];
@@ -169,6 +184,7 @@ export interface AgentCapabilityFlags {
   supportsSessionListing?: boolean;
   supportsDynamicModes: boolean;
   supportsMcpServers: boolean;
+  supportsNativePaseoTools?: boolean;
   supportsReasoningStream: boolean;
   supportsToolInvocations: boolean;
   supportsRewindConversation?: boolean;
@@ -195,7 +211,7 @@ export interface AgentRunOptions {
   outputSchema?: unknown;
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
-  messageId?: string;
+  clientMessageId?: string;
 }
 
 export interface AgentUsage {
@@ -364,11 +380,11 @@ export interface CompactionTimelineItem {
 }
 
 export type AgentTimelineItem =
-  | { type: "user_message"; text: string; messageId?: string }
+  | { type: "user_message"; text: string; messageId?: string; clientMessageId?: string }
   | { type: "assistant_message"; text: string; messageId?: string }
   | { type: "reasoning"; text: string }
   | ToolCallTimelineItem
-  | { type: "todo"; items: { text: string; completed: boolean }[] }
+  | { type: "todo"; items: AgentTaskItem[] }
   | { type: "error"; message: string }
   | CompactionTimelineItem;
 
@@ -423,6 +439,11 @@ export type AgentStreamEvent =
       provider: AgentProvider;
       reason: "finished" | "error" | "permission";
       timestamp: string;
+    }
+  | {
+      type: "provider_subagent";
+      provider: AgentProvider;
+      event: import("./provider-subagents/store.js").ProviderSubagentInputEvent;
     };
 
 export function getAgentStreamEventTurnId(event: AgentStreamEvent): string | undefined {
@@ -538,6 +559,7 @@ export interface ImportedProviderSession {
   config: AgentSessionConfig;
   persistence: AgentPersistenceHandle;
   timeline: ImportedTimelineEntry[];
+  providerSubagentEvents?: Extract<AgentStreamEvent, { type: "provider_subagent" }>[];
 }
 
 export interface AgentSessionConfig {
@@ -558,14 +580,8 @@ export interface AgentSessionConfig {
   thinkingOptionId?: string;
   featureValues?: Record<string, unknown>;
   title?: string | null;
-  approvalPolicy?: string;
-  sandboxMode?: string;
-  networkAccess?: boolean;
-  webSearch?: boolean;
-  extra?: {
-    codex?: AgentMetadata;
-    claude?: Partial<ClaudeAgentOptions>;
-  };
+  providerOptions?: ProviderOptions;
+  toolPolicy?: ToolPolicy;
   mcpServers?: Record<string, McpServerConfig>;
   /**
    * Internal agents are hidden from listings and don't trigger notifications.
@@ -577,6 +593,11 @@ export interface AgentSessionConfig {
 export interface AgentLaunchContext {
   agentId?: string;
   env?: Record<string, string>;
+  /**
+   * Runtime-only internal Paseo tools. This must never be persisted into
+   * AgentSessionConfig; providers may adapt it to their native tool surface.
+   */
+  paseoTools?: PaseoToolCatalog;
 }
 
 export interface AgentCreateSessionOptions {
@@ -585,6 +606,12 @@ export interface AgentCreateSessionOptions {
    * Defaults to true. Providers that cannot honor false should no-op.
    */
   persistSession?: boolean;
+}
+
+/** Runtime-only intent for a persisted-session resume. Never persist this option. */
+export interface AgentResumeSessionOptions {
+  /** Defaults to interactive. History loading may be read-only for archived native sessions. */
+  purpose?: "interactive" | "history";
 }
 
 /**
@@ -615,6 +642,7 @@ export interface AgentSession {
   ): Promise<AgentPermissionResult | void>;
   describePersistence(): AgentPersistenceHandle | null;
   interrupt(): Promise<void>;
+  /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
   listCommands?(): Promise<AgentSlashCommand[]>;
   setModel?(modelId: string | null): Promise<void>;
@@ -636,14 +664,33 @@ export interface AgentSession {
   } | null;
 }
 
-export interface FetchCatalogOptions {
-  cwd: string;
-  force: boolean;
+export type FetchCatalogOptions =
+  | {
+      scope: "global";
+      force: boolean;
+    }
+  | {
+      scope: "workspace";
+      cwd: string;
+      force: boolean;
+    };
+
+export interface ProviderRefreshContext {
+  readonly signal: AbortSignal;
+  /** Track an upstream operation so timeout errors identify the work still pending. */
+  runActivity<T>(name: string, operation: () => Promise<T>): Promise<T>;
 }
 
 export interface ProviderCatalog {
   models: AgentModelDefinition[];
   modes: AgentMode[];
+  defaultModeId?: string | null;
+}
+
+export interface ResolveAgentDefaultModeInput {
+  config: AgentSessionConfig;
+  env?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export interface AgentClient {
@@ -658,14 +705,23 @@ export interface AgentClient {
     handle: AgentPersistenceHandle,
     overrides?: Partial<AgentSessionConfig>,
     launchContext?: AgentLaunchContext,
+    options?: AgentResumeSessionOptions,
   ): Promise<AgentSession>;
   /**
    * Discover models and modes together. Implementations may use one upstream
    * process, separate upstream calls, static modes, or private helpers; callers
    * outside the provider do not get separate runtime model/mode probes.
    * The registry is responsible for merging configured model overrides.
+   * ProviderSnapshotManager supplies a shared context. Providers must pass its
+   * signal downstream and finish resource cleanup before rejecting on abort.
    */
-  fetchCatalog(options: FetchCatalogOptions): Promise<ProviderCatalog>;
+  fetchCatalog(
+    options: FetchCatalogOptions,
+    context?: ProviderRefreshContext,
+  ): Promise<ProviderCatalog>;
+  /** Apply provider-owned defaults to a model supplied through provider configuration. */
+  resolveConfiguredModel?(model: AgentModelDefinition): AgentModelDefinition;
+  resolveDefaultModeId?(input: ResolveAgentDefaultModeInput): Promise<string | undefined>;
   resolveCreateConfig?(input: ResolveAgentCreateConfigInput): ResolveAgentCreateConfigResult;
   isCreateConfigUnattended?(input: AgentCreateConfigUnattendedInput): boolean;
   listCommands?(config: AgentSessionConfig): Promise<AgentSlashCommand[]>;
@@ -681,15 +737,15 @@ export interface AgentClient {
    * Check if this provider is available (CLI binary is installed).
    * Returns true if available, false otherwise.
    */
-  isAvailable(): Promise<boolean>;
+  isAvailable(signal?: AbortSignal): Promise<boolean>;
   getDiagnostic?(): Promise<{ diagnostic: string }>;
   /**
-   * Archive a persisted session in the native provider (best-effort).
+   * Archive a durable native session (best-effort). Runtime release belongs to AgentSession.close().
    * Called when Paseo archives an agent so the provider's own UI reflects the same state.
    */
   archiveNativeSession?(handle: AgentPersistenceHandle): Promise<void>;
   /**
-   * Unarchive a persisted session in the native provider.
+   * Unarchive a durable native session in the provider.
    * Called before Paseo clears its archived flag so provider resume can succeed.
    */
   unarchiveNativeSession?(handle: AgentPersistenceHandle): Promise<void>;

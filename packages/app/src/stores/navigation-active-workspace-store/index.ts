@@ -1,8 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { router, useLocalSearchParams, usePathname, type Href } from "expo-router";
+import { useLocalSearchParams, usePathname } from "expo-router";
 import { useEffect, useSyncExternalStore } from "react";
 import {
   createLastWorkspaceSelectionStore,
+  LAST_WORKSPACE_SELECTION_STORAGE_KEY,
   type ActiveWorkspaceSelection,
   type LastWorkspaceSelectionStorage,
 } from "@/stores/last-workspace-selection";
@@ -11,21 +12,20 @@ import {
   navigateToWorkspace as navigateToWorkspacePure,
   parseActiveWorkspaceSelection,
   type NavigateToWorkspaceDeps,
+  type NavigateToWorkspaceInput,
 } from "./navigation";
 import { useSessionStore } from "@/stores/session-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import { stripHostWorkspaceRouteEchoSearchFromBrowserUrlAfterCommit } from "@/utils/host-route-browser";
+import { navigateToHostWorkspaceRoute } from "@/navigation/workspace-route-navigation";
 
 export type { ActiveWorkspaceSelection } from "@/stores/last-workspace-selection";
-
-interface NavigateToWorkspaceOptions {
-  currentPathname?: string | null;
-}
-
-const LAST_WORKSPACE_SELECTION_STORAGE_KEY = "paseo:last-workspace-route-selection";
+export type { NavigateToWorkspaceInput } from "./navigation";
 
 const lastWorkspaceSelectionStorage: LastWorkspaceSelectionStorage = {
   read: () => AsyncStorage.getItem(LAST_WORKSPACE_SELECTION_STORAGE_KEY),
   write: (value) => AsyncStorage.setItem(LAST_WORKSPACE_SELECTION_STORAGE_KEY, value),
+  clear: () => AsyncStorage.removeItem(LAST_WORKSPACE_SELECTION_STORAGE_KEY),
 };
 
 const lastWorkspaceSelectionStore = createLastWorkspaceSelectionStore(
@@ -37,11 +37,15 @@ function navigateDeps(): NavigateToWorkspaceDeps {
     getSessionWorkspaces: (serverId) => useSessionStore.getState().sessions[serverId]?.workspaces,
     getSessionAgents: (serverId) =>
       useSessionStore.getState().sessions[serverId]?.agents.values() ?? [],
-    openWorkspaceAgentTab: (workspaceKey, agentId) => {
-      useWorkspaceLayoutStore.getState().openTabFocused(workspaceKey, { kind: "agent", agentId });
-    },
+    openTabFocused: (workspaceKey, target) =>
+      useWorkspaceLayoutStore.getState().openTabFocused(workspaceKey, target),
+    pinAgent: (workspaceKey, agentId) =>
+      useWorkspaceLayoutStore.getState().pinAgent(workspaceKey, agentId),
     rememberLastWorkspace: (selection) => lastWorkspaceSelectionStore.remember(selection),
-    navigateToRoute: (route) => router.dismissTo(route as Href),
+    navigateToRoute: (route) => {
+      navigateToHostWorkspaceRoute(route);
+      stripHostWorkspaceRouteEchoSearchFromBrowserUrlAfterCommit();
+    },
   };
 }
 
@@ -57,12 +61,8 @@ export function getIsLastWorkspaceSelectionHydrated(): boolean {
   return lastWorkspaceSelectionStore.isHydrated();
 }
 
-export function navigateToWorkspace(
-  serverId: string,
-  workspaceId: string,
-  _options: NavigateToWorkspaceOptions = {},
-) {
-  navigateToWorkspacePure(serverId, workspaceId, navigateDeps());
+export function navigateToWorkspace(input: NavigateToWorkspaceInput): string {
+  return navigateToWorkspacePure(input, navigateDeps());
 }
 
 export function navigateToLastWorkspace(): boolean {

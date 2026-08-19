@@ -1,121 +1,92 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  resolveHostIndexRoute,
   resolveStartupBlocker,
   resolveStartupNavigationReady,
+  resolveHostIndexRoute,
   resolveStartupRoute,
   shouldRunStartupGiveUpTimer,
   startHostRuntimeBootstrap,
 } from "./host-runtime-bootstrap";
-
-function createFakeStore() {
-  return { boot: vi.fn() };
-}
-
-function createFakeDaemonStartService() {
-  return {
-    start: vi.fn(async () => ({ ok: true as const })),
-  };
-}
+import type { DaemonStartResult, StartDaemonIfEnabledInput } from "@/runtime/daemon-start-service";
 
 describe("startHostRuntimeBootstrap", () => {
-  it("fires boot and daemon-start without awaiting the daemon-start promise", () => {
+  it("boots the host registry and starts the managed-daemon decision as one operation", async () => {
     const events: string[] = [];
+    const shouldStartDaemon = async () => true;
     const store = {
-      boot: vi.fn(() => {
+      boot: async () => {
         events.push("boot");
-      }),
-    };
-    const daemonStartService = {
-      start: vi.fn(async () => {
-        events.push("daemon-start");
-        return { ok: true as const };
-      }),
-    };
-
-    startHostRuntimeBootstrap({
-      store,
-      daemonStartService,
-      shouldStartDaemon: true,
-    });
-
-    expect(store.boot).toHaveBeenCalledTimes(1);
-    expect(daemonStartService.start).toHaveBeenCalledTimes(1);
-    expect(events).toEqual(["boot", "daemon-start"]);
-  });
-
-  it("skips daemon-start when shouldStartDaemon is false", () => {
-    const store = createFakeStore();
-    const daemonStartService = createFakeDaemonStartService();
-
-    startHostRuntimeBootstrap({
-      store,
-      daemonStartService,
-      shouldStartDaemon: false,
-    });
-
-    expect(store.boot).toHaveBeenCalledTimes(1);
-    expect(daemonStartService.start).not.toHaveBeenCalled();
-  });
-
-  it("skips daemon-start when the startup gate resolves false", async () => {
-    const store = createFakeStore();
-    const daemonStartService = createFakeDaemonStartService();
-
-    startHostRuntimeBootstrap({
-      store,
-      daemonStartService,
-      shouldStartDaemon: async () => false,
-    });
-    await Promise.resolve();
-
-    expect(store.boot).toHaveBeenCalledTimes(1);
-    expect(daemonStartService.start).not.toHaveBeenCalled();
-  });
-
-  it("surfaces gate rejection to onGateError without starting the daemon", async () => {
-    const store = createFakeStore();
-    const daemonStartService = createFakeDaemonStartService();
-    const onGateError = vi.fn();
-
-    startHostRuntimeBootstrap({
-      store,
-      daemonStartService,
-      shouldStartDaemon: async () => {
-        throw new Error("settings file unreadable");
       },
-      onGateError,
-    });
-    await vi.waitFor(() => {
-      expect(onGateError).toHaveBeenCalledTimes(1);
-    });
-
-    expect(daemonStartService.start).not.toHaveBeenCalled();
-    expect(onGateError).toHaveBeenCalledWith(expect.stringContaining("settings file unreadable"));
-  });
-
-  it("does not await the daemon-start promise", () => {
-    const store = createFakeStore();
-    let resolveStart: ((value: { ok: true }) => void) | undefined;
+    };
+    const receivedDecisions: Array<Promise<boolean>> = [];
     const daemonStartService = {
-      start: vi.fn(
-        () =>
-          new Promise<{ ok: true }>((resolve) => {
-            resolveStart = resolve;
-          }),
-      ),
+      startIfEnabled: async (input: StartDaemonIfEnabledInput) => {
+        receivedDecisions.push(
+          Promise.resolve(
+            typeof input.shouldStart === "boolean" ? input.shouldStart : input.shouldStart(),
+          ),
+        );
+        events.push("daemon-start-decision");
+        return { ok: true as const };
+      },
     };
 
     startHostRuntimeBootstrap({
       store,
       daemonStartService,
-      shouldStartDaemon: true,
+      shouldStartDaemon,
     });
 
-    expect(store.boot).toHaveBeenCalledTimes(1);
-    expect(daemonStartService.start).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(["boot", "daemon-start-decision"]);
+    expect(await receivedDecisions[0]).toBe(true);
+  });
 
-    resolveStart?.({ ok: true });
+  it("waits for the host registry to load before evaluating managed-daemon startup", async () => {
+    const events: string[] = [];
+    let resolveBoot!: () => void;
+    const booted = new Promise<void>((resolve) => {
+      resolveBoot = resolve;
+    });
+    const store = {
+      boot: () => {
+        events.push("boot");
+        return booted;
+      },
+    };
+    let startFinished!: Promise<DaemonStartResult>;
+    const daemonStartService = {
+      startIfEnabled: (input: StartDaemonIfEnabledInput) => {
+        events.push("daemon-start-service");
+        startFinished = (async () => {
+          const shouldStart =
+            typeof input.shouldStart === "boolean" ? input.shouldStart : await input.shouldStart();
+          events.push(`decision:${shouldStart}`);
+          return { ok: true as const };
+        })();
+        return startFinished;
+      },
+    };
+
+    startHostRuntimeBootstrap({
+      store,
+      daemonStartService,
+      shouldStartDaemon: () => {
+        events.push("evaluate-daemon-setting");
+        return true;
+      },
+    });
+
+    await Promise.resolve();
+    expect(events).toEqual(["boot", "daemon-start-service"]);
+
+    resolveBoot();
+    await startFinished;
+    expect(events).toEqual([
+      "boot",
+      "daemon-start-service",
+      "evaluate-daemon-setting",
+      "decision:true",
+    ]);
   });
 });
 
@@ -251,7 +222,7 @@ describe("resolveStartupRoute", () => {
     ).toEqual({ kind: "splash" });
   });
 
-  it("restores the saved workspace only after the host registry proves the host exists", () => {
+  it("enters the host boundary for saved workspace restore after the host registry proves the host exists", () => {
     expect(
       resolveStartupRoute({
         ...baseIndexInput,
@@ -259,7 +230,19 @@ describe("resolveStartupRoute", () => {
         workspaceSelection: { serverId: "server-1", workspaceId: "workspace-a" },
         workspaceSelectionStatus: "exists",
       }),
-    ).toEqual({ kind: "redirect", href: "/h/server-1/workspace/workspace-a" });
+    ).toEqual({ kind: "redirect", href: "/h/server-1" });
+  });
+
+  it("restores the last workspace host even when a different host is already online", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hosts: [{ serverId: "server-offline" }, { serverId: "server-online" }],
+        anyOnlineHostServerId: "server-online",
+        workspaceSelection: { serverId: "server-offline", workspaceId: "workspace-a" },
+        workspaceSelectionStatus: "unknown",
+      }),
+    ).toEqual({ kind: "redirect", href: "/h/server-offline" });
   });
 
   it("does not restore a saved workspace after workspace hydration proves it is missing", () => {
@@ -271,6 +254,48 @@ describe("resolveStartupRoute", () => {
         workspaceSelectionStatus: "missing",
       }),
     ).toEqual({ kind: "redirect", href: "/h/server-1" });
+  });
+
+  it("redirects VS Code startup to the matched workspace before the saved workspace", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hosts: [{ serverId: "server-vscode" }, { serverId: "server-saved" }],
+        workspaceSelection: { serverId: "server-saved", workspaceId: "workspace-saved" },
+        isVscodeRuntime: true,
+        vscodeWorkspaceMatchState: {
+          status: "ready",
+          match: { serverId: "server-vscode", workspaceId: "workspace-vscode" },
+        },
+      }),
+    ).toEqual({ kind: "redirect", href: "/h/server-vscode/workspace/workspace-vscode" });
+  });
+
+  it("keeps VS Code startup on the splash while folder matching data is loading", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hosts: [{ serverId: "server-vscode" }],
+        anyOnlineHostServerId: "server-vscode",
+        isVscodeRuntime: true,
+        vscodeWorkspaceMatchState: { status: "loading" },
+      }),
+    ).toEqual({ kind: "splash" });
+  });
+
+  it("ignores a VS Code workspace match when not running in VS Code", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hosts: [{ serverId: "server-vscode" }, { serverId: "server-saved" }],
+        workspaceSelection: { serverId: "server-saved", workspaceId: "workspace-saved" },
+        isVscodeRuntime: false,
+        vscodeWorkspaceMatchState: {
+          status: "ready",
+          match: { serverId: "server-vscode", workspaceId: "workspace-vscode" },
+        },
+      }),
+    ).toEqual({ kind: "redirect", href: "/h/server-saved" });
   });
 
   it("falls back to a saved host when the restored workspace host is no longer saved", () => {
@@ -339,14 +364,14 @@ describe("resolveStartupRoute", () => {
     ).toEqual({ kind: "render" });
   });
 
-  it("sends removed host routes to a saved host instead of welcome", () => {
+  it("sends removed host routes to global project selection instead of welcome", () => {
     expect(
       resolveStartupRoute({
         ...baseHostInput,
         route: { kind: "host", serverId: "server-removed" },
         hosts: [{ serverId: "server-next" }],
       }),
-    ).toEqual({ kind: "redirect", href: "/h/server-next/open-project" });
+    ).toEqual({ kind: "redirect", href: "/open-project" });
   });
 
   it("shows welcome from a host route only after the registry proves no hosts exist", () => {
@@ -360,7 +385,7 @@ describe("resolveStartupRoute", () => {
 });
 
 describe("resolveHostIndexRoute", () => {
-  it("restores the remembered workspace when the host index is reopened for the same host", () => {
+  it("restores the remembered workspace when the host index opens for the same host", () => {
     expect(
       resolveHostIndexRoute({
         serverId: "server-saved",
@@ -380,23 +405,33 @@ describe("resolveHostIndexRoute", () => {
     ).toEqual("/h/server-saved/workspace/workspace-a");
   });
 
-  it("opens project selection when the remembered workspace is proven missing", () => {
+  it("opens global project selection when the remembered workspace is proven missing", () => {
     expect(
       resolveHostIndexRoute({
         serverId: "server-saved",
         workspaceSelection: { serverId: "server-saved", workspaceId: "workspace-a" },
         workspaceSelectionStatus: "missing",
       }),
-    ).toEqual("/h/server-saved/open-project");
+    ).toEqual("/open-project");
   });
 
-  it("opens project selection when the remembered workspace belongs to another host", () => {
+  it("opens global project selection when the remembered workspace belongs to another host", () => {
     expect(
       resolveHostIndexRoute({
         serverId: "server-saved",
         workspaceSelection: { serverId: "server-other", workspaceId: "workspace-a" },
         workspaceSelectionStatus: "exists",
       }),
-    ).toEqual("/h/server-saved/open-project");
+    ).toEqual("/open-project");
+  });
+
+  it("opens global project selection when no workspace is remembered", () => {
+    expect(
+      resolveHostIndexRoute({
+        serverId: "server-saved",
+        workspaceSelection: null,
+        workspaceSelectionStatus: "unknown",
+      }),
+    ).toEqual("/open-project");
   });
 });

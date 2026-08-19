@@ -40,6 +40,19 @@ function fetchWorkspacesResponse(workspace: Record<string, unknown>) {
   };
 }
 
+describe("project icon message security", () => {
+  test("rejects URL sources at the daemon boundary", () => {
+    const parsed = SessionInboundMessageSchema.safeParse({
+      type: "project.icon.set.request",
+      projectId: "project-1",
+      source: { type: "url", url: "http://127.0.0.1/private" },
+      requestId: "request-1",
+    });
+
+    expect(parsed.success).toBe(false);
+  });
+});
+
 describe("workspace descriptor message compatibility", () => {
   test("old-shaped fetch_workspaces_response without project still parses", () => {
     const parsed = SessionOutboundMessageSchema.parse(
@@ -220,6 +233,36 @@ describe("provider usage list message contract", () => {
   });
 });
 
+describe("diagnostics message contract", () => {
+  test("accepts the diagnostics request as a simple namespaced RPC", () => {
+    const parsed = SessionInboundMessageSchema.parse({
+      type: "diagnostics.request",
+      requestId: "diag-1",
+    });
+
+    expect(parsed).toEqual({
+      type: "diagnostics.request",
+      requestId: "diag-1",
+    });
+  });
+
+  test("accepts a copyable diagnostics response", () => {
+    const parsed = SessionOutboundMessageSchema.parse({
+      type: "diagnostics.response",
+      payload: {
+        requestId: "diag-2",
+        diagnostic: "Paseo diagnostics\n  Status: ok",
+      },
+    });
+
+    expect(parsed.type).toBe("diagnostics.response");
+    if (parsed.type !== "diagnostics.response") {
+      throw new Error("Expected diagnostics.response");
+    }
+    expect(parsed.payload.diagnostic).toContain("Status: ok");
+  });
+});
+
 describe("agent detach RPC", () => {
   test("parses the namespaced detach request", () => {
     const parsed = SessionInboundMessageSchema.parse({
@@ -262,6 +305,21 @@ describe("agent detach RPC", () => {
       throw new Error("Expected server info payload to parse");
     }
     expect(parsed.features?.agentDetach).toBe(true);
+  });
+
+  test("parses the workspace-targeted session import feature gate", () => {
+    const parsed = parseServerInfoStatusPayload({
+      status: "server_info",
+      serverId: "srv-test",
+      features: {
+        importSessionWorkspaceTarget: true,
+      },
+    });
+
+    if (!parsed) {
+      throw new Error("Expected server info payload to parse");
+    }
+    expect(parsed.features?.importSessionWorkspaceTarget).toBe(true);
   });
 });
 
@@ -370,5 +428,57 @@ describe("paseo worktree archive request compatibility", () => {
     });
     expect(parsed).not.toHaveProperty("extraField");
     expect(parsed.scope).toBe("workspace");
+  });
+});
+
+describe("daemon update messages", () => {
+  test("daemon update progress is a scoped outbound message", () => {
+    const parsed = SessionOutboundMessageSchema.parse({
+      type: "daemon.update.progress",
+      payload: {
+        requestId: "update-1",
+        phase: "installing",
+      },
+    });
+
+    expect(parsed).toEqual({
+      type: "daemon.update.progress",
+      payload: {
+        requestId: "update-1",
+        phase: "installing",
+      },
+    });
+  });
+});
+
+describe("viewed timeline subscription messages", () => {
+  test("parses a complete viewed-agent set and its acknowledgement", () => {
+    const request = SessionInboundMessageSchema.parse({
+      type: "agent.timeline.set_subscription.request",
+      agentIds: ["agent-a", "agent-b"],
+      requestId: "timeline-subscription-1",
+    });
+    const response = SessionOutboundMessageSchema.parse({
+      type: "agent.timeline.set_subscription.response",
+      payload: {
+        agentIds: ["agent-a", "agent-b"],
+        requestId: "timeline-subscription-1",
+      },
+    });
+
+    expect({ request, response }).toEqual({
+      request: {
+        type: "agent.timeline.set_subscription.request",
+        agentIds: ["agent-a", "agent-b"],
+        requestId: "timeline-subscription-1",
+      },
+      response: {
+        type: "agent.timeline.set_subscription.response",
+        payload: {
+          agentIds: ["agent-a", "agent-b"],
+          requestId: "timeline-subscription-1",
+        },
+      },
+    });
   });
 });

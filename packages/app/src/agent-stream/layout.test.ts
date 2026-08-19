@@ -82,7 +82,7 @@ function strategyFor(platform: "web" | "android"): StreamStrategy {
 
 function layoutFor(input: {
   platform: "web" | "android";
-  agentStatus?: string;
+  isTurnActive?: boolean;
   tail: StreamItem[];
   head?: StreamItem[];
   timingIds?: string[];
@@ -90,7 +90,7 @@ function layoutFor(input: {
   const strategy = strategyFor(input.platform);
   return layoutStream({
     strategy,
-    agentStatus: input.agentStatus ?? "idle",
+    isTurnActive: input.isTurnActive ?? false,
     history: orderTailForStreamRenderStrategy({
       strategy,
       streamItems: input.tail,
@@ -112,6 +112,26 @@ function footerOwners(layout: StreamLayout): string[] {
   return owners;
 }
 
+function footerAssistantIds(layout: StreamLayout): string[] {
+  return [
+    ...layout.history.flatMap((item) =>
+      item.completedFooter ? [item.completedFooter.itemId] : [],
+    ),
+    ...layout.liveHead.flatMap((item) =>
+      item.completedFooter ? [item.completedFooter.itemId] : [],
+    ),
+    ...(layout.auxiliaryTurnFooter ? [layout.auxiliaryTurnFooter.itemId] : []),
+  ];
+}
+
+function inlineFooterPlacementByItemId(layout: StreamLayout): Record<string, string> {
+  return Object.fromEntries(
+    [...layout.history, ...layout.liveHead].flatMap((item) =>
+      item.completedFooter ? [[item.item.id, item.completedFooter.itemId]] : [],
+    ),
+  );
+}
+
 function findLayoutItem(layout: StreamLayout, id: string): StreamLayoutItem {
   const item = [...layout.history, ...layout.liveHead].find(
     (candidate) => candidate.item.id === id,
@@ -124,6 +144,30 @@ function findLayoutItem(layout: StreamLayout, id: string): StreamLayoutItem {
 
 describe("layoutStream", () => {
   it.each(["web", "android"] as const)(
+    "marks only the active live-head assistant block as streaming on %s",
+    (platform) => {
+      const completed = assistantMessage("turn:block:0", 2, { groupId: "turn", index: 0 });
+      const live = assistantMessage("turn:block:1", 3, { groupId: "turn", index: 1 });
+      const active = layoutFor({
+        platform,
+        isTurnActive: true,
+        tail: [userMessage("u1", 1), completed],
+        head: [live],
+      });
+      const complete = layoutFor({
+        platform,
+        isTurnActive: false,
+        tail: [userMessage("u1", 1), completed],
+        head: [live],
+      });
+
+      expect(findLayoutItem(active, completed.id).phase).toBe("complete");
+      expect(findLayoutItem(active, live.id).phase).toBe("streaming");
+      expect(findLayoutItem(complete, live.id).phase).toBe("complete");
+    },
+  );
+
+  it.each(["web", "android"] as const)(
     "keeps split assistant block spacing identical to unsplit history on %s",
     (platform) => {
       const firstBlock = assistantMessage("turn:block:0", 2, { groupId: "turn", index: 0 });
@@ -131,14 +175,14 @@ describe("layoutStream", () => {
       const thirdBlock = assistantMessage("turn:block:2", 4, { groupId: "turn", index: 2 });
       const splitLayout = layoutFor({
         platform,
-        agentStatus: "running",
+        isTurnActive: true,
         tail: [userMessage("u1", 1), firstBlock],
         head: [secondBlock, thirdBlock],
         timingIds: [firstBlock.id, secondBlock.id, thirdBlock.id],
       });
       const unsplitLayout = layoutFor({
         platform,
-        agentStatus: "running",
+        isTurnActive: true,
         tail: [userMessage("u1", 1), firstBlock, secondBlock, thirdBlock],
         timingIds: [firstBlock.id, secondBlock.id, thirdBlock.id],
       });
@@ -289,4 +333,144 @@ describe("layoutStream", () => {
     expect(findLayoutItem(layout, assistant.id).completedFooter).toBeNull();
     expect(footerOwners(layout)).toEqual([assistant.id]);
   });
+
+  it.each(["web", "android"] as const)(
+    "places inline footer after trailing visible tool rows before the next user on %s",
+    (platform) => {
+      const assistant = assistantMessage("a1", 2);
+      const tool = toolCall("tool-1", 3);
+      const layout = layoutFor({
+        platform,
+        tail: [userMessage("u1", 1), assistant, tool, userMessage("u2", 4)],
+        timingIds: [assistant.id],
+      });
+
+      expect(layout.auxiliaryTurnFooter).toBeNull();
+      expect(findLayoutItem(layout, assistant.id).completedFooter).toBeNull();
+      expect(findLayoutItem(layout, tool.id).completedFooter?.itemId).toBe(assistant.id);
+      expect(footerOwners(layout)).toEqual([tool.id]);
+      expect(footerAssistantIds(layout)).toEqual([assistant.id]);
+    },
+  );
+
+  it.each(["web", "android"] as const)(
+    "places split live-head tool footer using the assistant from history on %s",
+    (platform) => {
+      const assistant = assistantMessage("a1", 2);
+      const tool = toolCall("tool-1", 3);
+      const layout = layoutFor({
+        platform,
+        tail: [userMessage("u1", 1), assistant],
+        head: [tool, userMessage("u2", 4)],
+        timingIds: [assistant.id],
+      });
+
+      expect(layout.auxiliaryTurnFooter).toBeNull();
+      expect(findLayoutItem(layout, assistant.id).completedFooter).toBeNull();
+      expect(findLayoutItem(layout, tool.id).completedFooter?.itemId).toBe(assistant.id);
+      expect(inlineFooterPlacementByItemId(layout)).toEqual({
+        [tool.id]: assistant.id,
+      });
+    },
+  );
+
+  it.each(["web", "android"] as const)(
+    "uses the latest assistant for footer content while placing after the visible turn end on %s",
+    (platform) => {
+      const firstAssistant = assistantMessage("a1", 2);
+      const firstTool = toolCall("tool-1", 3);
+      const latestAssistant = assistantMessage("a2", 4);
+      const latestTool = toolCall("tool-2", 5);
+      const layout = layoutFor({
+        platform,
+        tail: [
+          userMessage("u1", 1),
+          firstAssistant,
+          firstTool,
+          latestAssistant,
+          latestTool,
+          userMessage("u2", 6),
+        ],
+        timingIds: [firstAssistant.id, latestAssistant.id],
+      });
+
+      expect(layout.auxiliaryTurnFooter).toBeNull();
+      expect(findLayoutItem(layout, firstAssistant.id).completedFooter).toBeNull();
+      expect(findLayoutItem(layout, latestAssistant.id).completedFooter).toBeNull();
+      expect(findLayoutItem(layout, latestTool.id).completedFooter?.itemId).toBe(
+        latestAssistant.id,
+      );
+      expect(footerOwners(layout)).toEqual([latestTool.id]);
+      expect(footerAssistantIds(layout)).toEqual([latestAssistant.id]);
+    },
+  );
+
+  it.each(["web", "android"] as const)(
+    "keeps every completed turn footer while placing each one after that turn's last visible item on %s",
+    (platform) => {
+      const firstAssistant = assistantMessage("a1", 2);
+      const secondAssistant = assistantMessage("a2", 4);
+      const secondTool = toolCall("tool-2", 5);
+      const layout = layoutFor({
+        platform,
+        tail: [
+          userMessage("u1", 1),
+          firstAssistant,
+          userMessage("u2", 3),
+          secondAssistant,
+          secondTool,
+          userMessage("u3", 6),
+        ],
+        timingIds: [firstAssistant.id, secondAssistant.id],
+      });
+
+      expect(layout.auxiliaryTurnFooter).toBeNull();
+      expect(findLayoutItem(layout, firstAssistant.id).completedFooter?.itemId).toBe(
+        firstAssistant.id,
+      );
+      expect(findLayoutItem(layout, secondAssistant.id).completedFooter).toBeNull();
+      expect(findLayoutItem(layout, secondTool.id).completedFooter?.itemId).toBe(
+        secondAssistant.id,
+      );
+      expect(inlineFooterPlacementByItemId(layout)).toEqual({
+        [firstAssistant.id]: firstAssistant.id,
+        [secondTool.id]: secondAssistant.id,
+      });
+    },
+  );
+
+  it.each(["web", "android"] as const)(
+    "keeps bottom footer on the latest assistant turn when trailing tool rows end the turn on %s",
+    (platform) => {
+      const assistant = assistantMessage("a1", 2);
+      const tool = toolCall("tool-1", 3);
+      const layout = layoutFor({
+        platform,
+        tail: [userMessage("u1", 1), assistant, tool],
+        timingIds: [assistant.id],
+      });
+
+      expect(layout.auxiliaryTurnFooter?.itemId).toBe(assistant.id);
+      expect(findLayoutItem(layout, assistant.id).completedFooter).toBeNull();
+      expect(footerOwners(layout)).toEqual([assistant.id]);
+    },
+  );
+
+  it.each(["web", "android"] as const)(
+    "does not render a completed footer before tool rows while the turn is running on %s",
+    (platform) => {
+      const assistant = assistantMessage("a1", 2);
+      const tool = toolCall("tool-1", 3);
+      const layout = layoutFor({
+        platform,
+        isTurnActive: true,
+        tail: [userMessage("u1", 1), assistant, tool],
+        timingIds: [assistant.id],
+      });
+
+      expect(layout.auxiliaryTurnFooter).toBeNull();
+      expect(findLayoutItem(layout, assistant.id).completedFooter).toBeNull();
+      expect(footerOwners(layout)).toEqual([]);
+    },
+  );
 });

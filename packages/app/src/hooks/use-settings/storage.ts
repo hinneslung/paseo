@@ -2,7 +2,20 @@ import { isSyntaxThemeId, type SyntaxThemeId } from "@getpaseo/highlight";
 import type { QueryClient } from "@tanstack/react-query";
 import type { DesktopSettings } from "@/desktop/settings/desktop-settings";
 import { parseAppLanguage, type AppLanguage } from "@/i18n/locales";
-import { THEME_TO_UNISTYLES, type ThemeName } from "@/styles/theme";
+import {
+  DEFAULT_SIDEBAR_CHECKS_DISPLAY,
+  parseSidebarChecksDisplay,
+  type SidebarChecksDisplay,
+} from "@/components/sidebar/display-preferences/checks-display";
+import {
+  DEFAULT_SIDEBAR_ROW_ITEMS,
+  isChecksHiddenByLegacyRowItem,
+  parseSidebarRowItems,
+  type SidebarRowItems,
+} from "@/components/sidebar/display-preferences/row-items";
+import { THEME_OPTIONS, type ThemePreference } from "@/styles/theme";
+import { z } from "zod";
+import { readValidatedJson } from "@/storage/validated-storage";
 
 export const APP_SETTINGS_KEY = "@paseo:app-settings";
 export const APP_SETTINGS_QUERY_KEY = ["app-settings"];
@@ -12,10 +25,20 @@ export type SendBehavior = "interrupt" | "queue";
 export type ReleaseChannel = "stable" | "beta";
 export type ServiceUrlBehavior = "ask" | "in-app" | "external";
 export type WorkspaceTitleSource = "title" | "branch";
+/** What a sidebar workspace row shows in the space to the right of its title. */
+export type SidebarWorkspaceTrailing = "diff" | "timestamp" | "none";
+export type ToolCallDetailLevel = "overview" | "detailed";
 
-const VALID_THEMES = new Set<string>([...Object.keys(THEME_TO_UNISTYLES), "auto"]);
+const VALID_THEMES = new Set<string>(THEME_OPTIONS.map((option) => option.name));
+const ThemePreferenceSchema = z.enum(THEME_OPTIONS.map((option) => option.name));
 const VALID_SERVICE_URL_BEHAVIORS = new Set<ServiceUrlBehavior>(["ask", "in-app", "external"]);
 const VALID_WORKSPACE_TITLE_SOURCES = new Set<WorkspaceTitleSource>(["title", "branch"]);
+const VALID_SIDEBAR_WORKSPACE_TRAILINGS = new Set<SidebarWorkspaceTrailing>([
+  "diff",
+  "timestamp",
+  "none",
+]);
+const VALID_TOOL_CALL_DETAIL_LEVELS = new Set<ToolCallDetailLevel>(["overview", "detailed"]);
 export const DEFAULT_TERMINAL_SCROLLBACK_LINES = 10_000;
 export const MIN_TERMINAL_SCROLLBACK_LINES = 0;
 export const MAX_TERMINAL_SCROLLBACK_LINES = 1_000_000;
@@ -28,17 +51,25 @@ export const MAX_CODE_FONT_SIZE = 22; // line-height 1.5×22=33 stays safe
 export const MAX_FONT_FAMILY_LENGTH = 200;
 
 export interface AppSettings {
-  theme: ThemeName | "auto";
+  theme: ThemePreference;
   language: AppLanguage;
   sendBehavior: SendBehavior;
   serviceUrlBehavior: ServiceUrlBehavior;
   terminalScrollbackLines: number;
+  useLegacyTerminalRenderer: boolean;
   uiFontFamily: string; // "" = platform default UI stack
   monoFontFamily: string; // "" = platform default mono stack
   uiFontSize: number; // clamped px, default 16
   codeFontSize: number; // clamped px, default 12
   syntaxTheme: SyntaxThemeId; // default "one"
   workspaceTitleSource: WorkspaceTitleSource;
+  sidebarWorkspaceTrailing: SidebarWorkspaceTrailing;
+  sidebarRowItems: SidebarRowItems;
+  sidebarChecksDisplay: SidebarChecksDisplay;
+  autoExpandReasoning: boolean;
+  toolCallDetailLevel: ToolCallDetailLevel;
+  chatOutlineEnabled: boolean;
+  vimKeybindings: boolean;
 }
 
 export interface Settings extends AppSettings {
@@ -46,18 +77,66 @@ export interface Settings extends AppSettings {
   releaseChannel: ReleaseChannel;
 }
 
+const SidebarRowItemsSchema = z.strictObject({
+  host: z.boolean().optional(),
+  changeRequest: z.boolean().optional(),
+  services: z.boolean().optional(),
+  checks: z.boolean().optional(),
+  scripts: z.boolean().optional(),
+});
+
+const StoredAppSettingsSchema = z.strictObject({
+  theme: ThemePreferenceSchema.optional(),
+  language: z
+    .enum(["system", "ar", "en", "es", "fr", "ja", "ko", "pt-BR", "ru", "zh-CN"])
+    .optional(),
+  sendBehavior: z.enum(["interrupt", "queue"]).optional(),
+  serviceUrlBehavior: z.enum(["ask", "in-app", "external"]).optional(),
+  terminalScrollbackLines: z.union([z.number(), z.string()]).optional(),
+  useLegacyTerminalRenderer: z.boolean().optional(),
+  uiFontFamily: z.string().optional(),
+  monoFontFamily: z.string().optional(),
+  uiFontSize: z.union([z.number(), z.string()]).optional(),
+  codeFontSize: z.union([z.number(), z.string()]).optional(),
+  syntaxTheme: z.string().refine(isSyntaxThemeId).optional(),
+  workspaceTitleSource: z.enum(["title", "branch"]).optional(),
+  sidebarWorkspaceTrailing: z.enum(["diff", "timestamp", "none"]).optional(),
+  sidebarRowItems: SidebarRowItemsSchema.optional(),
+  sidebarChecksDisplay: z.enum(["iconAndText", "icon", "none"]).optional(),
+  autoExpandReasoning: z.boolean().optional(),
+  toolCallDetailLevel: z.enum(["overview", "detailed"]).optional(),
+  compactToolCalls: z.boolean().optional(),
+  chatOutlineEnabled: z.boolean().optional(),
+  vimKeybindings: z.boolean().optional(),
+  // COMPAT(rendererDesktopSettings): these fields used to share this renderer-owned key.
+  manageBuiltInDaemon: z.boolean().optional(),
+  releaseChannel: z.enum(["stable", "beta"]).optional(),
+});
+
+const LegacyRendererSettingsSchema = StoredAppSettingsSchema;
+
+type StoredAppSettings = z.infer<typeof StoredAppSettingsSchema>;
+
 export const DEFAULT_CLIENT_SETTINGS: AppSettings = {
   theme: "auto",
   language: "system",
   sendBehavior: "interrupt",
   serviceUrlBehavior: "ask",
   terminalScrollbackLines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
+  useLegacyTerminalRenderer: false,
   uiFontFamily: "",
   monoFontFamily: "",
   uiFontSize: DEFAULT_UI_FONT_SIZE,
   codeFontSize: DEFAULT_CODE_FONT_SIZE,
   syntaxTheme: "one",
   workspaceTitleSource: "title",
+  sidebarWorkspaceTrailing: "diff",
+  sidebarRowItems: DEFAULT_SIDEBAR_ROW_ITEMS,
+  sidebarChecksDisplay: DEFAULT_SIDEBAR_CHECKS_DISPLAY,
+  autoExpandReasoning: false,
+  toolCallDetailLevel: "detailed",
+  chatOutlineEnabled: true,
+  vimKeybindings: false,
 };
 
 export const DEFAULT_APP_SETTINGS: Settings = {
@@ -69,6 +148,7 @@ export const DEFAULT_APP_SETTINGS: Settings = {
 export interface KeyValueStorage {
   getItem(key: string): Promise<string | null>;
   setItem(key: string, value: string): Promise<void>;
+  removeItem(key: string): Promise<void>;
 }
 
 export interface DesktopSettingsBridge {
@@ -90,9 +170,10 @@ export async function saveAppSettings(input: {
   updates: Partial<AppSettings>;
   deps: SettingsDeps;
 }): Promise<void> {
-  const current =
+  const storedCurrent =
     input.queryClient.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY) ??
     (await loadAppSettingsFromStorage(input.deps));
+  const current = normalizeAppSettings(storedCurrent);
   const next = { ...current, ...input.updates };
   input.queryClient.setQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY, next);
   await input.deps.storage.setItem(APP_SETTINGS_KEY, JSON.stringify(next));
@@ -100,18 +181,20 @@ export async function saveAppSettings(input: {
 
 export async function loadAppSettingsFromStorage(deps: SettingsDeps): Promise<AppSettings> {
   try {
-    const stored = await deps.storage.getItem(APP_SETTINGS_KEY);
+    const stored = await readValidatedJson(deps.storage, APP_SETTINGS_KEY, StoredAppSettingsSchema);
     if (stored) {
-      const parsed = JSON.parse(stored) as Partial<AppSettings>;
-      return { ...DEFAULT_CLIENT_SETTINGS, ...pickAppSettings(parsed) };
+      return normalizeAppSettings(stored);
     }
 
-    const legacyStored = await deps.storage.getItem(LEGACY_SETTINGS_KEY);
+    const legacyStored = await readValidatedJson(
+      deps.storage,
+      LEGACY_SETTINGS_KEY,
+      LegacyRendererSettingsSchema,
+    );
     if (legacyStored) {
-      const legacyParsed = JSON.parse(legacyStored) as Record<string, unknown>;
       const next = {
         ...DEFAULT_CLIENT_SETTINGS,
-        ...pickAppSettingsFromLegacy(legacyParsed),
+        ...pickAppSettingsFromLegacy(legacyStored),
       } satisfies AppSettings;
       await deps.storage.setItem(APP_SETTINGS_KEY, JSON.stringify(next));
       return next;
@@ -151,14 +234,65 @@ export async function loadSettingsFromStorage(deps: SettingsDeps): Promise<Setti
   };
 }
 
-function pickAppSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
+export function normalizeAppSettings(value: unknown): AppSettings {
+  const result = StoredAppSettingsSchema.safeParse(value);
+  return {
+    ...DEFAULT_CLIENT_SETTINGS,
+    ...pickAppSettings(result.success ? result.data : {}),
+  };
+}
+
+function parseToolCallDetailLevel(stored: StoredAppSettings): ToolCallDetailLevel | null {
+  if (stored.toolCallDetailLevel !== undefined) {
+    if (
+      typeof stored.toolCallDetailLevel === "string" &&
+      VALID_TOOL_CALL_DETAIL_LEVELS.has(stored.toolCallDetailLevel)
+    ) {
+      return stored.toolCallDetailLevel;
+    }
+    // COMPAT(toolCallDetailLevelConcise): removed in v0.1.107; legacy "concise" values
+    // deliberately follow the unknown-value fallback. Remove after 2027-01-14.
+    return "overview";
+  }
+  if (typeof stored.compactToolCalls === "boolean") {
+    // COMPAT(compactToolCalls): migrated in v0.1.105, remove after 2027-01-12.
+    return stored.compactToolCalls ? "overview" : "detailed";
+  }
+  return null;
+}
+
+function parseStoredSidebarChecksDisplay(stored: StoredAppSettings): SidebarChecksDisplay | null {
+  const display = parseSidebarChecksDisplay(stored.sidebarChecksDisplay);
+  if (display !== null) {
+    return display;
+  }
+  // COMPAT(sidebarRowItemsChecks): migrated in v0.3.0, remove after 2027-08-05.
+  return isChecksHiddenByLegacyRowItem(stored.sidebarRowItems) ? "none" : null;
+}
+
+function pickBooleanAppSettings(stored: StoredAppSettings): Partial<AppSettings> {
+  const result: Partial<AppSettings> = {};
+  if (typeof stored.useLegacyTerminalRenderer === "boolean") {
+    result.useLegacyTerminalRenderer = stored.useLegacyTerminalRenderer;
+  }
+  if (typeof stored.vimKeybindings === "boolean") {
+    result.vimKeybindings = stored.vimKeybindings;
+  }
+  if (typeof stored.chatOutlineEnabled === "boolean") {
+    result.chatOutlineEnabled = stored.chatOutlineEnabled;
+  }
+  return result;
+}
+
+/**
+ * The settings whose stored value only has to be a member of a fixed set. Grouped like the
+ * boolean settings are: the numeric and font settings need real parsing and clamping, these
+ * need a membership check and nothing else.
+ */
+function pickEnumAppSettings(stored: StoredAppSettings): Partial<AppSettings> {
   const result: Partial<AppSettings> = {};
   if (typeof stored.theme === "string" && VALID_THEMES.has(stored.theme)) {
     result.theme = stored.theme;
-  }
-  const language = parseAppLanguage(stored.language);
-  if (language !== null) {
-    result.language = language;
   }
   if (stored.sendBehavior === "interrupt" || stored.sendBehavior === "queue") {
     result.sendBehavior = stored.sendBehavior;
@@ -168,6 +302,38 @@ function pickAppSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
     VALID_SERVICE_URL_BEHAVIORS.has(stored.serviceUrlBehavior)
   ) {
     result.serviceUrlBehavior = stored.serviceUrlBehavior;
+  }
+  if (typeof stored.syntaxTheme === "string" && isSyntaxThemeId(stored.syntaxTheme)) {
+    result.syntaxTheme = stored.syntaxTheme;
+  }
+  if (
+    typeof stored.workspaceTitleSource === "string" &&
+    VALID_WORKSPACE_TITLE_SOURCES.has(stored.workspaceTitleSource)
+  ) {
+    result.workspaceTitleSource = stored.workspaceTitleSource;
+  }
+  if (
+    typeof stored.sidebarWorkspaceTrailing === "string" &&
+    VALID_SIDEBAR_WORKSPACE_TRAILINGS.has(stored.sidebarWorkspaceTrailing)
+  ) {
+    result.sidebarWorkspaceTrailing = stored.sidebarWorkspaceTrailing;
+  }
+  return result;
+}
+
+function pickAppSettings(stored: StoredAppSettings): Partial<AppSettings> {
+  const result: Partial<AppSettings> = {};
+  Object.assign(result, pickEnumAppSettings(stored));
+  if (stored.sidebarRowItems !== undefined) {
+    result.sidebarRowItems = parseSidebarRowItems(stored.sidebarRowItems);
+  }
+  const sidebarChecksDisplay = parseStoredSidebarChecksDisplay(stored);
+  if (sidebarChecksDisplay !== null) {
+    result.sidebarChecksDisplay = sidebarChecksDisplay;
+  }
+  const language = parseAppLanguage(stored.language);
+  if (language !== null) {
+    result.language = language;
   }
   const terminalScrollbackLines = parseTerminalScrollbackLines(stored.terminalScrollbackLines);
   if (terminalScrollbackLines !== null) {
@@ -195,19 +361,20 @@ function pickAppSettings(stored: Partial<AppSettings>): Partial<AppSettings> {
   if (codeFontSize !== null) {
     result.codeFontSize = codeFontSize;
   }
-  if (typeof stored.syntaxTheme === "string" && isSyntaxThemeId(stored.syntaxTheme)) {
-    result.syntaxTheme = stored.syntaxTheme;
+  Object.assign(result, pickBooleanAppSettings(stored));
+  if (typeof stored.autoExpandReasoning === "boolean") {
+    result.autoExpandReasoning = stored.autoExpandReasoning;
   }
-  if (
-    typeof stored.workspaceTitleSource === "string" &&
-    VALID_WORKSPACE_TITLE_SOURCES.has(stored.workspaceTitleSource)
-  ) {
-    result.workspaceTitleSource = stored.workspaceTitleSource;
+  const toolCallDetailLevel = parseToolCallDetailLevel(stored);
+  if (toolCallDetailLevel !== null) {
+    result.toolCallDetailLevel = toolCallDetailLevel;
   }
   return result;
 }
 
-function pickAppSettingsFromLegacy(legacy: Record<string, unknown>): Partial<AppSettings> {
+function pickAppSettingsFromLegacy(
+  legacy: z.infer<typeof LegacyRendererSettingsSchema>,
+): Partial<AppSettings> {
   const result: Partial<AppSettings> = {};
   if (legacy.theme === "dark" || legacy.theme === "light" || legacy.theme === "auto") {
     result.theme = legacy.theme;
@@ -293,15 +460,11 @@ async function loadLegacyDesktopSettingsFromStorage(storage: KeyValueStorage): P
 
 async function loadRendererSettingsPayload(
   storage: KeyValueStorage,
-): Promise<Record<string, unknown> | null> {
-  const current = await storage.getItem(APP_SETTINGS_KEY);
+): Promise<z.infer<typeof LegacyRendererSettingsSchema> | null> {
+  const current = await readValidatedJson(storage, APP_SETTINGS_KEY, LegacyRendererSettingsSchema);
   if (current) {
-    return JSON.parse(current) as Record<string, unknown>;
+    return current;
   }
 
-  const legacy = await storage.getItem(LEGACY_SETTINGS_KEY);
-  if (!legacy) {
-    return null;
-  }
-  return JSON.parse(legacy) as Record<string, unknown>;
+  return readValidatedJson(storage, LEGACY_SETTINGS_KEY, LegacyRendererSettingsSchema);
 }
