@@ -43,7 +43,8 @@ export function parseEditorOpenTargetInput(args: unknown): EditorOpenTargetInput
   if (!workspacePath) {
     throw new Error("editor.openTarget requires a workspace path.");
   }
-  const filePath = typeof args.filePath === "string" && args.filePath.trim() ? args.filePath.trim() : undefined;
+  const filePath =
+    typeof args.filePath === "string" && args.filePath.trim() ? args.filePath.trim() : undefined;
   const line = parseLineNumber(args.line, "line");
   const column = parseLineNumber(args.column, "column");
   const lineEnd = parseLineNumber(args.lineEnd, "lineEnd");

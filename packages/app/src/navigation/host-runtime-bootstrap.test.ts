@@ -295,7 +295,7 @@ describe("resolveStartupRoute", () => {
           match: { serverId: "server-vscode", workspaceId: "workspace-vscode" },
         },
       }),
-    ).toEqual({ kind: "redirect", href: "/h/server-saved/workspace/workspace-saved" });
+    ).toEqual({ kind: "redirect", href: "/h/server-saved" });
   });
 
   it("falls back to a saved host when the restored workspace host is no longer saved", () => {

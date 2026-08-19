@@ -408,6 +408,22 @@ function isVoiceKeyboardAction(action: MessageInputKeyboardActionKind): boolean 
     action === "voice-mute-toggle"
   );
 }
+
+function runVisibleMessageInputKeyboardAction(
+  action: MessageInputKeyboardActionKind,
+  showVoice: boolean,
+  actions: Parameters<typeof runMessageInputKeyboardAction>[1],
+): boolean {
+  if (!showVoice && isVoiceKeyboardAction(action)) {
+    return false;
+  }
+  return runMessageInputKeyboardAction(action, actions);
+}
+
+function resolveShowVoice(showVoice: boolean, mode: ReturnType<typeof resolveComposerInputMode>) {
+  return showVoice && mode.showVoice;
+}
+
 function getTextInputNativeElement(
   current: TextInput | (TextInput & { getNativeRef?: () => unknown }) | null,
 ): HTMLElement | null {
@@ -1225,7 +1241,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       submitLabel,
     } = resolveMessageInputProps(props);
     const mode = resolveComposerInputMode(inputMode);
-    const showVoice = showVoiceProp && mode.showVoice;
+    const showVoice = resolveShowVoice(showVoiceProp, mode);
     const { t } = useTranslation();
     const isCompact = useIsCompactFormFactor();
     const { height: windowHeight } = useWindowDimensions();
@@ -1253,10 +1269,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
         textInputRef.current?.blur?.();
       },
       runKeyboardAction: (action) => {
-        if (!showVoice && isVoiceKeyboardAction(action)) {
-          return false;
-        }
-        return runMessageInputKeyboardAction(action, {
+        return runVisibleMessageInputKeyboardAction(action, showVoice, {
           focusInput: () => textInputRef.current?.focus(),
           isDictationRecording: isDictationActive,
           markTranscriptForSend: () => {
