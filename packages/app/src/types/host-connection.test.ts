@@ -239,6 +239,45 @@ describe("upsertHostConnectionInProfiles", () => {
     expect(profile.connections).toEqual([replacement]);
     expect(profile.preferredConnectionId).toBe(replacement.id);
   });
+
+  it("re-keys a profile whose connection now answers as a different daemon", () => {
+    const existing: HostProfile = {
+      ...makeHost("srv_machine_a"),
+      label: "machine-a",
+      connections: [connection],
+      preferredConnectionId: connection.id,
+    };
+
+    const profiles = upsertHostConnectionInProfiles({
+      profiles: [existing],
+      serverId: "srv_machine_b",
+      label: "machine-b",
+      connection,
+    });
+
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0].serverId).toBe("srv_machine_b");
+    expect(profiles[0].label).toBe("machine-b");
+    expect(profiles[0].connections).toEqual([connection]);
+  });
+
+  it("keeps a user label when the same daemon reconnects", () => {
+    const existing: HostProfile = {
+      ...makeHost("srv_known"),
+      label: "my laptop",
+      connections: [connection],
+      preferredConnectionId: connection.id,
+    };
+
+    const [profile] = upsertHostConnectionInProfiles({
+      profiles: [existing],
+      serverId: "srv_known",
+      label: "hostname-from-daemon",
+      connection,
+    });
+
+    expect(profile.label).toBe("my laptop");
+  });
 });
 
 describe("resolveActiveHostServerId", () => {

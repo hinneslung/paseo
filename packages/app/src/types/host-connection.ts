@@ -168,6 +168,17 @@ function upsertHostConnectionById(
   return next;
 }
 
+function resolveUpsertedLabel(prev: HostProfile, serverId: string, label: string): string {
+  if (prev.label === prev.serverId) {
+    return label || serverId;
+  }
+  // Re-keyed onto a different daemon: the stored label names the machine being replaced.
+  if (prev.serverId !== serverId && label) {
+    return label;
+  }
+  return prev.label;
+}
+
 export function upsertHostConnectionInProfiles(input: {
   profiles: HostProfile[];
   serverId: string;
@@ -215,7 +226,7 @@ export function upsertHostConnectionInProfiles(input: {
     input.connection,
   );
   const nextLifecycle = prev.lifecycle;
-  const nextLabel = prev.label === prev.serverId ? derivedLabel : prev.label;
+  const nextLabel = resolveUpsertedLabel(prev, serverId, labelTrimmed);
   const nextPreferredConnectionId =
     prev.preferredConnectionId &&
     nextConnections.some((connection) => connection.id === prev.preferredConnectionId)

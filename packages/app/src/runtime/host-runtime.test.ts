@@ -482,6 +482,14 @@ function onceHostListMatches(store: HostRuntimeStore, predicate: () => boolean):
   });
 }
 
+function hostServerIds(store: HostRuntimeStore): string[] {
+  return store.getHosts().map((host) => host.serverId);
+}
+
+function onceFirstHostIs(store: HostRuntimeStore, serverId: string): Promise<void> {
+  return onceHostListMatches(store, () => store.getHosts()[0]?.serverId === serverId);
+}
+
 class BrowserClientLifecycle {
   public active: Array<{ serverId: string; connectionId: string }> = [];
 
@@ -3305,6 +3313,58 @@ describe("HostRuntimeStore", () => {
           },
         ]);
         expect(store.getHosts()[0]?.connections[0]).not.toHaveProperty("password");
+
+        store.syncHosts([]);
+      },
+    );
+  });
+
+  it("re-keys a stale stored bridge host when the daemon answers with another server id", async () => {
+    await withGlobalWindow(
+      {
+        paseoVscode: {
+          endpoint: "127.0.0.1:6767",
+          hasPassword: true,
+          bridgeProtocol: 1,
+          workspaceFolders: [],
+        },
+        paseoDesktop: {},
+      },
+      async () => {
+        const bridge: HostConnection = {
+          id: "bridge:127.0.0.1:6767",
+          type: "directTcpBridge",
+          endpoint: "127.0.0.1:6767",
+        };
+        // A bridge id names a loopback endpoint, so a registry carried over from another machine
+        // points this connection at a daemon that never answers here.
+        const store = new HostRuntimeStore({
+          deps: {
+            createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+            connectToDaemon: async () => ({
+              client: makeConnectedProbeClient(5) as unknown as DaemonClient,
+              serverId: "srv_machine_b",
+              hostname: "machine-b",
+            }),
+            getClientId: async () => "cid_test_runtime",
+          },
+          storage: createMemoryHostRuntimeStorage({
+            "@paseo:daemon-registry": JSON.stringify([
+              makeHost({
+                serverId: "srv_machine_a",
+                label: "machine-a",
+                connections: [bridge],
+                preferredConnectionId: bridge.id,
+              }),
+            ]),
+          }),
+        });
+
+        await store.boot();
+        await onceFirstHostIs(store, "srv_machine_b");
+
+        expect(hostServerIds(store)).toEqual(["srv_machine_b"]);
+        expect(store.getSnapshot("srv_machine_a")).toBeNull();
 
         store.syncHosts([]);
       },

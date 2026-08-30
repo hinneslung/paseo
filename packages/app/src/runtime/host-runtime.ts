@@ -967,9 +967,15 @@ export class HostRuntimeController {
                 connection,
               });
               if (serverId !== this.host.serverId) {
-                if (isPlaceholderServerId(this.host.serverId) && this.onReconcileServerId) {
+                // A bridge endpoint names a different daemon on every machine, so a disagreeing
+                // serverId means the stored profile is stale rather than the wrong daemon.
+                const canAdoptServerId =
+                  isPlaceholderServerId(this.host.serverId) ||
+                  connection.type === "directTcpBridge";
+                if (canAdoptServerId && this.onReconcileServerId) {
                   this.onReconcileServerId(this.host.serverId, serverId);
-                } else {
+                }
+                if (serverId !== this.host.serverId) {
                   await client.close().catch(() => undefined);
                   throw new Error(
                     `Connection resolved to ${serverId}, expected ${this.host.serverId}.`,
