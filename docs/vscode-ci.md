@@ -40,14 +40,31 @@ Publish tags must satisfy all of the workflow's guards:
 - The tag name matches `vscode-v*` and the concrete package version in
   `packages/vscode/package.json`.
 - The tagged commit is reachable from `origin/vscode-extension`.
-- The `marketplace` environment is approved by a human before `vsce publish`
-  receives `VSCE_PAT`.
+- The job uses the `marketplace` environment. A human approval is required only
+  when that environment has protection rules configured; naming the environment
+  in the workflow does not create an approval gate by itself.
 
 The five non-extension workflows with broad `v*` push-tag triggers explicitly
 exclude `vscode-v*`, so an extension release selects only this publisher.
 
-Use a tag push for extension releases. `workflow_dispatch` exists only to rerun a
-specific already-created `vscode-v*` tag through the same validation path.
+Use a tag push for extension releases. A normal `workflow_dispatch` reruns a
+specific already-created `vscode-v*` tag through the same validation and publish
+path.
+
+For read-only Marketplace diagnosis, manually dispatch the same workflow with an
+existing `vscode-v*` tag and `diagnostic_only: true`. The job still checks out
+and validates that tag and installs its pinned dependencies, but skips extension
+build and publication. It instead records status/timing for a bounded anonymous
+Gallery `OPTIONS` request, then runs `vsce verify-pat hinnes` with `VSCE_PAT` in
+the step environment. The credential check still runs when the anonymous probe
+fails, so both results remain visible; neither probe runs after checkout,
+validation, or installation failure.
+
+`verify-pat` accepts any publisher role, including Reader. Success therefore
+shows that the token can access the publisher role API, but does not establish
+Manage/publish permission or prove whether the Gallery endpoint has an ongoing
+service issue. Environment approval is likewise conditional on the repository's
+actual `marketplace` environment protection configuration.
 
 ### Jobs
 
