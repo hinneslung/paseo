@@ -43,6 +43,9 @@ Publish tags must satisfy all of the workflow's guards:
 - The `marketplace` environment is approved by a human before `vsce publish`
   receives `VSCE_PAT`.
 
+The five non-extension workflows with broad `v*` push-tag triggers explicitly
+exclude `vscode-v*`, so an extension release selects only this publisher.
+
 Use a tag push for extension releases. `workflow_dispatch` exists only to rerun a
 specific already-created `vscode-v*` tag through the same validation path.
 

@@ -7,6 +7,7 @@ on:
       - "!v*-beta.*"
       - "app-v*"
       - "!app-v*-beta.*"
+      - "!vscode-v*"
   workflow_dispatch:
 
 jobs:
