@@ -4,8 +4,9 @@ PIC: **Pillow**. Source of truth: [original plan](vscode-v0.8.0-plan.md).
 
 ## Current state
 
-- Phase: implementation integrated at `2c6cd2b38`; independent QA and R4 reviews
-  complete. Final-code CI and evidence packaging active.
+- Phase: runtime integrated at `2c6cd2b38`; independent QA and R4 reviews
+  complete. CI-only streaming-fixture revision `98e31c321` passed both R5 reviews;
+  final CI remains a gate.
 - Source checkout: `/home/hinnes/projects/paseo`; initially clean.
 - Base: `vscode-extension`, `52ad6cd4cce8752abb0efea75a35dced6e882e12`.
 - Target: upstream `v0.8.0`, `b8e24677e12b226c7c38c1c3a40649daa9f1152f`.
@@ -18,12 +19,12 @@ PIC: **Pillow**. Source of truth: [original plan](vscode-v0.8.0-plan.md).
 
 ## Team assignments
 
-| Agent  | Profile/session                        | Assignment                                | Status                                                |
-| ------ | -------------------------------------- | ----------------------------------------- | ----------------------------------------------------- |
-| Pillow | current session                        | PIC, plan, independent QA, PR/CI          | active                                                |
-| Fattie | `b85693b9-8602-45ee-8ae3-59a61ffa5c9f` | implementation and targeted e2e follow-up | implementation complete; PIC evidence commit handover |
-| Biru   | `084b9427-2dca-47e1-9f4f-f702f6a60b74` | original-plan and implementation review   | R4 clean at 2c6cd2b38                                 |
-| Coco   | `6c832395-685d-4995-bede-4a06cb729c81` | independent UI/CSP/QA review              | R4 clean at 2c6cd2b38                                 |
+| Agent  | Profile/session                        | Assignment                                | Status                                           |
+| ------ | -------------------------------------- | ----------------------------------------- | ------------------------------------------------ |
+| Pillow | current session                        | PIC, plan, independent QA, PR/CI          | active                                           |
+| Fattie | `b85693b9-8602-45ee-8ae3-59a61ffa5c9f` | implementation and targeted e2e follow-up | CI harness fixed at 98e31c321; evidence handover |
+| Biru   | `084b9427-2dca-47e1-9f4f-f702f6a60b74` | original-plan and implementation review   | R5 clean at 98e31c321                            |
+| Coco   | `6c832395-685d-4995-bede-4a06cb729c81` | independent UI/CSP/QA review              | R5 clean at 98e31c321                            |
 
 ## Progress
 
@@ -57,10 +58,9 @@ PIC: **Pillow**. Source of truth: [original plan](vscode-v0.8.0-plan.md).
 - Named profiles were read from the authorized daemon: Fattie uses its configured
   Codex profile, Biru its Claude profile, and Coco its OpenCode profile. No profile
   notes were configured.
-- Harness safety: `run-smoke-with-daemon.mjs` currently writes the real user's
-  `~/.paseo/config.json`. Do not run it locally in that form; require isolated
-  config discovery before smoke QA. The CDP e2e harness already uses a scratch
-  daemon home.
+- Harness safety: the baseline smoke wrapper wrote the real user's
+  `~/.paseo/config.json`. Integration replaced this with scratch HOME/USERPROFILE
+  discovery, verified by Linux and Windows CI. CDP also uses a scratch daemon home.
 - Approved PR #12's stale bridge identity recovery as release-relevant: the
   current controller rejects a non-placeholder stored host ID even when the
   extension pins the bridge endpoint. The source is fetched as `origin/pr-12`
@@ -194,15 +194,39 @@ was separately confirmed by extension-host restart and saved-ID reconciliation.
 
 ## CI and PR ledger
 
-Final runtime/test code is `2c6cd2b38`. Documentation/evidence-only commits do not
-change that code; formatting and commit hooks verify those separately.
+Runtime is `2c6cd2b38`; the dedicated CDP harness is `98e31c321`.
+Documentation/evidence-only commits do not change either. Formatting and commit
+hooks verify documentation separately.
+
+**CI revision P-C1-1:** run `34820181500` passed packaging and both platform
+smokes, but the CDP test missed the live-response window. The inspected
+[failure screenshot](screenshots/vscode-v0.8.0/ci-streaming-window/ci-short-stream-failure.png)
+shows the completed diagram and a two-second response. The URI-drop assertion
+had passed. Fattie's test-only `98e31c321` adds a bounded streamed text suffix
+after the closed diagram and jointly probes SVG labels and the Stop control.
+It proves a diagram is visible while its response streams, not incremental
+changes to Mermaid source. The final inline/fullscreen and native-line checks
+remain required. VS Code 1.124.2 local CDP, lint, typecheck and format passed;
+Pillow inspected the copied [final inline](screenshots/vscode-v0.8.0/ci-streaming-window/inline-success.png)
+and [native line](screenshots/vscode-v0.8.0/ci-streaming-window/native-file-link-success.png)
+screenshots. CI confirmation remains pending.
+
+R5 [Biru](screenshots/vscode-v0.8.0/biru-r5.txt) and
+[Coco](screenshots/vscode-v0.8.0/coco-r5.txt) found no material defects. Pillow
+accepts their scope and assertion judgments but rejects their initial eight-second
+calculation: `tokenize` splits each seven-character `hold-NN` into two chunks,
+so 80 words at 100ms/chunk give a 16-second suffix. Pillow's first correction also
+misattributed this to whitespace chunks; complete function inspection corrected
+that account. The observed final local turn took 19 seconds, within the existing
+30-second waits. No runtime change or assertion removal is required.
 
 | Revision  | PR / workflow            | Run URL                                                                     | Result    | Follow-up                                                                                                                                                                                 |
 | --------- | ------------------------ | --------------------------------------------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 46f3385a3 | PR13 / VS Code Extension | [34818858120](https://github.com/hinneslung/paseo/actions/runs/34818858120) | pass      | All four jobs: build, Linux/Windows smoke, CDP                                                                                                                                            |
 | 46f3385a3 | manually dispatched CI   | [34818805713](https://github.com/hinneslung/paseo/actions/runs/34818805713) | cancelled | Superseded; cancelled to release same-branch concurrency for final code. Completed quality/app/SDK/relay/Linux-server/Windows-desktop/CLI jobs were green; unfinished jobs are not passes |
-| 2c6cd2b38 | PR13 / VS Code Extension | [34820181500](https://github.com/hinneslung/paseo/actions/runs/34820181500) | running   | final code with URI-drop and active-stream assertions                                                                                                                                     |
-| 2c6cd2b38 | manually dispatched CI   | [34820176689](https://github.com/hinneslung/paseo/actions/runs/34820176689) | pending   | final full CI/app e2e, previously queued behind superseded run                                                                                                                            |
+| 2c6cd2b38 | PR13 / VS Code Extension | [34820181500](https://github.com/hinneslung/paseo/actions/runs/34820181500) | failed    | Build and Linux/Windows smoke passed; streaming observation window corrected in 98e31c321. No assertion removed                                                                           |
+| 2c6cd2b38 | manually dispatched CI   | [34820176689](https://github.com/hinneslung/paseo/actions/runs/34820176689) | running   | Full CI/app e2e on unchanged runtime; subsequent harness delta is dedicated VS Code-only                                                                                                  |
+| 98e31c321 | PR13 / VS Code Extension | [34821628250](https://github.com/hinneslung/paseo/actions/runs/34821628250) | running   | Corrected bounded streaming fixture; all four jobs started                                                                                                                                |
 
 ## Deferred work and blockers
 
