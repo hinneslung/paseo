@@ -30,12 +30,21 @@ const splashSelector = '[data-testid="startup-splash"]';
 const linkedFileRelativePath = ".github/paseo-vscode-cdp.ts";
 const linkedFileLine = 3;
 const linkedFileTarget = `${linkedFileRelativePath}:${linkedFileLine}`;
+// Keep the provider active after the valid diagram has rendered. The mock provider emits each
+// tokenizer chunk at the configured interval, so this creates a bounded observation window even
+// when CI iframe rendering is slower than local rendering.
+const streamingHoldSuffix = Array.from(
+  { length: 80 },
+  (_, index) => `hold-${String(index + 1).padStart(2, "0")}`,
+).join(" ");
 const streamedTranscript = [
   "```mermaid",
   "flowchart LR",
   "  Bridge --> Runtime",
   "  Runtime --> NativeLink",
   "```",
+  "",
+  streamingHoldSuffix,
   "",
   `[${linkedFileTarget}](${linkedFileRelativePath}#L${linkedFileLine})`,
 ].join("\n");
@@ -271,6 +280,22 @@ async function assertDiagramLabels(svg, labels) {
   );
 }
 
+async function assertDiagramWhileAgentRuns(appFrame, svg, labels) {
+  await svg.waitFor({ state: "visible", timeout: 30_000 });
+  const stopButton = appFrame.getByRole("button", { name: "Stop agent" });
+  await waitForProbe(
+    `streaming Mermaid labels ${labels.join(", ")}`,
+    async () => {
+      const [text, running] = await Promise.all([
+        svg.textContent().catch(() => ""),
+        stopButton.isVisible().catch(() => false),
+      ]);
+      return { ready: running && labels.every((label) => text?.includes(label)), running, text };
+    },
+    30_000,
+  );
+}
+
 async function assertNativeEditorLocation(workbench, fileName, line) {
   return waitForProbe(
     `VS Code editor ${fileName}:${line}`,
@@ -347,7 +372,7 @@ async function runRichTranscriptAndFileLinkSpec({
       model: "e2e-fast-stream",
       featureValues: {
         mockStreamingAssistantResponse: streamedTranscript,
-        mockStreamingAssistantIntervalMs: 75,
+        mockStreamingAssistantIntervalMs: 100,
       },
     });
     const seed = { ...route, agentId: agent.id };
@@ -357,11 +382,7 @@ async function runRichTranscriptAndFileLinkSpec({
 
     const inlineDiagram = appFrame.getByRole("img", { name: "Diagram" }).last();
     const inlineSvg = inlineDiagram.locator("iframe").contentFrame().locator("#diagram svg");
-    await assertDiagramLabels(inlineSvg, ["Bridge", "Runtime"]);
-    await appFrame.getByRole("button", { name: "Stop agent" }).waitFor({
-      state: "visible",
-      timeout: 10_000,
-    });
+    await assertDiagramWhileAgentRuns(appFrame, inlineSvg, ["Bridge", "Runtime"]);
     log("Mermaid streaming active-turn check passed");
     await client.waitForFinish(agent.id, 30_000);
     await assertDiagramLabels(inlineSvg, ["Bridge", "Runtime", "NativeLink"]);
