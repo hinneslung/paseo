@@ -6,6 +6,11 @@ export interface TcpTransportTarget {
   protocols?: string[];
 }
 
+export interface OpenTcpTransportSessionInput {
+  sessionId: string;
+  target: TcpTransportTarget;
+}
+
 export interface TransportEventPayload {
   sessionId: string;
   kind: "open" | "message" | "close" | "error";
@@ -108,8 +113,50 @@ function decodeTransportMessage(input: { text?: string; binaryBase64?: string })
   throw new Error("Local transport send requires text or binary payload.");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function parseOpenTcpTransportSessionInput(
+  value: unknown,
+  endpoint: string,
+): OpenTcpTransportSessionInput {
+  if (!isRecord(value)) {
+    throw new Error("open_local_daemon_transport requires a payload.");
+  }
+
+  const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim() : "";
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(sessionId)) {
+    throw new Error("Local transport sessionId is invalid.");
+  }
+
+  const target = value.target;
+  if (!isRecord(target)) {
+    throw new Error("open_local_daemon_transport requires a transport target.");
+  }
+  if (target.transportType !== "tcp") {
+    throw new Error("Only TCP daemon transport is supported in VS Code v1.");
+  }
+  if (
+    target.protocols !== undefined &&
+    (!Array.isArray(target.protocols) ||
+      !target.protocols.every((protocol) => typeof protocol === "string"))
+  ) {
+    throw new Error("Local transport protocols must be strings.");
+  }
+  const protocols = target.protocols as string[] | undefined;
+
+  return {
+    sessionId,
+    target: {
+      transportType: "tcp",
+      endpoint,
+      ...(protocols && protocols.length > 0 ? { protocols } : {}),
+    },
+  };
+}
+
 export class DaemonTransport {
-  private nextSessionId = 0;
   private readonly sessions = new Map<string, Session>();
   private readonly emitEvent: (payload: TransportEventPayload) => void;
   private readonly webSocketFactory: WebSocketFactory;
@@ -122,10 +169,14 @@ export class DaemonTransport {
   }
 
   openLocalTransportSession(input: {
+    sessionId: string;
     target: TcpTransportTarget;
     password: string | null;
-  }): Promise<string> {
-    const sessionId = `vscode-session-${++this.nextSessionId}`;
+  }): Promise<void> {
+    const sessionId = input.sessionId;
+    if (this.sessions.has(sessionId)) {
+      throw new Error(`Local transport session already exists: ${sessionId}`);
+    }
     const url = buildWebSocketUrl(input.target);
     const protocols = [
       ...(input.target.protocols ?? []),
@@ -176,7 +227,7 @@ export class DaemonTransport {
           return;
         }
         openSettled = true;
-        resolve(sessionId);
+        resolve();
         this.emitEvent({ sessionId, kind: "open" });
         for (const message of pendingMessages) {
           this.emitEvent(message);

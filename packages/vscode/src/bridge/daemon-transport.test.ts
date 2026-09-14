@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   DaemonTransport,
   DaemonTransportAuthError,
+  parseOpenTcpTransportSessionInput,
   type TransportEventPayload,
   type WebSocketFactoryInput,
   type WebSocketLike,
@@ -96,10 +97,51 @@ function createTransport(options?: { openAuthGraceMs?: number }): {
 }
 
 describe("daemon transport", () => {
+  it("validates caller-owned open input and pins the resolved endpoint", () => {
+    expect(
+      parseOpenTcpTransportSessionInput(
+        {
+          sessionId: " client-session_1 ",
+          target: {
+            transportType: "tcp",
+            endpoint: "attacker.example:9999",
+            protocols: ["paseo.extra"],
+          },
+        },
+        "127.0.0.1:6767",
+      ),
+    ).toEqual({
+      sessionId: "client-session_1",
+      target: {
+        transportType: "tcp",
+        endpoint: "127.0.0.1:6767",
+        protocols: ["paseo.extra"],
+      },
+    });
+  });
+
+  it.each([
+    [null, "requires a payload"],
+    [{ sessionId: "bad id", target: { transportType: "tcp" } }, "sessionId is invalid"],
+    [{ sessionId: "valid", target: null }, "requires a transport target"],
+    [
+      { sessionId: "valid", target: { transportType: "socket", transportPath: "/tmp/x" } },
+      "Only TCP daemon transport",
+    ],
+    [
+      { sessionId: "valid", target: { transportType: "tcp", protocols: ["ok", 7] } },
+      "protocols must be strings",
+    ],
+  ])("rejects invalid open input %#", (input, message) => {
+    expect(() => parseOpenTcpTransportSessionInput(input, "127.0.0.1:6767")).toThrow(message);
+  });
+
   it("opens a bearer-authenticated TCP WebSocket and proxies text, binary, and close events", async () => {
     const { transport, events, sockets } = createTransport();
+    const sessionId = "vscode-session-test";
 
     const sessionPromise = transport.openLocalTransportSession({
+      sessionId,
       target: {
         transportType: "tcp",
         endpoint: "192.168.1.194:6768",
@@ -109,7 +151,7 @@ describe("daemon transport", () => {
     });
     const socket = sockets[0];
     socket.open();
-    const sessionId = await sessionPromise;
+    await sessionPromise;
 
     expect(socket.input).toEqual({
       url: "ws://192.168.1.194:6768/ws",
@@ -137,8 +179,10 @@ describe("daemon transport", () => {
 
   it("buffers messages during auth grace and emits open first", async () => {
     const { transport, events, sockets } = createTransport({ openAuthGraceMs: 10 });
+    const sessionId = "vscode-session-race";
 
     const sessionPromise = transport.openLocalTransportSession({
+      sessionId,
       target: { transportType: "tcp", endpoint: "192.168.1.194:6768" },
       password: "test-password",
     });
@@ -148,7 +192,7 @@ describe("daemon transport", () => {
     socket.message(Buffer.from("server info"), false);
     expect(events).toEqual([]);
 
-    const sessionId = await sessionPromise;
+    await sessionPromise;
     expect(events).toEqual([
       { sessionId, kind: "open" },
       { sessionId, kind: "message", text: "server info" },
@@ -159,11 +203,59 @@ describe("daemon transport", () => {
     const { transport, sockets } = createTransport();
 
     const sessionPromise = transport.openLocalTransportSession({
+      sessionId: "vscode-session-auth",
       target: { transportType: "tcp", endpoint: "192.168.1.194:6768" },
       password: null,
     });
     sockets[0].closeFromServer(4401, "Password required");
 
     await expect(sessionPromise).rejects.toBeInstanceOf(DaemonTransportAuthError);
+  });
+
+  it("rejects a duplicate caller-owned session id without replacing the first socket", async () => {
+    const { transport, sockets } = createTransport({ openAuthGraceMs: 10 });
+    const input = {
+      sessionId: "vscode-session-duplicate",
+      target: { transportType: "tcp" as const, endpoint: "192.168.1.194:6768" },
+      password: null,
+    };
+
+    const firstOpen = transport.openLocalTransportSession(input);
+
+    expect(() => transport.openLocalTransportSession(input)).toThrow(
+      "Local transport session already exists: vscode-session-duplicate",
+    );
+    expect(sockets).toHaveLength(1);
+
+    sockets[0].open();
+    await firstOpen;
+  });
+
+  it("keeps events correlated to their caller-owned sessions", async () => {
+    const { transport, events, sockets } = createTransport();
+    const firstOpen = transport.openLocalTransportSession({
+      sessionId: "vscode-session-first",
+      target: { transportType: "tcp", endpoint: "192.168.1.194:6768" },
+      password: null,
+    });
+    const secondOpen = transport.openLocalTransportSession({
+      sessionId: "vscode-session-second",
+      target: { transportType: "tcp", endpoint: "192.168.1.194:6768" },
+      password: null,
+    });
+
+    sockets[1].open();
+    await secondOpen;
+    sockets[1].message(Buffer.from("second"), false);
+    sockets[0].open();
+    await firstOpen;
+    sockets[0].message(Buffer.from("first"), false);
+
+    expect(events).toEqual([
+      { sessionId: "vscode-session-second", kind: "open" },
+      { sessionId: "vscode-session-second", kind: "message", text: "second" },
+      { sessionId: "vscode-session-first", kind: "open" },
+      { sessionId: "vscode-session-first", kind: "message", text: "first" },
+    ]);
   });
 });

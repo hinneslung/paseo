@@ -146,6 +146,7 @@ export function startDaemon({
   home,
   host = "127.0.0.1",
   logPrefix = "[vscode-smoke-daemon]",
+  environment = {},
 }) {
   if (!port) throw new Error("startDaemon requires a port.");
   if (!password) throw new Error("startDaemon requires a password.");
@@ -174,6 +175,7 @@ export function startDaemon({
     detached: process.platform !== "win32",
     env: {
       ...process.env,
+      ...environment,
       PASEO_HOME: home,
       PASEO_LISTEN: listen,
       PASEO_PASSWORD: password,

@@ -1,3 +1,4 @@
+import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { useCallback } from "react";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
@@ -10,7 +11,7 @@ import {
 } from "@/hooks/open-project";
 import { generateDraftId } from "@/stores/draft-keys";
 import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
-import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import { FOCUSED_PANE_PLACEMENT, useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 
 export function useOpenProject(
   serverId: string | null,
@@ -24,7 +25,15 @@ export function useOpenProject(
         state.sessions[normalizedServerId]?.serverInfo?.features?.stableProjectIdentity === true
       : false,
   );
-  const upsertProject = useSessionStore((state) => state.upsertProject);
+  const upsertProject = useCallback(
+    (
+      targetServerId: string,
+      project: Parameters<ReturnType<typeof getHostRuntimeStore>["acceptProjectSnapshot"]>[1],
+    ) => {
+      getHostRuntimeStore().acceptProjectSnapshot(targetServerId, project);
+    },
+    [],
+  );
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
@@ -61,7 +70,15 @@ export function useCloneGithubProject(
   const normalizedServerId = serverId?.trim() ?? "";
   const client = useHostRuntimeClient(normalizedServerId);
   const isConnected = useHostRuntimeIsConnected(normalizedServerId);
-  const upsertProject = useSessionStore((state) => state.upsertProject);
+  const upsertProject = useCallback(
+    (
+      targetServerId: string,
+      project: Parameters<ReturnType<typeof getHostRuntimeStore>["acceptProjectSnapshot"]>[1],
+    ) => {
+      getHostRuntimeStore().acceptProjectSnapshot(targetServerId, project);
+    },
+    [],
+  );
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
@@ -100,9 +117,11 @@ export function useOpenProjectWorkspace(
         mergeWorkspaces,
         setHasHydratedWorkspaces,
         openDraftTab: (workspaceKey: string) =>
-          useWorkspaceLayoutStore.getState().openTabFocused(workspaceKey, {
-            kind: "draft",
-            draftId: generateDraftId(),
+          useWorkspaceLayoutStore.getState().openTab({
+            workspaceKey,
+            target: { kind: "draft", draftId: generateDraftId() },
+            intent: "new",
+            placement: FOCUSED_PANE_PLACEMENT,
           }),
         navigateToWorkspace: (targetServerId, workspaceId) =>
           navigateToWorkspace({ serverId: targetServerId, workspaceId }),

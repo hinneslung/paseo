@@ -65,7 +65,7 @@ shipped:
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `da0be24d` | `~/.paseo/config.json` never expanded on Windows (`path.sep` is `\`) → discovery fell back to 127.0.0.1, LAN daemon unreachable | Layer 2 bridge round-trip **on Windows** |
 | `a46672ad` | Folder unknown to daemon → startup splash hangs forever                                                                         | Layer 3 workspace-open spec              |
-| `517948bf` | Assistant links to hidden dot-paths (`.github/...`) did not resolve                                                             | Layer 3 file-link-click spec (deferred)  |
+| `517948bf` | Assistant links to hidden dot-paths (`.github/...`) did not resolve                                                             | Layer 3 rich-transcript/file-link spec   |
 | `455e18d5` | Wrong left-nav panel state on first open                                                                                        | Layer 1 smoke ("first open renders")     |
 | (v0.1.4)   | macOS Cmd+A/C/V dead in composer — react-native-web swallows keydown before VS Code's webview key forwarder                     | Layer 3 editing-shortcuts probe          |
 
@@ -93,18 +93,19 @@ Also runs inside `vscode-smoke`. The wrapper
 [run-smoke-with-daemon.mjs](../packages/vscode/scripts/run-smoke-with-daemon.mjs)
 uses the shared
 [daemon-harness.mjs](../packages/vscode/scripts/lib/daemon-harness.mjs) helper to
-boot a real password-protected Paseo daemon on `127.0.0.1:6788`. The helper
-writes `~/.paseo/config.json` with the daemon listen target and starts the daemon
-with `PASEO_PASSWORD` set. The wrapper then runs the smoke with
+boot a real password-protected Paseo daemon on `127.0.0.1:6788`. The wrapper
+creates a scratch user home, writes its home-relative `.paseo/config.json`, and
+starts the daemon with `PASEO_PASSWORD` set. The smoke inherits that scratch
+`HOME`/`USERPROFILE` and runs with
 `PASEO_VSCODE_TEST_PASSWORD` set so `runBridgeRoundTrip`
 ([vscode-smoke.ts](../packages/vscode/src/test/vscode-smoke.ts)) executes.
 
 This exercises **config discovery (the `~` expansion path) + the authenticated
 transport handshake end-to-end** on Linux and Windows. Windows directly guards
-the `da0be24d` class because the fixture writes the real home-relative config
-path that `expandHomePath` must resolve.
+the `da0be24d` class because the fixture writes the home-relative config path
+that `expandHomePath` must resolve.
 
-### Layer 3 — workspace-open + file-link e2e (CI: ubuntu)
+### Layer 3 — workspace-open + rich-transcript/file-link e2e (CI: ubuntu)
 
 Runs in `vscode-e2e` via
 [vscode-e2e.mjs](../packages/vscode/scripts/vscode-e2e.mjs). The script launches
@@ -118,11 +119,15 @@ the workspace rendered. It uses the `startup-splash`, `workspace-header-title`,
 the workspace as ready when the splash is gone and any core workspace chrome is
 present. This guards `a46672ad`.
 
-Spec 2, **file-link click**, is deferred with `TODO(WS4 spec2)` in the spec. It
-needs a deterministic way to seed an agent timeline fixture through the daemon's
-supported persistence/API; guessing private agent JSON would make CI flaky. The
-manual [cdp-filelink-click.mjs](../packages/vscode/scripts/cdp-filelink-click.mjs)
-harness remains useful for ad-hoc local debugging, but it is not a CI gate.
+Spec 2, **rich transcript and native file link**, creates a mock-provider agent
+through the real daemon client API. Its streamed response contains Mermaid and a
+line-targeted link to a generated file under `.github/`. The spec checks the
+inline SVG while the Stop control proves the turn is still active, then checks
+the completed fullscreen SVG and closes it. It also drops a `text/uri-list` URI
+into the composer and checks the inserted file mention before clicking the
+transcript link and checking the active VS Code editor path and line. Relevant
+CSP console violations fail the spec, which captures success screenshots for
+each surface.
 
 The job uploads `packages/vscode/artifacts/vscode-e2e` on failure.
 
@@ -135,12 +140,11 @@ The job uploads `packages/vscode/artifacts/vscode-e2e` on failure.
 3. **WS3 — done.** The daemon helper boots a password-protected daemon, writes
    `~/.paseo/config.json`, wires `PASEO_PASSWORD`, and the smoke wires
    `PASEO_VSCODE_TEST_PASSWORD` for the bridge round-trip.
-4. **WS4 — done for the current CI gate.** `vscode-e2e` runs the CDP/Playwright
-   harness on ubuntu and implements the deterministic workspace-open spec with
-   failure artifacts.
-5. **Remaining.** Add Spec 2 once a supported deterministic agent timeline
-   fixture exists, and optionally add Windows coverage for Layer 3 after proving
-   the CDP workflow is stable there.
+4. **WS4 — done.** `vscode-e2e` runs the CDP/Playwright harness on ubuntu and
+   implements deterministic workspace-open and mock-agent rich transcript/file
+   link specs.
+5. **Remaining.** Optionally add Windows coverage for Layer 3 after proving the
+   CDP workflow is stable there.
 6. **Docs.** Keep this doc and [testing.md](testing.md) current as the remaining
    items land.
 
@@ -148,12 +152,9 @@ The job uploads `packages/vscode/artifacts/vscode-e2e` on failure.
 
 - Linux display is resolved by using `xvfb-run -a` for both smoke and Layer 3;
   keep that wrapper unless a replacement is proven in CI.
-- Windows home-path layout for `config.json` is covered by Layer 2. Do not move
-  the fixture away from `~/.paseo/config.json`; that path is the thing under
-  test.
-- The deferred file-link spec still needs a supported deterministic agent
-  timeline fixture, not the manual scripts' live LAN daemon or guessed private
-  JSON.
+- Windows home-path layout for `config.json` is covered by Layer 2. Keep the
+  fixture at `~/.paseo/config.json` under the scratch home; never write the
+  runner user's real config.
 - Optional Windows coverage for Layer 3 remains unproven and should be added only
   after validating VS Code CDP stability on the Windows runner.
 

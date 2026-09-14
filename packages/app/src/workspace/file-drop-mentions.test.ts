@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseDroppedFilePaths, resolveDroppedFileMentionPath } from "./file-drop-mentions";
+import {
+  parseDroppedFilePaths,
+  resolveDroppedFileMentionPath,
+  splitDroppedItemsForMentions,
+} from "./file-drop-mentions";
 
 describe("parseDroppedFilePaths", () => {
   it("parses text/uri-list file entries and ignores comments", () => {
@@ -79,5 +83,26 @@ describe("resolveDroppedFileMentionPath", () => {
         path: "/home/dev/other/foo.tsx",
       }),
     ).toBeNull();
+  });
+});
+
+describe("splitDroppedItemsForMentions", () => {
+  it("turns workspace file URIs into mentions and retains other files for upload", () => {
+    expect(
+      splitDroppedItemsForMentions({
+        cwd: "/home/dev/repo",
+        items: [
+          { kind: "file-uri", path: "/home/dev/repo/src/index.ts" },
+          { kind: "file-uri", path: "/home/dev/outside.txt" },
+          { kind: "desktop-path", path: "/home/dev/archive.zip" },
+        ],
+      }),
+    ).toEqual({
+      mentionPaths: ["src/index.ts"],
+      uploadItems: [
+        { kind: "desktop-path", path: "/home/dev/outside.txt" },
+        { kind: "desktop-path", path: "/home/dev/archive.zip" },
+      ],
+    });
   });
 });

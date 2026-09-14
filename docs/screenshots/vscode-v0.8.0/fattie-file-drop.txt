@@ -1,0 +1,35 @@
+---
+
+Diagnosis confirmed a real v0.8 rebase regression, not a probe issue.
+
+Commit: `2c6cd2b38` — `fix(vscode): preserve dropped file mentions`
+
+Cause: the upstream composer now uses an imperative/uncontrolled input boundary. File drops still called the draft-state setter, so the saved value changed without updating the visible textarea. The minimal fix routes insertion through the existing `replaceUserInput` method.
+
+Evidence:
+
+- Same DOM `text/uri-list` probe against the unchanged v0.4 bundle inserted `".github/paseo-vscode-cdp.ts"`.
+- Pre-fix v0.8 bundle handled and stopped all drag events but remained `value:""`.
+  - `/tmp/paseo-vscode-drop-red-46f.log`
+- Rebuilt v0.8 bundle inserted the exact quoted mention.
+  - `/tmp/paseo-vscode-drop-green.log`
+- The strengthened Mermaid check observed the inline SVG while `Stop agent` was visible, then verified completed fullscreen rendering.
+- Native link still opened `paseo-vscode-cdp.ts` at `Ln 3, Col 1`.
+- CSP, workspace-open, and editing-shortcut checks remained green.
+
+Checks:
+
+- Focused Vitest: 2 files, 18 tests passed.
+- Targeted lint: zero findings.
+- Full workspace typecheck: passed.
+- `npm run format`: passed.
+- `npm run build:vscode`: passed.
+- Worktree clean; no push.
+
+Rebuilt [paseo.vsix](/home/hinnes/projects/paseo-vscode-v0.8.0-impl/packages/vscode/paseo.vsix):
+
+- Version `0.8.0`
+- 5,571,751 bytes
+- SHA-256 `00b95c708a45f9baa07950a790a969aa0b441a83362a458d43cca67fa0b7c648`
+
+CI run `34818805713` predates this commit; PIC will need to integrate `2c6cd2b38` and dispatch final CI.

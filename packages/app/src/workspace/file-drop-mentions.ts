@@ -1,4 +1,5 @@
 import { resolveWorkspaceFilePaths } from "@/workspace/file-open";
+import type { DroppedItem } from "@/components/file-drop/types";
 
 export interface ParseDroppedFilePathsInput {
   uriList?: string | null;
@@ -102,4 +103,22 @@ export function resolveDroppedFileMentionPath(input: { path: string; cwd: string
     workspaceRoot: input.cwd,
   });
   return resolved?.relativePath ?? null;
+}
+
+export function splitDroppedItemsForMentions(input: { items: DroppedItem[]; cwd: string }): {
+  mentionPaths: string[];
+  uploadItems: DroppedItem[];
+} {
+  const mentionPaths: string[] = [];
+  const uploadItems: DroppedItem[] = [];
+  for (const item of input.items) {
+    if (item.kind !== "file-uri") {
+      uploadItems.push(item);
+      continue;
+    }
+    const relativePath = resolveDroppedFileMentionPath({ path: item.path, cwd: input.cwd });
+    if (relativePath) mentionPaths.push(relativePath);
+    else uploadItems.push({ kind: "desktop-path", path: item.path });
+  }
+  return { mentionPaths, uploadItems };
 }

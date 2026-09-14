@@ -108,7 +108,9 @@ function createTransportEventCollector(): {
 async function runBridgeRoundTrip(input: { endpoint: string; password: string }): Promise<void> {
   const events = createTransportEventCollector();
   const transport = new DaemonTransport({ emitEvent: events.emit, openAuthGraceMs: 0 });
-  const sessionId = await transport.openLocalTransportSession({
+  const sessionId = "vscode-smoke-roundtrip";
+  await transport.openLocalTransportSession({
+    sessionId,
     target: { transportType: "tcp", endpoint: input.endpoint },
     password: input.password,
   });
