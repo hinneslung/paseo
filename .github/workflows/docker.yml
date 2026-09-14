@@ -26,6 +26,7 @@ on:
     branches: [main]
     tags:
       - "v*"
+      - "!vscode-v*"
   workflow_dispatch:
     inputs:
       paseo_version:

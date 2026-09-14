@@ -4,27 +4,29 @@ PIC: **Pillow**. Source of truth: [original plan](vscode-v0.8.0-plan.md).
 
 ## Current state
 
-- Phase: runtime integrated at `2c6cd2b38`; independent QA and R4 reviews
-  complete. CI-only streaming-fixture revision `98e31c321` passed both R5 reviews;
-  final CI remains a gate.
+- Phase: rebase QA and CI complete; PR #13 merged. User subsequently authorized
+  publishing and the five-workflow tag-isolation correction. Publication waits
+  for that correction's review and CI; no release tag has been pushed.
 - Source checkout: `/home/hinnes/projects/paseo`; initially clean.
 - Base: `vscode-extension`, `52ad6cd4cce8752abb0efea75a35dced6e882e12`.
 - Target: upstream `v0.8.0`, `b8e24677e12b226c7c38c1c3a40649daa9f1152f`.
 - Intended branch: `release/vscode-v0.8.0`.
-- PR: [#13](https://github.com/hinneslung/paseo/pull/13), draft while QA runs.
-  Merge/tag/publish: outside this round.
+- PR: [#13](https://github.com/hinneslung/paseo/pull/13), merged at
+  `32c6f30a72caad21e5595894cd2f25d5a72c6e29`. The merge tree is identical to reviewed
+  head `8fd40e27f`. The original plan retains its original inspection boundary;
+  the user's later instructions authorize the release continuation below.
 - Existing unrelated PR: [#12](https://github.com/hinneslung/paseo/pull/12), stale
   bridge host identity fix. Inspect for release relevance; do not mutate its
   branch or claim its existing evidence covers this rebase.
 
 ## Team assignments
 
-| Agent  | Profile/session                        | Assignment                                | Status                                           |
-| ------ | -------------------------------------- | ----------------------------------------- | ------------------------------------------------ |
-| Pillow | current session                        | PIC, plan, independent QA, PR/CI          | active                                           |
-| Fattie | `b85693b9-8602-45ee-8ae3-59a61ffa5c9f` | implementation and targeted e2e follow-up | CI harness fixed at 98e31c321; evidence handover |
-| Biru   | `084b9427-2dca-47e1-9f4f-f702f6a60b74` | original-plan and implementation review   | R5 clean at 98e31c321                            |
-| Coco   | `6c832395-685d-4995-bede-4a06cb729c81` | independent UI/CSP/QA review              | R5 clean at 98e31c321                            |
+| Agent  | Profile/session                        | Assignment                                | Status                              |
+| ------ | -------------------------------------- | ----------------------------------------- | ----------------------------------- |
+| Pillow | current session                        | PIC, plan, independent QA, PR/CI          | active                              |
+| Fattie | `b85693b9-8602-45ee-8ae3-59a61ffa5c9f` | implementation and targeted e2e follow-up | five-workflow release tag isolation |
+| Biru   | `084b9427-2dca-47e1-9f4f-f702f6a60b74` | original-plan and implementation review   | R5 clean at 98e31c321               |
+| Coco   | `6c832395-685d-4995-bede-4a06cb729c81` | independent UI/CSP/QA review              | R5 clean at 98e31c321               |
 
 ## Progress
 
@@ -38,7 +40,8 @@ PIC: **Pillow**. Source of truth: [original plan](vscode-v0.8.0-plan.md).
 | R1 plan review           | complete    | Both reviewers read original plan; Pillow adjudications below                                          |
 | R2 code review/revisions | complete    | R2/R3/R4 completed; final 46f3385a3..2c6cd2b38 delta accepted by both reviewers and Pillow             |
 | Q1 CDP QA                | complete    | Independent QA and inspected screenshots below; physical platform limits recorded                      |
-| C1 PR/manual CI          | in progress | PR13 draft; final-code dedicated VS Code and full CI/app e2e dispatched                                |
+| C1 PR/manual CI          | complete    | Full CI 18/18 and final-head VS Code 4/4 passed; user inspected the extension and authorized merge     |
+| C2 release continuation  | in progress | PR13 merged; user-approved tag-filter correction must pass before publishing                           |
 
 ## Decisions and deviations
 
@@ -209,7 +212,8 @@ changes to Mermaid source. The final inline/fullscreen and native-line checks
 remain required. VS Code 1.124.2 local CDP, lint, typecheck and format passed;
 Pillow inspected the copied [final inline](screenshots/vscode-v0.8.0/ci-streaming-window/inline-success.png)
 and [native line](screenshots/vscode-v0.8.0/ci-streaming-window/native-file-link-success.png)
-screenshots. CI confirmation remains pending.
+screenshots. Both subsequent dedicated CI runs passed, including final head
+`8fd40e27f`.
 
 R5 [Biru](screenshots/vscode-v0.8.0/biru-r5.txt) and
 [Coco](screenshots/vscode-v0.8.0/coco-r5.txt) found no material defects. Pillow
@@ -225,8 +229,31 @@ that account. The observed final local turn took 19 seconds, within the existing
 | 46f3385a3 | PR13 / VS Code Extension | [34818858120](https://github.com/hinneslung/paseo/actions/runs/34818858120) | pass      | All four jobs: build, Linux/Windows smoke, CDP                                                                                                                                            |
 | 46f3385a3 | manually dispatched CI   | [34818805713](https://github.com/hinneslung/paseo/actions/runs/34818805713) | cancelled | Superseded; cancelled to release same-branch concurrency for final code. Completed quality/app/SDK/relay/Linux-server/Windows-desktop/CLI jobs were green; unfinished jobs are not passes |
 | 2c6cd2b38 | PR13 / VS Code Extension | [34820181500](https://github.com/hinneslung/paseo/actions/runs/34820181500) | failed    | Build and Linux/Windows smoke passed; streaming observation window corrected in 98e31c321. No assertion removed                                                                           |
-| 2c6cd2b38 | manually dispatched CI   | [34820176689](https://github.com/hinneslung/paseo/actions/runs/34820176689) | running   | Full CI/app e2e on unchanged runtime; subsequent harness delta is dedicated VS Code-only                                                                                                  |
-| 98e31c321 | PR13 / VS Code Extension | [34821628250](https://github.com/hinneslung/paseo/actions/runs/34821628250) | running   | Corrected bounded streaming fixture; all four jobs started                                                                                                                                |
+| 2c6cd2b38 | manually dispatched CI   | [34820176689](https://github.com/hinneslung/paseo/actions/runs/34820176689) | pass      | All 18 jobs, including four app Playwright shards; later non-doc delta only changes the separate VS Code CDP harness                                                                      |
+| 98e31c321 | PR13 / VS Code Extension | [34821628250](https://github.com/hinneslung/paseo/actions/runs/34821628250) | pass      | All four jobs, including corrected streaming assertion                                                                                                                                    |
+| 8fd40e27f | PR13 / VS Code Extension | [34822381454](https://github.com/hinneslung/paseo/actions/runs/34822381454) | pass      | All four jobs on final PR head; subsequent merge has the same tree                                                                                                                        |
+
+## Release continuation
+
+The user approved merging PR #13 and publishing after manual inspection. Before
+tagging, Pillow confirmed five active non-extension workflows still matched
+`vscode-v0.8.0` through `v*`: app deployment, desktop, Android, Docker, and release
+notes. This overlap also exists in the v0.4.0 baseline; it is not a newly
+introduced rebase defect. No tag was pushed and no publish workflow was started.
+
+The user then approved adding final `!vscode-v*` exclusions to those five
+workflows, verifying the change, and resuming publication. Fattie owns that
+bounded fix and focused regression coverage in a fresh isolated worktree;
+Pillow owns review adjudication, the follow-up PR, and publication. Existing
+positive tag patterns, beta exclusions, runtime, extension version, and publish
+credentials must remain unchanged. Use the established `vscode-v0.8.0` tag and
+Marketplace workflow after the fix is merged and checked. Any actual protected
+approval is a human stop point, never a reason to bypass the workflow.
+
+The old implementation worktree's Git marker is missing; its remaining files
+are left untouched. The root checkout also contains an unrelated uncommitted
+Mermaid identifier edit. It is not in the reviewed PR or hash-verified VSIX and
+must not be included in this release.
 
 ## Deferred work and blockers
 
@@ -253,8 +280,9 @@ that account. The observed final local turn took 19 seconds, within the existing
   runs in CI; Windows/macOS CDP and native mobile devices were not exercised.
   Existing matching folder and workspace switching were exercised in CDP;
   worktree-specific selection is covered by the preserved targeted unit cases.
-- Pipeline heartbeat `9cf0c300` checks every five minutes, expires after three
-  hours; remove when this round completes or is paused.
+- PR gate heartbeat `9cf0c300` was deleted after PR #13 became reviewable.
+  Initial publish heartbeat `1bd83e9b` was deleted when tag isolation required
+  user approval. Start a fresh monitor for the approved continuation.
 
 ## Activity
 

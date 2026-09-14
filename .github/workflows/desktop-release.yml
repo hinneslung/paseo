@@ -8,6 +8,7 @@ on:
       - "desktop-macos-v*"
       - "desktop-linux-v*"
       - "desktop-windows-v*"
+      - "!vscode-v*"
   workflow_dispatch:
     inputs:
       tag:

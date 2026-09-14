@@ -7,6 +7,7 @@ const repoRoot = new URL("../", import.meta.url);
 const ciWorkflowPath = new URL(".github/workflows/ci.yml", repoRoot);
 const dockerWorkflowPath = new URL(".github/workflows/docker.yml", repoRoot);
 const nixWorkflowPath = new URL(".github/workflows/nix.yml", repoRoot);
+const vscodePublishWorkflowPath = new URL(".github/workflows/vscode-publish.yml", repoRoot);
 const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
 const serverTsconfigPath = new URL("packages/server/tsconfig.server.json", repoRoot);
 const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
@@ -64,6 +65,23 @@ function loadFilters(path) {
   return filters;
 }
 
+function pushTagPatterns(path) {
+  const trigger = readFileSync(path, "utf8").split("jobs:", 1)[0];
+  const tags = /^    tags:\s*$\n((?:      - ".*"\s*$\n?)+)/m.exec(trigger)?.[1];
+  assert.ok(tags, `missing push tag patterns in ${path.pathname}`);
+  return [...tags.matchAll(/^      - "(.*)"\s*$/gm)].map((match) => match[1]);
+}
+
+function selectsPushTag(patterns, tag) {
+  let selected = false;
+  for (const pattern of patterns) {
+    const body = pattern.startsWith("!") ? pattern.slice(1) : pattern;
+    const expression = body.replaceAll(".", "\\.").replaceAll("*", ".*");
+    if (new RegExp(`^${expression}$`).test(tag)) selected = !pattern.startsWith("!");
+  }
+  return selected;
+}
+
 function filesUnder(relativeDirectory, predicate) {
   const directory = new URL(`${relativeDirectory}/`, repoRoot);
   return readdirSync(directory, { recursive: true, withFileTypes: true })
@@ -107,6 +125,77 @@ test("change gating allows superseded workflow runs to cancel", () => {
       "always() keeps jobs alive after concurrency cancellation; use !cancelled() for fail-open gating",
     );
   }
+});
+
+test("VS Code release tags select only the extension publish workflow", () => {
+  const nonExtensionWorkflows = new Map([
+    ["android-apk-release.yml", ["v*", "android-v*", "!vscode-v*"]],
+    [
+      "desktop-release.yml",
+      [
+        "v*",
+        "desktop-v*",
+        "desktop-macos-v*",
+        "desktop-linux-v*",
+        "desktop-windows-v*",
+        "!vscode-v*",
+      ],
+    ],
+    ["deploy-app.yml", ["v*", "!v*-beta.*", "app-v*", "!app-v*-beta.*", "!vscode-v*"]],
+    ["docker.yml", ["v*", "!vscode-v*"]],
+    ["release-notes-sync.yml", ["v*", "!vscode-v*"]],
+  ]);
+  const workflowDirectory = new URL(".github/workflows/", repoRoot);
+  const pushTagWorkflows = readdirSync(workflowDirectory)
+    .filter((filename) =>
+      /^    tags:/m.test(readFileSync(new URL(filename, workflowDirectory), "utf8")),
+    )
+    .sort();
+  assert.deepEqual(
+    pushTagWorkflows,
+    [...nonExtensionWorkflows.keys(), "vscode-publish.yml"].sort(),
+  );
+
+  for (const [filename, expectedPatterns] of nonExtensionWorkflows) {
+    const patterns = pushTagPatterns(new URL(`.github/workflows/${filename}`, repoRoot));
+    assert.deepEqual(patterns, expectedPatterns, filename);
+    assert.equal(selectsPushTag(patterns, "vscode-v0.8.0"), false, filename);
+    assert.equal(selectsPushTag(patterns, "vscode-v0.9.0-beta.1"), false, filename);
+  }
+
+  const preservedSelections = new Map([
+    ["android-apk-release.yml", ["v0.8.0", "v0.9.0-beta.1", "android-v0.8.0"]],
+    [
+      "desktop-release.yml",
+      [
+        "v0.8.0",
+        "v0.9.0-beta.1",
+        "desktop-v0.8.0",
+        "desktop-macos-v0.8.0",
+        "desktop-linux-v0.8.0",
+        "desktop-windows-v0.8.0",
+      ],
+    ],
+    ["deploy-app.yml", ["v0.8.0", "app-v0.8.0"]],
+    ["docker.yml", ["v0.8.0", "v0.9.0-beta.1"]],
+    ["release-notes-sync.yml", ["v0.8.0", "v0.9.0-beta.1"]],
+  ]);
+
+  for (const [filename, tags] of preservedSelections) {
+    const patterns = pushTagPatterns(new URL(`.github/workflows/${filename}`, repoRoot));
+    for (const tag of tags)
+      assert.equal(selectsPushTag(patterns, tag), true, `${filename}: ${tag}`);
+  }
+
+  const deployPatterns = pushTagPatterns(new URL(".github/workflows/deploy-app.yml", repoRoot));
+  assert.equal(selectsPushTag(deployPatterns, "v0.9.0-beta.1"), false);
+  assert.equal(selectsPushTag(deployPatterns, "app-v0.9.0-beta.1"), false);
+
+  const vscodePublishPatterns = pushTagPatterns(vscodePublishWorkflowPath);
+  assert.deepEqual(vscodePublishPatterns, ["vscode-v*"]);
+  assert.equal(selectsPushTag(vscodePublishPatterns, "vscode-v0.8.0"), true);
+  assert.equal(selectsPushTag(vscodePublishPatterns, "vscode-v0.9.0-beta.1"), true);
+  assert.equal(selectsPushTag(vscodePublishPatterns, "v0.8.0"), false);
 });
 
 test("focused contracts stay inside existing required checks", () => {
