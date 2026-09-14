@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { parseScheduleCreateInput, parseScheduleUpdateInput } from "./shared.js";
+import {
+  compileEveryPresetToCron,
+  parseScheduleCreateInput,
+  parseScheduleUpdateInput,
+} from "./shared.js";
 
 const baseOptions = {
   prompt: "do the thing",
@@ -21,6 +25,7 @@ describe("parseScheduleCreateInput cwd/host validation", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   test("no host, no cwd → defaults to process.cwd()", () => {
@@ -60,6 +65,17 @@ describe("parseScheduleCreateInput cwd/host validation", () => {
     );
   });
 
+  test("PASEO_HOST without cwd → throws MISSING_CWD", () => {
+    vi.stubEnv("PASEO_HOST", "dev:6767");
+
+    expect(() => parseScheduleCreateInput(baseOptions)).toThrow(
+      expect.objectContaining({
+        code: "MISSING_CWD",
+        message: expect.stringContaining("--cwd is required"),
+      }),
+    );
+  });
+
   test("host with whitespace-only cwd → throws MISSING_CWD", () => {
     expect(() =>
       parseScheduleCreateInput({ ...baseOptions, host: "dev:6767", cwd: "   " }),
@@ -68,13 +84,9 @@ describe("parseScheduleCreateInput cwd/host validation", () => {
 });
 
 describe("parseScheduleCreateInput first-run timing", () => {
-  test("--every with no run-now flag fires immediately on creation", () => {
+  test("--every compiles to cron and waits for the next slot", () => {
     const input = parseScheduleCreateInput(baseOptions);
-    expect(input.runOnCreate).toBe(true);
-  });
-
-  test("--every with --no-run-now waits the interval", () => {
-    const input = parseScheduleCreateInput({ ...baseOptions, runNow: false });
+    expect(input.cadence).toEqual({ type: "cron", expression: "*/5 * * * *" });
     expect(input.runOnCreate).toBe(false);
   });
 
@@ -101,22 +113,9 @@ describe("parseScheduleCreateInput first-run timing", () => {
     });
   });
 
-  test("--every with --run-now is rejected as redundant", () => {
-    expect(() => parseScheduleCreateInput({ ...baseOptions, runNow: true })).toThrow(
-      expect.objectContaining({
-        code: "REDUNDANT_RUN_NOW",
-        message: expect.stringContaining("--run-now is redundant with --every"),
-      }),
-    );
-  });
-
-  test("--cron with --no-run-now is rejected as redundant", () => {
-    expect(() => parseScheduleCreateInput({ ...baseCron, runNow: false })).toThrow(
-      expect.objectContaining({
-        code: "REDUNDANT_NO_RUN_NOW",
-        message: expect.stringContaining("--no-run-now is redundant with --cron"),
-      }),
-    );
+  test("--run-now is orthogonal to a compiled preset", () => {
+    const input = parseScheduleCreateInput({ ...baseOptions, runNow: true });
+    expect(input.runOnCreate).toBe(true);
   });
 
   test("--timezone without --cron is rejected", () => {
@@ -126,6 +125,25 @@ describe("parseScheduleCreateInput first-run timing", () => {
         message: "--timezone can only be used with --cron",
       }),
     );
+  });
+});
+
+describe("parseScheduleCreateInput thinking", () => {
+  test("sets the thinking option for each scheduled new-agent run", () => {
+    const input = parseScheduleCreateInput({
+      ...baseOptions,
+      cwd: "/project",
+      thinking: "  high  ",
+    });
+
+    expect(input.target).toEqual({
+      type: "new-agent",
+      config: {
+        provider: "claude",
+        cwd: "/project",
+        thinkingOptionId: "high",
+      },
+    });
   });
 });
 
@@ -159,10 +177,10 @@ describe("parseScheduleUpdateInput", () => {
     );
   });
 
-  test("parses --every cadence", () => {
+  test("compiles --every cadence to cron", () => {
     expect(parseScheduleUpdateInput({ id: "abc", every: "5m" })).toEqual({
       id: "abc",
-      cadence: { type: "every", everyMs: 5 * 60_000 },
+      cadence: { type: "cron", expression: "*/5 * * * *" },
     });
   });
 
@@ -269,5 +287,27 @@ describe("parseScheduleUpdateInput", () => {
     expect(() =>
       parseScheduleUpdateInput({ id: "abc", expiresIn: "1h", clearExpires: true }),
     ).toThrow(expect.objectContaining({ code: "CONFLICTING_EXPIRES" }));
+  });
+});
+
+describe("compileEveryPresetToCron", () => {
+  test.each([
+    ["1m", "*/1 * * * *"],
+    ["15m", "*/15 * * * *"],
+    ["1h", "0 * * * *"],
+    ["6h", "0 */6 * * *"],
+    ["1d", "0 0 * * *"],
+  ])("compiles %s", (value, expected) => {
+    expect(compileEveryPresetToCron(value)).toBe(expected);
+  });
+
+  test.each(["30s", "7m", "5h", "2d"])("rejects rolling interval %s", (value) => {
+    expect(() => compileEveryPresetToCron(value)).toThrow(
+      expect.objectContaining({ code: "UNREPRESENTABLE_CADENCE" }),
+    );
+  });
+
+  test.each(["15minutes", "junk15m", "1h-nope"])("rejects malformed preset %s", (value) => {
+    expect(() => compileEveryPresetToCron(value)).toThrow("Invalid duration format");
   });
 });

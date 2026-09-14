@@ -229,8 +229,17 @@ try {
   );
   const capturedSupervisorLogs = await readCapturedSupervisorLogs(paseoHome, recentSupervisorLogs);
   assert(
-    capturedSupervisorLogs.includes("Restart requested by worker. Stopping worker for restart..."),
-    `restart should route through supervisor restart intent, logs:\n${capturedSupervisorLogs}`,
+    capturedSupervisorLogs.includes('"msg":"Worker requested restart"') &&
+      capturedSupervisorLogs.includes('"reason":"settings_update"'),
+    `restart should log lifecycle restart reason from daemon worker, logs:\n${capturedSupervisorLogs}`,
+  );
+  assert(
+    capturedSupervisorLogs.includes('"msg":"Supervisor requesting graceful worker shutdown"'),
+    `restart should log the graceful worker shutdown request, logs:\n${capturedSupervisorLogs}`,
+  );
+  assert(
+    capturedSupervisorLogs.includes("Server closed"),
+    `restart should run daemon cleanup before replacing the worker, logs:\n${capturedSupervisorLogs}`,
   );
   console.log("✓ app-style restart keeps daemon healthy and restarts worker\n");
 } finally {

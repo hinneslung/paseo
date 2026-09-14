@@ -44,7 +44,7 @@ export function formatDiagnosticStatus(
 
 const DIAGNOSTIC_OUTPUT_CAP = 4096;
 
-function truncateForDiagnostic(value: string): string {
+export function truncateForDiagnostic(value: string): string {
   const trimmed = value.trim();
   if (trimmed.length <= DIAGNOSTIC_OUTPUT_CAP) {
     return trimmed;
@@ -135,11 +135,15 @@ export function toDiagnosticErrorMessage(error: unknown): string {
   return formatNonErrorDiagnostic(error);
 }
 
-export async function resolveBinaryVersion(binaryPath: string): Promise<string> {
+export async function resolveBinaryVersion(
+  binaryPath: string,
+  signal?: AbortSignal,
+): Promise<string> {
   try {
     const { stdout } = await execCommand(binaryPath, ["--version"], {
       ...createProviderEnvSpec(),
       timeout: 5_000,
+      signal,
     });
     return stdout.trim() || "unknown";
   } catch (error) {

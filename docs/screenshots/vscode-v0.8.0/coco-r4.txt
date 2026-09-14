@@ -1,0 +1,10 @@
+R4 delta review complete — `46f3385a3..2c6cd2b38`, source of truth plan @ `2429` reread. Fattie reports (18 tests, typecheck/lint/format/build, CDP RED→GREEN) accepted without duplication. Read-only; no edits/builds/agents/posts.
+
+**No material defects. Delta is correct, minimal, and in scope.**
+
+- Composer fix (plan rule 3, Composer gate): `composer/index.tsx` `addFileMentions` now calls existing `replaceUserInput(nextInput)` instead of the draft-state `setUserInput`, deps `[replaceUserInput, userInput]`. Correct against the upstream imperative/uncontrolled input: writes through `messageInputRef.replaceText` with `onChangeText` fallback (same path the slash-command clears already use), preserving cursor-to-end + focus handling. Text-only mention append; no new surface, no auth/transport/CSP change. Simplicity holds — two lines, no new machinery.
+- Streaming proof (Rich-transcript gate): after partial SVG labels the spec now requires `Stop agent` visible before `waitForFinish`, then full labels. That closes PIC's R3 objection — partial SVG alone could have been post-complete; Stop-visible + partial SVG proves the turn was still active. Interval 25→75ms widens the observation window deterministically; assertions are strictly stronger, nothing weakened or skipped.
+- Drop probe: `runFileUriDropProbe` synthesizes a `text/uri-list` `DataTransfer` in-page and dispatches real `dragenter/dragover/drop` through the production listeners, asserting the exact `"<relpath>"` mention, then clears — run pre-send so no active-turn interference. Same legitimate synthetic-event technique as the existing editing-shortcuts probe; exercises the real handler, not internals. `pathToFileURL` matches Explorer URI shape; handle disposed; failure paths throw.
+- Docs (`vscode-ci.md`) accurately describe the new order (Stop-proven streaming, drop-then-link). Scope is three files, no security-boundary movement.
+
+Deferred future-hardening unchanged. Nothing to adopt.

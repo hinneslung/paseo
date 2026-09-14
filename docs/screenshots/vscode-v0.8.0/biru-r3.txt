@@ -1,0 +1,41 @@
+## R3 — bounded delta review, `0507f2613..46f3385a3`
+
+**No actionable defects.** Single commit `46f3385a3`, 7 files. Plan `docs/vscode-v0.8.0-plan.md` untouched in the delta (verified by path filter) — still source of truth at `2429fbc0f`.
+
+### Restored native caller — verified
+
+`packages/app/src/screens/workspace/vscode-file-open.ts:33-43` emits exactly the baseline payload: `editorId: "vscode-self"`, `workspacePath`, resolved `filePath`, with `line`/`lineEnd` conditionally spread identically to baseline `:271-280`. Caller at `workspace-screen.tsx:2301-2311` sits in the same position as baseline `:2708-2711` — after `focusWorkspacePane`, before `request.disposition === "side"` — and **early-returns on `true`**, so no fall-through.
+
+The factoring is better than baseline: returning `boolean` rather than the old void-helper-plus-separate-`if` makes the consume-vs-delegate decision explicit and testable, and `openTarget` injection allows caller-side assertions without mocking the module.
+
+**Parity check for a second missing branch:** baseline had exactly one gate site in that file (`:2711`, plus import `:182` and helper `:249`). HEAD has exactly one (`:2303`, plus import `:196`, `:215`). No second handler was gated at baseline, so nothing else is outstanding.
+
+### Regression and e2e quality
+
+Unit — `vscode-file-open.test.ts` covers the three branches that matter: full line range asserted against the exact `openDesktopTarget` payload; `isVscode: false` returns `false` with `openTarget` never called (proves the in-app path isn't hijacked); and `../outside.ts` is consumed with the error surfaced, which also pins traversal rejection.
+
+E2E — this is the substantive part. `runFileLinkClickSpec` was previously a stub that logged `"skipping file-link click spec"`; it's now deleted and replaced by `runRichTranscriptAndFileLinkSpec`. Under plan rule 12 a skipped check was never a pass, so this closes a gate rather than decorating one. The spec seeds a `mock` provider agent through the real client API, asserts Mermaid labels mid-stream and again after `waitForFinish` (genuine streaming, not just final state), exercises inline → fullscreen → close, clicks the real link, and asserts the active VS Code tab and line. Deterministic-fixture use matches the plan's allowance, and your real-Codex send/stream/stop pass supplies the separate real-provider leg.
+
+Two supporting changes are correct and worth naming: CSP console violations are now collected and **thrown** rather than logged, and `screenshot(..., { required: true })` makes evidence capture fail loudly instead of being swallowed by the old `.catch` — plan rule 11 treats screenshots as mandatory evidence, so silent capture failure was a real hole.
+
+### Harness security
+
+All three roots are scratch: `daemonHome`, `workspaceDir`, `userDataDir` are `mkdtempSync(os.tmpdir(), …)` at `vscode-e2e.mjs:369-371`. The `.github/paseo-vscode-cdp.ts` fixture is written into the temp workspace, never a real repo, and `userDataDir` isolates the VS Code profile per plan rule 7.
+
+The new `environment` parameter in `daemon-harness.mjs` is spread **before** `PASEO_HOME`/`PASEO_LISTEN`/`PASEO_PASSWORD`, so a caller cannot override the isolation variables — the ordering is the safe one, and `NODE_ENV=development` reaches only the scratch-home harness daemon. `daemon-seed.mjs` binds `127.0.0.1`, passes the harness password, disables reconnect, and adds no auth skip.
+
+### No unintended runtime delta
+
+Shipped-runtime change is confined to the new module plus an import and one guarded block in `workspace-screen.tsx`. Both are strictly additive and gated: on non-VS Code platforms `tryOpenWorkspaceFileInVscode` returns `false` on its first line, so behavior is byte-for-byte the prior path. The harness and docs changes are not in the extension runtime.
+
+`docs/vscode-ci.md` correctly rewrites the now-wrong sections rather than appending — the `517948bf` regression-map row is re-pointed at the real spec, and the obsolete "deferred" gotcha is deleted.
+
+### VSIX
+
+Built 15:34:54, after the fix source (15:27:40) and before the commit (15:36:03); worktree clean, and no file under `packages/app/src`, `packages/vscode/src`, or `packages/vscode/scripts` has an mtime later than the build. So the artifact was produced from source identical to the committed tree. **Not raising a blocker here** — this is the precommit-source case you ruled out, and hash confirmation belongs to Fattie's report.
+
+### Inspected scope / not verified
+
+Inspected: restored caller and payload, baseline parity, unit test branches, e2e spec assertions, harness isolation and env precedence, seed-client auth, runtime blast radius, doc accuracy, artifact provenance.
+
+Not verified, deliberately: I did not re-run tests, builds, or the CDP spec, and did not re-open `13-fixed-native-file-line.png` — your click and Fattie's report own that. I did not exhaustively trace teardown of every temp dir (all are under `os.tmpdir()`, so not a security question). Two observations I'm explicitly *not* filing as defects, since they're hardening rather than actionable: `assertNativeEditorLocation` keys on VS Code internal DOM classes (`.tabs-container .tab.active`, `.statusbar-item`) and so carries version-brittleness, though it's defensively written to accept either the active line number or the status-bar regex; and the unit test covers `lineStart`+`lineEnd` but not `lineStart` alone — which is the shape the e2e and your manual click both exercise.

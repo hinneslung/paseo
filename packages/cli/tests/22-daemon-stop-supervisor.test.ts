@@ -84,6 +84,11 @@ async function readDaemonStatus(paseoHome: string): Promise<DaemonStatus> {
   }
 }
 
+async function readCapturedSupervisorLogs(paseoHome: string, recentLogs: string): Promise<string> {
+  const durableLogs = await readFile(join(paseoHome, "daemon.log"), "utf8").catch(() => "");
+  return `${recentLogs}\n${durableLogs}`;
+}
+
 async function waitFor(
   check: () => Promise<boolean> | boolean,
   timeoutMs: number,
@@ -206,13 +211,23 @@ try {
     "stopped",
     "daemon should remain stopped after stop command",
   );
+  const capturedSupervisorLogs = await readCapturedSupervisorLogs(paseoHome, recentSupervisorLogs);
   assert(
-    recentSupervisorLogs.includes("Shutdown requested by worker. Stopping worker..."),
-    `stop should request lifecycle shutdown from daemon worker, logs:\n${recentSupervisorLogs}`,
+    capturedSupervisorLogs.includes('"msg":"Worker requested shutdown"') &&
+      capturedSupervisorLogs.includes('"reason":"client_shutdown_rpc"'),
+    `stop should log lifecycle shutdown reason from daemon worker, logs:\n${capturedSupervisorLogs}`,
   );
   assert(
-    !recentSupervisorLogs.includes("cli_shutdown"),
-    `supervisor logs should not route shutdown by reason string:\n${recentSupervisorLogs}`,
+    capturedSupervisorLogs.includes('"msg":"Supervisor requesting graceful worker shutdown"'),
+    `stop should log the graceful worker shutdown request, logs:\n${capturedSupervisorLogs}`,
+  );
+  assert(
+    capturedSupervisorLogs.includes("Server closed"),
+    `stop should run daemon cleanup before the worker exits, logs:\n${capturedSupervisorLogs}`,
+  );
+  assert(
+    !capturedSupervisorLogs.includes("cli_shutdown"),
+    `supervisor logs should not route shutdown by reason string:\n${capturedSupervisorLogs}`,
   );
   console.log("✓ stop leaves supervised daemon stopped (no respawn)\n");
 } finally {

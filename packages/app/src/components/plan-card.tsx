@@ -5,26 +5,26 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { createMarkdownStyles } from "@/styles/markdown-styles";
 import { getMarkdownListMarker } from "@/utils/markdown-list";
+import { createMarkdownParser } from "@/utils/markdown-parser";
+
+// Without this prop react-native-markdown-display builds its own parser with
+// `typographer: true`, which would render a plan's literal `(c)` as ©. Its
+// default also leaves linkify off, so this one keeps bare URLs as plain text.
+const planMarkdownParser = createMarkdownParser({ linkify: false });
 
 type MarkdownRuleStyles = Record<string, TextStyle & ViewStyle & { [key: string]: unknown }>;
 
 function MarkdownInlineText({
-  textKey,
   inheritedStyle,
   ruleStyle,
   children,
 }: {
-  textKey: string;
   inheritedStyle: StyleProp<TextStyle>;
   ruleStyle: StyleProp<TextStyle>;
   children: ReactNode;
 }) {
   const style = useMemo(() => [inheritedStyle, ruleStyle], [inheritedStyle, ruleStyle]);
-  return (
-    <Text key={textKey} style={style}>
-      {children}
-    </Text>
-  );
+  return <Text style={style}>{children}</Text>;
 }
 
 function MarkdownListItemContent({
@@ -39,12 +39,10 @@ function MarkdownListItemContent({
 }
 
 function MarkdownParagraph({
-  textKey,
   paragraphStyle,
   isLastChild,
   children,
 }: {
-  textKey: string;
   paragraphStyle: StyleProp<ViewStyle>;
   isLastChild: boolean;
   children: ReactNode;
@@ -53,11 +51,7 @@ function MarkdownParagraph({
     () => [paragraphStyle, isLastChild ? PARAGRAPH_LAST_CHILD : null],
     [paragraphStyle, isLastChild],
   );
-  return (
-    <View key={textKey} style={style}>
-      {children}
-    </View>
-  );
+  return <View style={style}>{children}</View>;
 }
 
 function createPlanMarkdownRules() {
@@ -69,11 +63,7 @@ function createPlanMarkdownRules() {
       styles: MarkdownRuleStyles,
       inheritedStyles: TextStyle = {},
     ) => (
-      <MarkdownInlineText
-        textKey={node.key}
-        inheritedStyle={inheritedStyles}
-        ruleStyle={styles.text}
-      >
+      <MarkdownInlineText key={node.key} inheritedStyle={inheritedStyles} ruleStyle={styles.text}>
         {node.content}
       </MarkdownInlineText>
     ),
@@ -85,7 +75,7 @@ function createPlanMarkdownRules() {
       inheritedStyles: TextStyle = {},
     ) => (
       <MarkdownInlineText
-        textKey={node.key}
+        key={node.key}
         inheritedStyle={inheritedStyles}
         ruleStyle={styles.textgroup}
       >
@@ -100,7 +90,7 @@ function createPlanMarkdownRules() {
       inheritedStyles: TextStyle = {},
     ) => (
       <MarkdownInlineText
-        textKey={node.key}
+        key={node.key}
         inheritedStyle={inheritedStyles}
         ruleStyle={styles.code_block}
       >
@@ -114,11 +104,7 @@ function createPlanMarkdownRules() {
       styles: MarkdownRuleStyles,
       inheritedStyles: TextStyle = {},
     ) => (
-      <MarkdownInlineText
-        textKey={node.key}
-        inheritedStyle={inheritedStyles}
-        ruleStyle={styles.fence}
-      >
+      <MarkdownInlineText key={node.key} inheritedStyle={inheritedStyles} ruleStyle={styles.fence}>
         {node.content}
       </MarkdownInlineText>
     ),
@@ -130,7 +116,7 @@ function createPlanMarkdownRules() {
       inheritedStyles: TextStyle = {},
     ) => (
       <MarkdownInlineText
-        textKey={node.key}
+        key={node.key}
         inheritedStyle={inheritedStyles}
         ruleStyle={styles.code_inline}
       >
@@ -183,7 +169,7 @@ function createPlanMarkdownRules() {
       const isLastChild = parent[0]?.children?.at(-1)?.key === node.key;
       return (
         <MarkdownParagraph
-          textKey={node.key}
+          key={node.key}
           paragraphStyle={styles.paragraph}
           isLastChild={isLastChild}
         >
@@ -239,7 +225,7 @@ export function PlanCard({
     <View testID={testID} style={containerStyle}>
       <Text style={titleStyle}>{resolvedTitle}</Text>
       {description ? <Text style={descriptionStyle}>{description}</Text> : null}
-      <Markdown style={markdownStyles} rules={markdownRules}>
+      <Markdown style={markdownStyles} rules={markdownRules} markdownit={planMarkdownParser}>
         {text}
       </Markdown>
       {footer ? <View style={styles.footer}>{footer}</View> : null}
@@ -263,7 +249,7 @@ const styles = StyleSheet.create((theme) => ({
     lineHeight: 22,
   },
   description: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     lineHeight: 20,
   },
   footer: {

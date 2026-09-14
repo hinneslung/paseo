@@ -1,7 +1,7 @@
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
   executableExists,
@@ -9,6 +9,7 @@ import {
   quoteWindowsArgument,
   quoteWindowsCommand,
 } from "./executable-resolution.js";
+import { windowsExecutableResolution } from "./windows.js";
 import { isPlatform } from "../test-utils/platform.js";
 
 const originalEnv = {
@@ -57,6 +58,15 @@ afterEach(() => {
 });
 
 describe("findExecutable", () => {
+  test.runIf(isPlatform("linux"))(
+    "propagates a failed lookup process instead of reporting a missing executable",
+    async () => {
+      await expect(findExecutable("x".repeat(1024 * 1024))).rejects.toMatchObject({
+        code: "E2BIG",
+      });
+    },
+  );
+
   describe.skipIf(isPlatform("win32"))("POSIX", () => {
     test("finds an extensionless executable and skips an earlier non-executable candidate", async () => {
       const executableDir = makeTempDir();
@@ -109,6 +119,13 @@ describe("findExecutable", () => {
       expectWindowsPathsEqual(await findExecutable(command), cmd);
     });
 
+    test("does not probe fabricated absolute path extensions that do not exist", async () => {
+      const dir = makeTempDir();
+      const command = path.join(dir, "missing-command");
+
+      await expect(findExecutable(command)).resolves.toBeNull();
+    });
+
     test("finds a winget portable executable outside PATH", async () => {
       const originalLocalAppData = process.env.LOCALAPPDATA;
       const localAppData = makeTempDir();
@@ -148,6 +165,20 @@ describe("findExecutable", () => {
     prependPath(dir);
 
     await expect(findExecutable("paseo-definitely-missing-command")).resolves.toBeNull();
+  });
+
+  test("Windows resolution skips literal path candidates that do not exist", async () => {
+    const probeExecutable = vi.fn(async () => true);
+
+    await expect(
+      windowsExecutableResolution.find("C:\\tools\\missing-command", {
+        enumeratePathCandidates: async () => [],
+        probeExecutable,
+        exists: () => false,
+        probeTimeoutMs: 100,
+      }),
+    ).resolves.toBeNull();
+    expect(probeExecutable).not.toHaveBeenCalled();
   });
 });
 

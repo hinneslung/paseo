@@ -2,13 +2,7 @@ import { cancel, confirm, intro, isCancel, log, note, outro, spinner } from "@cl
 import { Command, Option } from "commander";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
-import {
-  generateLocalPairingOffer,
-  loadConfig,
-  loadPersistedConfig,
-  type CliConfigOverrides,
-  type PersistedConfig,
-} from "@getpaseo/server";
+import { loadPersistedConfig, type PersistedConfig } from "@getpaseo/server";
 import {
   resolveLocalPaseoHome,
   resolveLocalDaemonState,
@@ -18,6 +12,12 @@ import {
   type DaemonStartOptions,
 } from "./daemon/local-daemon.js";
 import { tryConnectToDaemon } from "../utils/client.js";
+import { formatPairingInstructions } from "../output/pairing.js";
+import {
+  confirmRelayPairing,
+  printDirectConnectionGuidance,
+  resolveLocalPairingOffer,
+} from "./daemon/pair.js";
 
 interface OnboardOptions extends DaemonStartOptions {
   timeout?: string;
@@ -40,6 +40,7 @@ type OnboardPersistedConfig = PersistedConfig & {
 };
 
 const DEFAULT_READY_TIMEOUT_MS = 10 * 60 * 1000;
+const READY_PROBE_TIMEOUT_MS = 1200;
 
 class OnboardCancelledError extends Error {}
 
@@ -66,37 +67,6 @@ function parseTimeoutMs(raw: string | undefined): number {
   }
 
   return Math.ceil(seconds * 1000);
-}
-
-function toCliOverrides(options: OnboardOptions): CliConfigOverrides {
-  const cliOverrides: CliConfigOverrides = {};
-
-  if (options.listen) {
-    cliOverrides.listen = options.listen;
-  } else if (options.port) {
-    cliOverrides.listen = `127.0.0.1:${options.port}`;
-  }
-
-  if (options.relay === false) {
-    cliOverrides.relayEnabled = false;
-  }
-
-  if (options.hostnames) {
-    const raw = options.hostnames.trim();
-    cliOverrides.hostnames =
-      raw.toLowerCase() === "true"
-        ? true
-        : raw
-            .split(",")
-            .map((host) => host.trim())
-            .filter(Boolean);
-  }
-
-  if (options.mcp === false) {
-    cliOverrides.mcpEnabled = false;
-  }
-
-  return cliOverrides;
 }
 
 function savePersistedConfig(paseoHome: string, config: OnboardPersistedConfig): void {
@@ -201,15 +171,22 @@ function renderProgressLine(progress: DownloadProgress): string {
 
 type ProbeResult = { kind: "ready"; listen: string; host: string | null } | { kind: "pending" };
 
-async function probeDaemonReady(home: string): Promise<ProbeResult> {
+async function probeDaemonReady(home: string, timeoutMs: number): Promise<ProbeResult> {
   const state = resolveLocalDaemonState({ home });
   const host = resolveTcpHostFromListen(state.listen);
+  const deadline = Date.now() + timeoutMs;
+  const remainingTimeoutMs = () => Math.max(1, deadline - Date.now());
 
   if (state.running && host) {
-    const client = await tryConnectToDaemon({ host, timeout: 1200 });
+    const client = await tryConnectToDaemon({
+      host,
+      timeout: Math.min(remainingTimeoutMs(), READY_PROBE_TIMEOUT_MS),
+    });
     if (client) {
       try {
-        await client.fetchAgents();
+        await client.fetchAgents({
+          timeout: Math.min(remainingTimeoutMs(), READY_PROBE_TIMEOUT_MS),
+        });
         return { kind: "ready", listen: state.listen, host };
       } catch {
         // Daemon process is alive but not API-ready yet.
@@ -255,23 +232,29 @@ async function waitForDaemonReady(args: {
   onStatus?: (message: string) => void;
 }): Promise<{ listen: string; host: string | null }> {
   const deadline = Date.now() + args.timeoutMs;
+  const createTimeoutError = () => {
+    const recentLogs = tailDaemonLog(args.home, 60);
+    return new Error(
+      [
+        `Timed out after ${Math.ceil(args.timeoutMs / 1000)}s waiting for daemon readiness.`,
+        recentLogs ? `Recent daemon logs:\n${recentLogs}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    );
+  };
 
   async function poll(state: ProgressState): Promise<{ listen: string; host: string | null }> {
-    const probe = await probeDaemonReady(args.home);
+    if (Date.now() >= deadline) {
+      throw createTimeoutError();
+    }
+    const probe = await probeDaemonReady(args.home, Math.max(1, deadline - Date.now()));
     if (probe.kind === "ready") {
       return { listen: probe.listen, host: probe.host };
     }
     const nextState = announceProgress(args.home, state, args.onStatus);
     if (Date.now() >= deadline) {
-      const recentLogs = tailDaemonLog(args.home, 60);
-      throw new Error(
-        [
-          `Timed out after ${Math.ceil(args.timeoutMs / 1000)}s waiting for daemon readiness.`,
-          recentLogs ? `Recent daemon logs:\n${recentLogs}` : null,
-        ]
-          .filter(Boolean)
-          .join("\n\n"),
-      );
+      throw createTimeoutError();
     }
     await sleep(200);
     return poll(nextState);
@@ -323,6 +306,7 @@ export function onboardCommand(): Command {
     .option("--listen <listen>", "Listen target (host:port, port, or unix socket path)")
     .option("--port <port>", "Port to listen on (default: 6767)")
     .option("--home <path>", "Paseo home directory (default: ~/.paseo)")
+    .option("--relay", "Enable relay connection without prompting")
     .option("--no-relay", "Disable relay connection")
     .option("--no-mcp", "Disable the Agent MCP HTTP endpoint")
     .option(
@@ -462,8 +446,6 @@ export async function runOnboard(options: OnboardOptions): Promise<void> {
   }
 
   const voiceEnabled = await resolveAndPersistVoice(paseoHome, options);
-  const config = loadConfig(paseoHome, { cli: toCliOverrides(options) });
-
   log.message(
     voiceEnabled
       ? "Voice features enabled. Local speech models will be downloaded automatically if missing."
@@ -477,25 +459,29 @@ export async function runOnboard(options: OnboardOptions): Promise<void> {
     richUi,
   });
 
-  if (config.relayEnabled === false) {
-    log.warn("Relay is disabled; pairing offer is unavailable for this daemon.");
+  if (options.relay === false) {
+    log.message("Relay pairing skipped because --no-relay was provided.");
     printNextSteps(null, paseoHome, richUi);
-    if (richUi) {
-      outro("Paseo daemon is running.");
-    }
+    if (richUi) outro("Paseo daemon is running.");
     return;
   }
 
-  const pairing = await generateLocalPairingOffer({
+  let pairing = await resolveLocalPairingOffer({
     paseoHome,
-    relayEnabled: config.relayEnabled,
-    relayEndpoint: config.relayEndpoint,
-    relayPublicEndpoint: config.relayPublicEndpoint,
-    relayUseTls: config.relayUseTls,
-    relayPublicUseTls: config.relayPublicUseTls,
-    appBaseUrl: config.appBaseUrl,
-    includeQr: true,
+    enableRelay: options.relay === true,
   });
+
+  if (!pairing.relayEnabled) {
+    const shouldEnable = richUi ? await confirmRelayPairing() : false;
+    if (!shouldEnable) {
+      printDirectConnectionGuidance();
+      printNextSteps(null, paseoHome, richUi);
+      if (richUi) outro("Paseo daemon is running.");
+      return;
+    }
+    pairing = await resolveLocalPairingOffer({ paseoHome, enableRelay: true });
+    log.success("Relay enabled");
+  }
 
   if (!pairing.url) {
     log.warn("Relay pairing URL is unavailable for this daemon configuration.");
@@ -506,11 +492,13 @@ export async function runOnboard(options: OnboardOptions): Promise<void> {
     return;
   }
 
-  renderNote(
-    pairing.qr ?? "QR is unavailable in this terminal. Use the pairing link below.",
-    "Scan to pair",
+  process.stdout.write(
+    formatPairingInstructions({
+      url: pairing.url,
+      qr: pairing.qr,
+      columns: process.stdout.columns,
+    }),
   );
-  renderNote(pairing.url, "Pairing link");
   printNextSteps(pairing.url, paseoHome, richUi);
   if (richUi) {
     outro("Paseo is ready!");

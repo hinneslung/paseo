@@ -1,15 +1,22 @@
 import type pino from "pino";
+import { createHash } from "node:crypto";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
+import { compactProviderSnapshot } from "@getpaseo/protocol/provider-snapshot-codec";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
 import {
+  isGlobalProviderSnapshotKey,
   resolveSnapshotCwd,
+  sameSnapshotRecords,
   type ProviderSnapshotManager,
+  type ProviderSnapshot,
+  type ProviderSnapshotTransition,
 } from "../../agent/provider-snapshot-manager.js";
-import type {
-  AgentFeature,
-  AgentProvider,
-  AgentSessionConfig,
-  ProviderSnapshotEntry,
+import {
+  filterSelectableAgentModels,
+  type AgentFeature,
+  type AgentProvider,
+  type AgentSessionConfig,
+  type ProviderSnapshotEntry,
 } from "../../agent/agent-sdk-types.js";
 import type { ProviderAvailability } from "../../agent/agent-manager.js";
 import type { ProviderUsageService } from "../../../services/quota-fetcher/service.js";
@@ -39,6 +46,9 @@ export interface ProviderCatalogSessionHost {
   isProviderVisibleToClient(provider: string): boolean;
   // COMPAT(customModeIcons): reads clientCapabilities live.
   supportsCustomModeIcons(): boolean;
+  supportsCompactProviderSnapshots(): boolean;
+  supportsProviderSnapshotReferences(): boolean;
+  wantsSnapshotChanges(): boolean;
   listProviderAvailability(): Promise<ProviderAvailability[]>;
   listDraftFeatures(config: AgentSessionConfig): Promise<AgentFeature[]>;
 }
@@ -72,19 +82,14 @@ export class ProviderCatalogSession {
   }
 
   start(): void {
-    const handleProviderSnapshotChange = (entries: ProviderSnapshotEntry[], cwd: string) => {
-      // COMPAT(providersSnapshot): keep provider visibility gating for older clients.
-      const visibleEntries = entries.filter((entry) =>
-        this.host.isProviderVisibleToClient(entry.provider),
-      );
-      const snapshotCwd = cwd === resolveSnapshotCwd() ? undefined : cwd;
+    const handleProviderSnapshotChange = (transition: ProviderSnapshotTransition) => {
+      if (!this.host.wantsSnapshotChanges()) return;
+      const previous = this.visibleSnapshot(transition.previous);
+      const current = this.visibleSnapshot(transition.current);
+      if (sameSnapshotRecords(previous.records, current.records)) return;
       this.host.emit({
         type: "providers_snapshot_update",
-        payload: {
-          ...(snapshotCwd ? { cwd: snapshotCwd } : {}),
-          entries: this.downgradeEntryModesForClient(visibleEntries),
-          generatedAt: new Date().toISOString(),
-        },
+        payload: this.snapshotPayload(current),
       });
     };
     this.providerSnapshotManager.on("change", handleProviderSnapshotChange);
@@ -103,20 +108,79 @@ export class ProviderCatalogSession {
   // COMPAT(customModeIcons): rewrite icons unknown to v0.1.83 clients (whose MODE_ICONS
   // map is a closed enum and would render `undefined`, crashing in render). Drop
   // this and the cap gate when floor >= v0.1.84.
-  private downgradeModeIconsForClient<T extends { icon?: string }>(modes: T[]): T[] {
-    if (this.host.supportsCustomModeIcons()) return modes;
+  private downgradeModeIconsForClient<T extends { icon?: string }>(
+    modes: T[],
+    customModeIcons = this.host.supportsCustomModeIcons(),
+  ): T[] {
+    if (customModeIcons) return modes;
     return modes.map((mode) =>
       mode.icon && !LEGACY_MODE_ICONS.has(mode.icon) ? { ...mode, icon: "ShieldCheck" } : mode,
     );
   }
 
-  private downgradeEntryModesForClient<T extends { modes?: { icon?: string }[] }>(
-    entries: T[],
-  ): T[] {
-    if (this.host.supportsCustomModeIcons()) return entries;
-    return entries.map((entry) =>
-      entry.modes ? { ...entry, modes: this.downgradeModeIconsForClient(entry.modes) } : entry,
-    );
+  private visibleSnapshot(snapshot: ProviderSnapshot): ProviderSnapshot {
+    // COMPAT(providersSnapshot): use the shell's current visibility policy for both sides.
+    return {
+      ...snapshot,
+      records: snapshot.records.filter(({ entry }) =>
+        this.host.isProviderVisibleToClient(entry.provider),
+      ),
+    };
+  }
+
+  private snapshotPayload(snapshot: ProviderSnapshot, request?: { ifNoneMatch?: string }) {
+    const { records } = snapshot;
+    const customModeIcons = this.host.supportsCustomModeIcons();
+    const compact = this.host.supportsCompactProviderSnapshots();
+    const references = this.host.supportsProviderSnapshotReferences();
+    const envelope = {
+      ...(!isGlobalProviderSnapshotKey(snapshot.cwd) ? { cwd: snapshot.cwd } : {}),
+      generatedAt: new Date().toISOString(),
+    };
+    const clientEntries = () =>
+      records.map(({ entry }) =>
+        entry.modes && !customModeIcons
+          ? { ...entry, modes: this.downgradeModeIconsForClient(entry.modes, customModeIcons) }
+          : entry,
+      );
+    if (!compact) {
+      return { ...envelope, entries: clientEntries() };
+    }
+
+    // COMPAT(providerSnapshotReferences): added in v0.7.2, remove legacy full
+    // pushes and embedded freshness after 2027-03-06 once the client floor supports references.
+    const snapshotHash = createHash("sha256")
+      .update(
+        JSON.stringify([
+          "paseo.providers-snapshot/1",
+          references ? "references" : "embedded",
+          customModeIcons ? "icons" : "legacy-icons",
+          records.map(({ entry, contentHash }) => [
+            entry.provider,
+            contentHash,
+            references ? null : (entry.fetchedAt ?? null),
+          ]),
+        ]),
+      )
+      .digest("base64url");
+    const fetchedAt = references
+      ? Object.fromEntries(
+          records.flatMap(({ entry }) =>
+            entry.fetchedAt ? [[entry.provider, entry.fetchedAt]] : [],
+          ),
+        )
+      : undefined;
+    const identified = { ...envelope, entries: [], snapshotHash, fetchedAt };
+    if (request && request.ifNoneMatch === snapshotHash) {
+      return { ...identified, notModified: true as const };
+    }
+    if (!request && references) return identified;
+
+    const entries = clientEntries();
+    const content = references
+      ? entries.map(({ fetchedAt: _fetchedAt, ...entry }) => entry)
+      : entries;
+    return { ...identified, compactSnapshot: compactProviderSnapshot(content) };
   }
 
   private emitProviderDisabledResponse(
@@ -141,7 +205,7 @@ export class ProviderCatalogSession {
   async handleListProviderModelsRequest(
     msg: Extract<SessionInboundMessage, { type: "list_provider_models_request" }>,
   ): Promise<void> {
-    const cwd = resolveSnapshotCwd(msg.cwd ? expandTilde(msg.cwd) : undefined);
+    const cwd = resolveCatalogRequestCwd(msg.cwd);
     const fetchedAt = new Date().toISOString();
 
     const entry = await this.getProviderSnapshotEntryForRead(cwd, msg.provider);
@@ -169,7 +233,7 @@ export class ProviderCatalogSession {
         type: "list_provider_models_response",
         payload: {
           provider: msg.provider,
-          models: entry.models ?? [],
+          models: filterSelectableAgentModels(entry.models),
           error: null,
           fetchedAt: entry.fetchedAt ?? fetchedAt,
           requestId: msg.requestId,
@@ -198,7 +262,7 @@ export class ProviderCatalogSession {
     msg: Extract<SessionInboundMessage, { type: "list_provider_modes_request" }>,
   ): Promise<void> {
     const fetchedAt = new Date().toISOString();
-    const cwd = resolveSnapshotCwd(msg.cwd ? expandTilde(msg.cwd) : undefined);
+    const cwd = resolveCatalogRequestCwd(msg.cwd);
     const entry = await this.getProviderSnapshotEntryForRead(cwd, msg.provider);
 
     if (!entry) {
@@ -250,12 +314,12 @@ export class ProviderCatalogSession {
   }
 
   private async getProviderSnapshotEntryForRead(
-    cwd: string,
+    cwd: string | undefined,
     provider: AgentProvider,
   ): Promise<ProviderSnapshotEntry | undefined> {
     const manager = this.providerSnapshotManager;
     const findEntry = () =>
-      manager.getSnapshot(cwd).find((candidate) => candidate.provider === provider);
+      manager.getSnapshot(cwd).records.find(({ entry }) => entry.provider === provider)?.entry;
 
     let entry = findEntry();
     if (entry && !entry.enabled) {
@@ -356,16 +420,12 @@ export class ProviderCatalogSession {
   async handleGetProvidersSnapshotRequest(
     msg: Extract<SessionInboundMessage, { type: "get_providers_snapshot_request" }>,
   ): Promise<void> {
-    // COMPAT(providersSnapshot): keep legacy provider-list RPCs alongside snapshot flow.
-    const entries = this.providerSnapshotManager
-      .getSnapshot(msg.cwd ? expandTilde(msg.cwd) : undefined)
-      .filter((entry) => this.host.isProviderVisibleToClient(entry.provider));
-
+    const cwd = msg.cwd?.trim() ? resolveSnapshotCwd(expandTilde(msg.cwd)) : undefined;
+    const snapshot = this.visibleSnapshot(this.providerSnapshotManager.getSnapshot(cwd));
     this.host.emit({
       type: "get_providers_snapshot_response",
       payload: {
-        entries: this.downgradeEntryModesForClient(entries),
-        generatedAt: new Date().toISOString(),
+        ...this.snapshotPayload(snapshot, { ifNoneMatch: msg.ifNoneMatch }),
         requestId: msg.requestId,
       },
     });
@@ -451,4 +511,9 @@ export class ProviderCatalogSession {
       });
     }
   }
+}
+
+function resolveCatalogRequestCwd(cwd?: string | null): string | undefined {
+  const trimmed = cwd?.trim();
+  return trimmed ? expandTilde(trimmed) : undefined;
 }

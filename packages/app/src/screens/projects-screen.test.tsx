@@ -7,27 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProjectHostEntry, ProjectSummary, WorkspaceSummary } from "@/utils/projects";
 import type { ProjectHostError, UseProjectsResult } from "@/hooks/use-projects";
 
-const { theme, projectsState, navigate } = vi.hoisted(() => ({
-  theme: {
-    spacing: { 0: 0, 1: 4, "1.5": 6, 2: 8, 3: 12, 4: 16, 6: 24, 8: 32 },
-    iconSize: { sm: 14, md: 20 },
-    fontSize: { xs: 11, sm: 13, base: 15 },
-    fontWeight: { normal: "400" as const, medium: "500" as const },
-    borderRadius: { sm: 4, md: 6, lg: 8, full: 999 },
-    opacity: { 50: 0.5 },
-    colors: {
-      surface0: "#000",
-      surface1: "#111",
-      surface2: "#222",
-      surface3: "#333",
-      surfaceSidebarHover: "#1a1a1a",
-      foreground: "#fff",
-      foregroundMuted: "#aaa",
-      border: "#444",
-      accent: "#0a84ff",
-      palette: { red: { 300: "#ff6b6b" } },
-    },
-  },
+const { projectsState, push } = vi.hoisted(() => ({
   projectsState: {
     current: {
       projects: [],
@@ -37,10 +17,11 @@ const { theme, projectsState, navigate } = vi.hoisted(() => ({
       refetch: vi.fn(),
     } as UseProjectsResult,
   },
-  navigate: vi.fn(),
+  push: vi.fn(),
 }));
 
-vi.mock("react-native", () => {
+vi.mock("react-native", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-native")>();
   const passthrough = ({
     children,
     testID,
@@ -87,6 +68,7 @@ vi.mock("react-native", () => {
   };
 
   return {
+    ...actual,
     View: ({ children, testID }: { children?: React.ReactNode; testID?: string }) =>
       React.createElement("div", { "data-testid": testID }, children),
     Text: ({ children }: { children?: React.ReactNode }) =>
@@ -94,25 +76,22 @@ vi.mock("react-native", () => {
     Pressable: passthrough,
     Image: ({ source }: { source?: { uri?: string } }) =>
       React.createElement("img", { src: source?.uri ?? "" }),
-    Platform: { OS: "web" },
+    Platform: {
+      OS: "web",
+      select: <T,>(options: { web?: T; default?: T }) => options.web ?? options.default,
+    },
   };
 });
 
-vi.mock("react-native-unistyles", () => ({
-  StyleSheet: {
-    create: (factory: unknown) =>
-      typeof factory === "function" ? (factory as (t: typeof theme) => unknown)(theme) : factory,
-  },
-  useUnistyles: () => ({ theme }),
-}));
-
-vi.mock("lucide-react-native", () => {
+vi.mock("lucide-react-native", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("lucide-react-native")>();
   const icon = (name: string) => {
     const Icon = () => React.createElement("span", { "data-icon": name });
     Icon.displayName = name;
     return Icon;
   };
   return {
+    ...actual,
     ChevronRight: icon("ChevronRight"),
     MoreVertical: icon("MoreVertical"),
     ExternalLink: icon("ExternalLink"),
@@ -122,7 +101,7 @@ vi.mock("lucide-react-native", () => {
 });
 
 vi.mock("expo-router", () => ({
-  router: { navigate },
+  router: { push },
 }));
 
 vi.mock("react-i18next", () => ({
@@ -201,8 +180,8 @@ vi.mock("@/hooks/use-projects", () => ({
   useProjects: () => projectsState.current,
 }));
 
-vi.mock("@/projects/project-icons", () => ({
-  useProjectIconDataByProjectKey: () => new Map(),
+vi.mock("@/projects/icons", () => ({
+  useProjectIcons: () => new Map(),
 }));
 
 import ProjectsScreen from "./projects-screen";
@@ -214,6 +193,7 @@ function workspaceSummary(overrides: Partial<WorkspaceSummary> = {}): WorkspaceS
     workspaceKind: "directory",
     status: "done",
     currentBranch: "main",
+    changeRequestNumber: null,
     ...overrides,
   };
 }
@@ -221,6 +201,9 @@ function workspaceSummary(overrides: Partial<WorkspaceSummary> = {}): WorkspaceS
 function hostEntry(overrides: Partial<ProjectHostEntry> = {}): ProjectHostEntry {
   return {
     serverId: "host-a",
+    projectId: "project-a",
+    projectName: "Project",
+    projectCustomName: null,
     serverName: "alpha",
     isOnline: true,
     repoRoot: "/home/me/proj",
@@ -236,7 +219,7 @@ function project(overrides: Partial<ProjectSummary> = {}): ProjectSummary {
     overrides.totalWorkspaceCount ?? hosts.reduce((sum, host) => sum + host.workspaceCount, 0);
   const onlineHostCount = overrides.onlineHostCount ?? hosts.filter((h) => h.isOnline).length;
   return {
-    projectKey: "remote:github.com/acme/app",
+    viewKey: "remote:github.com/acme/app",
     projectName: "acme/app",
     hosts,
     totalWorkspaceCount,
@@ -275,7 +258,7 @@ describe("ProjectsScreen", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     setProjectsState({});
-    navigate.mockReset();
+    push.mockReset();
   });
 
   afterEach(() => {
@@ -290,9 +273,9 @@ describe("ProjectsScreen", () => {
     vi.unstubAllGlobals();
   });
 
-  function render(view: { kind: "projects" } | { kind: "project"; projectKey: string }) {
+  function render(serverId = "host-a") {
     act(() => {
-      root?.render(<ProjectsScreen view={view} />);
+      root?.render(<ProjectsScreen serverId={serverId} />);
     });
   }
 
@@ -301,12 +284,12 @@ describe("ProjectsScreen", () => {
       projects: [
         project({
           projectName: "acme/app",
-          hosts: [hostEntry({ serverName: "alpha", workspaceCount: 5 })],
+          hosts: [hostEntry({ projectName: "acme/app", serverName: "alpha", workspaceCount: 5 })],
         }),
       ],
     });
 
-    render({ kind: "projects" });
+    render();
 
     const rows = container?.querySelectorAll('[data-testid^="project-row-"]') ?? [];
     expect(rows.length).toBe(1);
@@ -318,26 +301,26 @@ describe("ProjectsScreen", () => {
 
   it("navigates to the project detail route when the row is pressed", () => {
     setProjectsState({
-      projects: [project({ projectKey: "remote:github.com/acme/app" })],
+      projects: [project({ viewKey: "remote:github.com/acme/app" })],
     });
 
-    render({ kind: "projects" });
+    render();
 
     const row = findRow(container!, "remote:github.com/acme/app");
     act(() => {
       row.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     });
 
-    expect(navigate).toHaveBeenCalledTimes(1);
-    expect(navigate).toHaveBeenCalledWith("/settings/projects/remote%3Agithub.com%2Facme%2Fapp");
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(push).toHaveBeenCalledWith("/settings/hosts/host-a/projects/project-a");
   });
 
   it("does not render a kebab menu on the row", () => {
     setProjectsState({
-      projects: [project({ projectKey: "remote:github.com/acme/app" })],
+      projects: [project({ viewKey: "remote:github.com/acme/app" })],
     });
 
-    render({ kind: "projects" });
+    render();
 
     expect(
       container?.querySelector('[data-testid="project-row-menu-remote:github.com/acme/app"]'),
@@ -347,7 +330,7 @@ describe("ProjectsScreen", () => {
   it("renders a centered loading spinner before the first response", () => {
     setProjectsState({ isLoading: true, projects: [] });
 
-    render({ kind: "projects" });
+    render();
 
     expect(container?.querySelector('[data-testid="projects-loading-spinner"]')).not.toBeNull();
   });
@@ -355,7 +338,7 @@ describe("ProjectsScreen", () => {
   it("renders the empty state when there are no projects", () => {
     setProjectsState({ projects: [] });
 
-    render({ kind: "projects" });
+    render();
 
     expect(container?.textContent).toContain("No projects yet");
     expect(container?.textContent).not.toContain("Non-GitHub remote projects aren't supported yet");
@@ -367,37 +350,39 @@ describe("ProjectsScreen", () => {
       { serverId: "b", serverName: "beta", message: "unreachable" },
     ];
     setProjectsState({
-      projects: [project()],
+      projects: [project({ hosts: [hostEntry({ serverId: "a" })] })],
       hostErrors,
     });
 
-    render({ kind: "projects" });
+    render("a");
 
     const banner = container?.querySelector('[data-testid="projects-host-errors"]');
     expect(banner).not.toBeNull();
     expect(banner?.textContent).toContain("alpha");
-    expect(banner?.textContent).toContain("beta");
+    expect(banner?.textContent).not.toContain("beta");
     expect(container?.querySelector('[data-testid^="project-row-"]')).not.toBeNull();
   });
 
-  it("highlights the selected row when the active view targets a project", () => {
+  it("shows only projects belonging to the selected host", () => {
     setProjectsState({
       projects: [
-        project({ projectKey: "remote:github.com/acme/app" }),
         project({
-          projectKey: "remote:github.com/acme/other",
-          projectName: "acme/other",
-          githubUrl: "https://github.com/acme/other",
+          viewKey: "host-a-project",
+          projectName: "Host A",
+          hosts: [hostEntry({ serverId: "host-a", projectId: "project-a", projectName: "Host A" })],
+        }),
+        project({
+          viewKey: "host-b-project",
+          projectName: "Host B",
+          hosts: [hostEntry({ serverId: "host-b", projectId: "project-b", projectName: "Host B" })],
         }),
       ],
     });
 
-    render({ kind: "project", projectKey: "remote:github.com/acme/app" });
+    render("host-b");
 
-    const selected = findRow(container!, "remote:github.com/acme/app");
-    const other = findRow(container!, "remote:github.com/acme/other");
-    expect(selected.getAttribute("data-selected")).toBe("true");
-    expect(other.getAttribute("data-selected")).toBe("false");
+    expect(container?.textContent).not.toContain("Host A");
+    expect(container?.textContent).toContain("Host B");
   });
 
   it("does not include the word 'checkout' anywhere in the rendered tree", () => {
@@ -413,7 +398,7 @@ describe("ProjectsScreen", () => {
       hostErrors: [{ serverId: "x", serverName: "x", message: "down" }],
     });
 
-    render({ kind: "projects" });
+    render("a");
 
     const html = container?.innerHTML.toLowerCase() ?? "";
     expect(html).not.toContain("checkout");

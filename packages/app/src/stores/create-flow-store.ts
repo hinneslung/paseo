@@ -17,6 +17,20 @@ export interface PendingCreateAttempt {
   attachments?: AgentAttachment[];
 }
 
+export function isActiveCreateFlowForDraft(input: {
+  pending: PendingCreateAttempt | null | undefined;
+  serverId: string;
+  draftId: string | null | undefined;
+}): boolean {
+  const draftId = input.draftId?.trim();
+  return Boolean(
+    draftId &&
+    input.pending?.draftId === draftId &&
+    input.pending.serverId === input.serverId &&
+    input.pending.lifecycle === "active",
+  );
+}
+
 interface CreateFlowState {
   pendingByDraftId: Record<string, PendingCreateAttempt>;
   setPending: (pending: Omit<PendingCreateAttempt, "lifecycle">) => void;
@@ -95,7 +109,10 @@ export const useCreateFlowStore = create<CreateFlowState>((set) => ({
     set((state) => {
       const next = Object.fromEntries(
         Object.entries(state.pendingByDraftId).filter(
-          ([, pending]) => pending.serverId !== serverId || pending.agentId !== agentId,
+          ([, pending]) =>
+            pending.lifecycle !== "sent" ||
+            pending.serverId !== serverId ||
+            pending.agentId !== agentId,
         ),
       );
       if (Object.keys(next).length === Object.keys(state.pendingByDraftId).length) {

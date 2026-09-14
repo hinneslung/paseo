@@ -7,15 +7,23 @@ interface AppearanceStyleBoundaryProps {
   children: ReactNode;
 }
 
+// Remounts its children when an appearance token changes. Memoized and parsed content bakes
+// tokens in, and on web numeric tokens (font sizes, line heights) are baked into generated
+// classes that only a re-render refreshes. Native tracked styles update in place.
+// Keep native gesture hosts outside these keys too: shared gesture refs can outlive detached
+// dependent views until passive cleanup. It must sit below every native navigator: remounting
+// a navigator while settings hydrate
+// detaches its screen container inside a FragmentManager transaction and crashes Android.
+// `ThemedStack` places one per screen; the app shell places them around the chrome outside the
+// navigators.
 function AppearanceStyleBoundaryBase({ appearanceKey, children }: AppearanceStyleBoundaryProps) {
   return <Fragment key={appearanceKey}>{children}</Fragment>;
 }
 
-const appearanceStyleBoundaryMapping = (theme: Theme): Partial<AppearanceStyleBoundaryProps> => ({
-  appearanceKey: [
+export function appearanceStyleBoundaryKey(theme: Theme): string {
+  return [
     theme.fontFamily.ui,
     theme.fontFamily.mono,
-    theme.fontSize.xs,
     theme.fontSize.sm,
     theme.fontSize.base,
     theme.fontSize.lg,
@@ -23,6 +31,7 @@ const appearanceStyleBoundaryMapping = (theme: Theme): Partial<AppearanceStyleBo
     theme.fontSize["2xl"],
     theme.fontSize["3xl"],
     theme.fontSize["4xl"],
+    theme.fontSize.content,
     theme.fontSize.code,
     theme.lineHeight.diff,
     theme.colors.foreground,
@@ -52,8 +61,12 @@ const appearanceStyleBoundaryMapping = (theme: Theme): Partial<AppearanceStyleBo
     theme.colors.syntax.meta,
     theme.colors.syntax.heading,
     theme.colors.syntax.link,
-  ].join("\u0000"),
-});
+  ].join("\u0000");
+}
+
+function appearanceStyleBoundaryMapping(theme: Theme): Partial<AppearanceStyleBoundaryProps> {
+  return { appearanceKey: appearanceStyleBoundaryKey(theme) };
+}
 
 const ThemedAppearanceStyleBoundary = withUnistyles(AppearanceStyleBoundaryBase);
 

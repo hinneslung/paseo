@@ -1,0 +1,13 @@
+src/**
+scripts/**
+etc/**
+esbuild.mjs
+tsconfig*.json
+*.tsbuildinfo
+**/*.test.*
+dist/**/*.map
+dist/test/**
+*.vsix
+.gitignore
+.vscode-test/**
+artifacts/**

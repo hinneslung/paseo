@@ -1,0 +1,541 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
+import { relative as relativePath } from "node:path";
+import test from "node:test";
+
+const repoRoot = new URL("../", import.meta.url);
+const ciWorkflowPath = new URL(".github/workflows/ci.yml", repoRoot);
+const dockerWorkflowPath = new URL(".github/workflows/docker.yml", repoRoot);
+const nixWorkflowPath = new URL(".github/workflows/nix.yml", repoRoot);
+const vscodePublishWorkflowPath = new URL(".github/workflows/vscode-publish.yml", repoRoot);
+const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
+const serverTsconfigPath = new URL("packages/server/tsconfig.server.json", repoRoot);
+const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
+
+const gatedCiJobs = new Map([
+  ["format", { name: "format", contract: "format" }],
+  ["lint", { name: "lint", contract: "quality" }],
+  ["typecheck", { name: "typecheck", contract: "quality" }],
+  ["server-tests-ubuntu", { name: "server-tests (ubuntu-latest)", contracts: ["server", "hub"] }],
+  ["server-tests-windows", { name: "server-tests (windows-latest)", contracts: ["server", "hub"] }],
+  ["desktop-tests-ubuntu", { name: "desktop-tests (ubuntu-latest)", contract: "desktop" }],
+  ["desktop-tests-windows", { name: "desktop-tests (windows-latest)", contract: "desktop" }],
+  ["app-tests", { name: "app-tests", contract: "app" }],
+  ["sdk-tests", { name: "sdk-tests", contract: "sdk" }],
+  ["playwright-1", { name: "playwright (shard 1/4)", contract: "browser" }],
+  ["playwright-2", { name: "playwright (shard 2/4)", contract: "browser" }],
+  ["playwright-3", { name: "playwright (shard 3/4)", contract: "browser" }],
+  ["playwright-4", { name: "playwright (shard 4/4)", contract: "browser" }],
+  ["relay-tests", { name: "relay-tests", contract: "relay" }],
+  ["cli-tests-1", { name: "cli-tests (shard 1/3)", contract: "cli" }],
+  ["cli-tests-2", { name: "cli-tests (shard 2/3)", contract: "cli" }],
+  ["cli-tests-3", { name: "cli-tests (shard 3/3)", contract: "cli" }],
+]);
+
+function jobBlocks(source) {
+  const jobs = new Map();
+  let currentJob;
+
+  for (const line of source.split("\n")) {
+    const jobMatch = /^  ([a-z0-9-]+):\s*$/.exec(line);
+    if (jobMatch) {
+      currentJob = jobMatch[1];
+      jobs.set(currentJob, []);
+      continue;
+    }
+    if (currentJob) jobs.get(currentJob).push(line);
+  }
+  return jobs;
+}
+
+function namedStepBlocks(source) {
+  const steps = new Map();
+  let currentStep;
+
+  for (const line of source.split("\n")) {
+    const stepMatch = /^      - name: (.+)\s*$/.exec(line);
+    if (stepMatch) {
+      currentStep = stepMatch[1];
+      steps.set(currentStep, []);
+      continue;
+    }
+    if (line.startsWith("      - ")) currentStep = undefined;
+    if (currentStep) steps.get(currentStep).push(line);
+  }
+  return steps;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function namedStepRunScript(source, name) {
+  const block = namedStepBlocks(source).get(name);
+  const runIndex = block?.indexOf("        run: |") ?? -1;
+  if (!block || runIndex < 0) throw new Error(`Missing run block for step: ${name}`);
+
+  return block
+    .slice(runIndex + 1)
+    .map((line) => {
+      if (line === "") return line;
+      if (!line.startsWith("          ")) {
+        throw new Error(`Unexpected indentation in run block for step: ${name}`);
+      }
+      return line.slice(10);
+    })
+    .join("\n");
+}
+
+function loadFilters(path) {
+  const filters = {};
+  let currentFilter;
+
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const filterMatch = /^([a-z_]+):\s*$/.exec(line);
+    if (filterMatch) {
+      currentFilter = filterMatch[1];
+      filters[currentFilter] = [];
+      continue;
+    }
+    const patternMatch = /^  - "([^"]+)"\s*$/.exec(line);
+    if (currentFilter && patternMatch) filters[currentFilter].push(patternMatch[1]);
+  }
+  return filters;
+}
+
+function pushTagPatterns(path) {
+  const trigger = readFileSync(path, "utf8").split("jobs:", 1)[0];
+  const tags = /^    tags:\s*$\n((?:      - ".*"\s*$\n?)+)/m.exec(trigger)?.[1];
+  assert.ok(tags, `missing push tag patterns in ${path.pathname}`);
+  return [...tags.matchAll(/^      - "(.*)"\s*$/gm)].map((match) => match[1]);
+}
+
+function selectsPushTag(patterns, tag) {
+  let selected = false;
+  for (const pattern of patterns) {
+    const body = pattern.startsWith("!") ? pattern.slice(1) : pattern;
+    const expression = body.replaceAll(".", "\\.").replaceAll("*", ".*");
+    if (new RegExp(`^${expression}$`).test(tag)) selected = !pattern.startsWith("!");
+  }
+  return selected;
+}
+
+function filesUnder(relativeDirectory, predicate) {
+  const directory = new URL(`${relativeDirectory}/`, repoRoot);
+  return readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) =>
+      [relativeDirectory, relativePath(directory.pathname, entry.parentPath), entry.name]
+        .filter(Boolean)
+        .join("/")
+        .replaceAll("\\", "/"),
+    )
+    .filter(predicate)
+    .sort();
+}
+
+test("gated checks are statically named jobs with real job-level gating", () => {
+  const workflowSource = readFileSync(ciWorkflowPath, "utf8");
+  const jobs = jobBlocks(workflowSource);
+  const trigger = workflowSource.split("jobs:", 1)[0];
+
+  assert.match(trigger, /^\s+merge_group:\s*$/m);
+  assert.doesNotMatch(workflowSource, /strategy:\s*\n\s+matrix:/);
+  assert.doesNotMatch(workflowSource, /RUN_TESTS|Skip unaffected|No .* changes detected/);
+
+  for (const [jobId, expected] of gatedCiJobs) {
+    const job = jobs.get(jobId)?.join("\n");
+    assert.ok(job, `missing static job ${jobId}`);
+    assert.match(job, new RegExp(`^    name: ${expected.name.replace(/[()]/g, "\\$&")}$`, "m"));
+    assert.match(job, /needs\.changes\.outputs\.full != 'false'/);
+    for (const contract of expected.contracts ?? [expected.contract]) {
+      assert.match(job, new RegExp(`needs\\.changes\\.outputs\\.${contract} != 'false'`));
+    }
+  }
+});
+
+test("change gating allows superseded workflow runs to cancel", () => {
+  for (const workflowPath of [ciWorkflowPath, dockerWorkflowPath, nixWorkflowPath]) {
+    const source = readFileSync(workflowPath, "utf8");
+    assert.doesNotMatch(
+      source,
+      /\$\{\{\s*always\(\)/,
+      "always() keeps jobs alive after concurrency cancellation; use !cancelled() for fail-open gating",
+    );
+  }
+});
+
+test("VS Code release tags select only the extension publish workflow", () => {
+  const nonExtensionWorkflows = new Map([
+    ["android-apk-release.yml", ["v*", "android-v*", "!vscode-v*"]],
+    [
+      "desktop-release.yml",
+      [
+        "v*",
+        "desktop-v*",
+        "desktop-macos-v*",
+        "desktop-linux-v*",
+        "desktop-windows-v*",
+        "!vscode-v*",
+      ],
+    ],
+    ["deploy-app.yml", ["v*", "!v*-beta.*", "app-v*", "!app-v*-beta.*", "!vscode-v*"]],
+    ["docker.yml", ["v*", "!vscode-v*"]],
+    ["release-notes-sync.yml", ["v*", "!vscode-v*"]],
+  ]);
+  const workflowDirectory = new URL(".github/workflows/", repoRoot);
+  const pushTagWorkflows = readdirSync(workflowDirectory)
+    .filter((filename) =>
+      /^    tags:/m.test(readFileSync(new URL(filename, workflowDirectory), "utf8")),
+    )
+    .sort();
+  assert.deepEqual(
+    pushTagWorkflows,
+    [...nonExtensionWorkflows.keys(), "vscode-publish.yml"].sort(),
+  );
+
+  for (const [filename, expectedPatterns] of nonExtensionWorkflows) {
+    const patterns = pushTagPatterns(new URL(`.github/workflows/${filename}`, repoRoot));
+    assert.deepEqual(patterns, expectedPatterns, filename);
+    assert.equal(selectsPushTag(patterns, "vscode-v0.8.0"), false, filename);
+    assert.equal(selectsPushTag(patterns, "vscode-v0.9.0-beta.1"), false, filename);
+  }
+
+  const preservedSelections = new Map([
+    ["android-apk-release.yml", ["v0.8.0", "v0.9.0-beta.1", "android-v0.8.0"]],
+    [
+      "desktop-release.yml",
+      [
+        "v0.8.0",
+        "v0.9.0-beta.1",
+        "desktop-v0.8.0",
+        "desktop-macos-v0.8.0",
+        "desktop-linux-v0.8.0",
+        "desktop-windows-v0.8.0",
+      ],
+    ],
+    ["deploy-app.yml", ["v0.8.0", "app-v0.8.0"]],
+    ["docker.yml", ["v0.8.0", "v0.9.0-beta.1"]],
+    ["release-notes-sync.yml", ["v0.8.0", "v0.9.0-beta.1"]],
+  ]);
+
+  for (const [filename, tags] of preservedSelections) {
+    const patterns = pushTagPatterns(new URL(`.github/workflows/${filename}`, repoRoot));
+    for (const tag of tags)
+      assert.equal(selectsPushTag(patterns, tag), true, `${filename}: ${tag}`);
+  }
+
+  const deployPatterns = pushTagPatterns(new URL(".github/workflows/deploy-app.yml", repoRoot));
+  assert.equal(selectsPushTag(deployPatterns, "v0.9.0-beta.1"), false);
+  assert.equal(selectsPushTag(deployPatterns, "app-v0.9.0-beta.1"), false);
+
+  const vscodePublishPatterns = pushTagPatterns(vscodePublishWorkflowPath);
+  assert.deepEqual(vscodePublishPatterns, ["vscode-v*"]);
+  assert.equal(selectsPushTag(vscodePublishPatterns, "vscode-v0.8.0"), true);
+  assert.equal(selectsPushTag(vscodePublishPatterns, "vscode-v0.9.0-beta.1"), true);
+  assert.equal(selectsPushTag(vscodePublishPatterns, "v0.8.0"), false);
+});
+
+test("VS Code Marketplace diagnostics are manual, read-only, and fail closed", () => {
+  const source = readFileSync(vscodePublishWorkflowPath, "utf8");
+  const trigger = source.split("concurrency:", 1)[0];
+  const publishJob = jobBlocks(source).get("publish")?.join("\n") ?? "";
+  const steps = namedStepBlocks(source);
+  const validate = steps.get("Validate publish tag")?.join("\n") ?? "";
+  const install = steps.get("Install dependencies")?.join("\n") ?? "";
+  const anonymousProbe = steps.get("Probe Marketplace gallery anonymously")?.join("\n") ?? "";
+  const credentialProbe = steps.get("Verify Marketplace publisher access")?.join("\n") ?? "";
+  const diagnosticResult =
+    steps.get("Require successful Marketplace diagnostics")?.join("\n") ?? "";
+  const build = steps.get("Build and package VS Code extension")?.join("\n") ?? "";
+  const publish = steps.get("Publish to VS Code Marketplace")?.join("\n") ?? "";
+
+  assert.match(
+    trigger,
+    /diagnostic_only:\s*\n\s+description: .*\n\s+required: false\s*\n\s+default: false\s*\n\s+type: boolean/,
+  );
+  assert.match(publishJob, /^    environment: marketplace$/m);
+  assert.match(source, /^permissions:\s*\n  contents: read$/m);
+  assert.match(
+    source,
+    /ref: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.tag \|\| github\.ref_name \}\}/,
+  );
+  assert.match(source, /git merge-base --is-ancestor/);
+  assert.match(source, /expected_tag="vscode-v\$\{package_version\}"/);
+  assert.doesNotMatch(validate, /^        if:/m);
+  assert.doesNotMatch(install, /^        if:/m);
+  assert.doesNotMatch(validate, /continue-on-error|always\(\)|!cancelled\(\)/);
+  assert.doesNotMatch(install, /continue-on-error|always\(\)|!cancelled\(\)/);
+  assert.doesNotMatch(source, /uses: actions\/checkout@v4\s*\n\s+continue-on-error:/);
+
+  const diagnosticCondition =
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_only }}";
+  assert.match(anonymousProbe, new RegExp(`^        ${escapeRegex(diagnosticCondition)}$`, "m"));
+  assert.match(anonymousProbe, /--max-time 15/);
+  assert.match(anonymousProbe, /--request OPTIONS/);
+  assert.match(anonymousProbe, /--output \/dev\/null/);
+  assert.doesNotMatch(anonymousProbe, /VSCE_PAT|Authorization|--dump-header|--include/);
+  assert.doesNotMatch(anonymousProbe, /always\(\)|!cancelled\(\)/);
+
+  assert.match(credentialProbe, new RegExp(`^        ${escapeRegex(diagnosticCondition)}$`, "m"));
+  assert.match(credentialProbe, /if \[\[ -z "\$\{VSCE_PAT:-\}" \]\]/);
+  assert.match(credentialProbe, /npx @vscode\/vsce verify-pat hinnes/);
+  assert.match(credentialProbe, /VSCE_PAT: \$\{\{ secrets\.VSCE_PAT \}\}/);
+  assert.doesNotMatch(credentialProbe, /vsce publish|--packagePath|--pat|Authorization/);
+  assert.doesNotMatch(credentialProbe, /always\(\)|!cancelled\(\)/);
+
+  assert.match(diagnosticResult, /always\(\).*inputs\.diagnostic_only/);
+  assert.match(diagnosticResult, /steps\.anonymous-marketplace\.outcome/);
+  assert.match(diagnosticResult, /steps\.publisher-access\.outcome/);
+  assert.match(anonymousProbe, /^        continue-on-error: true$/m);
+  assert.match(credentialProbe, /^        continue-on-error: true$/m);
+
+  const normalCondition =
+    "if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic_only == false }}";
+  for (const step of [build, publish]) {
+    assert.match(step, new RegExp(`^        ${escapeRegex(normalCondition)}$`, "m"));
+  }
+  assert.match(build, /npm run build:vscode/);
+  assert.match(publish, /npx @vscode\/vsce publish --packagePath paseo\.vsix/);
+  assert.match(publish, /VSCE_PAT: \$\{\{ secrets\.VSCE_PAT \}\}/);
+  assert.equal(source.match(/npx @vscode\/vsce publish --packagePath paseo\.vsix/g)?.length, 1);
+  assert.equal(source.match(/VSCE_PAT: \$\{\{ secrets\.VSCE_PAT \}\}/g)?.length, 2);
+});
+
+test("Marketplace anonymous probe reports synthetic curl failures under GitHub Bash flags", () => {
+  const source = readFileSync(vscodePublishWorkflowPath, "utf8");
+  const probe = namedStepRunScript(source, "Probe Marketplace gallery anonymously");
+
+  function runProbe(metrics, curlStatus) {
+    return spawnSync(
+      "bash",
+      [
+        "--noprofile",
+        "--norc",
+        "-e",
+        "-o",
+        "pipefail",
+        "-c",
+        `curl() {
+  printf '%s' "$STUB_CURL_METRICS"
+  return "$STUB_CURL_STATUS"
+}
+${probe}`,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          STUB_CURL_METRICS: metrics,
+          STUB_CURL_STATUS: String(curlStatus),
+        },
+      },
+    );
+  }
+
+  const timeoutMetrics =
+    "http_status=000 connect_seconds=0.001 tls_seconds=0.000 total_seconds=15.000";
+  const timeout = runProbe(timeoutMetrics, 28);
+  assert.equal(timeout.status, 28);
+  assert.match(timeout.stdout, new RegExp(`Anonymous gallery OPTIONS: ${timeoutMetrics}`));
+  assert.match(timeout.stdout, /Anonymous Marketplace gallery probe failed with curl exit 28/);
+
+  const unauthorizedMetrics =
+    "http_status=401 connect_seconds=0.001 tls_seconds=0.010 total_seconds=0.020";
+  const unauthorized = runProbe(unauthorizedMetrics, 0);
+  assert.equal(unauthorized.status, 0);
+  assert.match(
+    unauthorized.stdout,
+    new RegExp(`Anonymous gallery OPTIONS: ${unauthorizedMetrics}`),
+  );
+  assert.doesNotMatch(unauthorized.stdout, /::error::/);
+
+  const unexpectedMetrics =
+    "http_status=503 connect_seconds=0.001 tls_seconds=0.010 total_seconds=0.020";
+  const unexpected = runProbe(unexpectedMetrics, 0);
+  assert.equal(unexpected.status, 1);
+  assert.match(unexpected.stdout, new RegExp(`Anonymous gallery OPTIONS: ${unexpectedMetrics}`));
+  assert.match(unexpected.stdout, /Anonymous Marketplace gallery probe expected HTTP 401/);
+});
+
+test("focused contracts stay inside existing required checks", () => {
+  const jobs = jobBlocks(readFileSync(ciWorkflowPath, "utf8"));
+  const changes = jobs.get("changes")?.join("\n") ?? "";
+  const server = jobs.get("server-tests-ubuntu")?.join("\n") ?? "";
+  const desktop = jobs.get("desktop-tests-ubuntu")?.join("\n") ?? "";
+
+  assert.match(changes, /scripts\/daemon-launch-contract\.test\.mjs/);
+  assert.doesNotMatch(changes, /Install dependencies|npm run build/);
+
+  assert.match(server, /test:hub-cli-contract/);
+  assert.match(server, /npm run test --workspace=@getpaseo\/server/);
+  assert.ok(!jobs.has("hub-cli-contract"));
+
+  assert.match(desktop, /test:e2e:renderer/);
+  assert.match(desktop, /test:e2e:browser-tabs/);
+  assert.match(desktop, /npm run test --workspace=@getpaseo\/desktop/);
+  assert.ok(!jobs.has("desktop-browser-bridge"));
+  assert.ok(!jobs.has("playwright-desktop"));
+});
+
+test("server builds exclude test utilities at every domain depth", () => {
+  const tsconfig = JSON.parse(readFileSync(serverTsconfigPath, "utf8"));
+  assert.ok(tsconfig.exclude.includes("src/server/**/test-utils/**"));
+  assert.ok(!tsconfig.exclude.includes("src/server/test-utils/**"));
+});
+
+test("PR routing declares stable behavior ownership", () => {
+  const filters = loadFilters(filtersPath);
+  assert.deepEqual(filters, {
+    routing: [".github/ci-paths.yml"],
+    workspace: [
+      ".mise.toml",
+      ".tool-versions",
+      "package.json",
+      "package-lock.json",
+      "patches/**",
+      "scripts/**",
+      "tsconfig.json",
+      "tsconfig.base.json",
+      "vitest.config.ts",
+    ],
+    ci: [".github/actions/**", ".github/workflows/ci.yml"],
+    format: [
+      ".agents/**/*.{cjs,css,html,js,json,jsonc,jsx,md,mjs,ts,tsx,yaml,yml}",
+      ".github/**/*.{cjs,css,html,js,json,jsonc,jsx,md,mjs,ts,tsx,yaml,yml}",
+      "**/*.{cjs,css,html,js,json,jsonc,jsx,md,mjs,ts,tsx,yaml,yml}",
+      "packages/expo-two-way-audio/**",
+    ],
+    quality: ["**/*.{cjs,js,json,jsx,mjs,ts,tsx}", "packages/expo-two-way-audio/**"],
+    hub: ["packages/cli/src/commands/hub/**", "packages/server/src/server/hub/**"],
+    server: ["packages/server/**", "packages/app/e2e/support/fixtures/recording.*"],
+    desktop: [
+      "packages/desktop/**",
+      "packages/app/src/desktop/**",
+      "packages/server/src/server/browser-tools/**",
+      "packages/app/e2e/support/**",
+      "packages/app/*config.{cjs,js,ts}",
+      "packages/app/package.json",
+    ],
+    app: ["packages/app/**", "packages/expo-two-way-audio/**"],
+    sdk: [
+      "packages/plugin/**",
+      "plugin-examples/**",
+      "public-docs/plugins/v0.8/**",
+      "packages/client/**",
+      "packages/highlight/**",
+      "packages/protocol/**",
+    ],
+    browser: [
+      "packages/server/src/server/agent/provider-snapshot-manager.ts",
+      "packages/server/src/server/session/provider/provider-catalog-session.ts",
+      "packages/client/src/compat/normalize-provider-models.ts",
+      "packages/protocol/src/client-capabilities.ts",
+      "packages/server/src/server/agent/provider-registry.ts",
+      "packages/server/src/server/agent/agent-sdk-types.ts",
+      "packages/server/src/server/agent/providers/codex-app-server-agent.ts",
+      "packages/server/src/server/agent/providers/claude/agent.ts",
+      "packages/server/src/server/agent/plugin-provider.ts",
+      "packages/server/src/server/plugins/{index,plugin-process,plugin-process-protocol,runtime}.ts",
+      "packages/server/src/executable-resolution/**",
+      "packages/plugin/src/server/provider.ts",
+      "packages/app/src/!(desktop)/**",
+      "packages/app/e2e/browser/**",
+      "packages/app/e2e/support/**",
+      "packages/app/assets/**",
+      "packages/app/public/**",
+      "packages/app/index.ts",
+      "packages/app/*config.{cjs,js,ts}",
+      "packages/app/package.json",
+    ],
+    relay: ["packages/relay/**"],
+    cli: ["packages/cli/**"],
+  });
+});
+
+test("cross-package invariants live in the suite that owns them", () => {
+  const cliTests = filesUnder("packages/cli", (path) => path.endsWith(".test.ts"));
+  assert.ok(cliTests.length > 0);
+  for (const path of cliTests) {
+    assert.doesNotMatch(
+      readFileSync(new URL(path, repoRoot), "utf8"),
+      /server\/src\/server\/test-utils/,
+      path,
+    );
+  }
+
+  const protocolWireCompatibility = new URL(
+    "packages/protocol/src/messages.wire-compat.test.ts",
+    repoRoot,
+  );
+  assert.match(readFileSync(protocolWireCompatibility, "utf8"), /wire schema compatibility/);
+});
+
+test("browser and desktop tests have exclusive, directory-owned suites", () => {
+  const filters = loadFilters(filtersPath);
+  const browserSpecs = filesUnder("packages/app/e2e", (path) => path.endsWith(".spec.ts"));
+  const desktopSpecs = filesUnder("packages/desktop/e2e", (path) => path.endsWith(".spec.ts"));
+  const electronModules = filesUnder("packages/app/src", (path) => /\.electron\.tsx?$/.test(path));
+
+  assert.ok(browserSpecs.length > 0);
+  assert.ok(desktopSpecs.length > 0);
+  assert.ok(browserSpecs.every((path) => path.startsWith("packages/app/e2e/browser/")));
+  assert.ok(desktopSpecs.every((path) => path.startsWith("packages/desktop/e2e/")));
+  assert.ok(electronModules.every((path) => path.startsWith("packages/app/src/desktop/")));
+
+  const desktopPackage = JSON.parse(readFileSync(desktopPackagePath, "utf8"));
+  assert.match(desktopPackage.scripts.test, /--exclude ["']e2e\/\*\*["']/);
+
+  for (const path of browserSpecs) {
+    assert.doesNotMatch(
+      readFileSync(new URL(path, repoRoot), "utf8"),
+      /paseoDesktop|injectDesktopBridge/,
+    );
+  }
+  for (const path of desktopSpecs) {
+    assert.ok(path.startsWith("packages/desktop/e2e/"));
+  }
+
+  const routingSource = readFileSync(filtersPath, "utf8");
+  assert.doesNotMatch(routingSource, /desktop_bridge|playwright_desktop|browser-\*|browser-\*\//);
+  assert.deepEqual(filters.desktop, [
+    "packages/desktop/**",
+    "packages/app/src/desktop/**",
+    "packages/server/src/server/browser-tools/**",
+    "packages/app/e2e/support/**",
+    "packages/app/*config.{cjs,js,ts}",
+    "packages/app/package.json",
+  ]);
+  assert.deepEqual(filters.browser, [
+    "packages/server/src/server/agent/provider-snapshot-manager.ts",
+    "packages/server/src/server/session/provider/provider-catalog-session.ts",
+    "packages/client/src/compat/normalize-provider-models.ts",
+    "packages/protocol/src/client-capabilities.ts",
+    "packages/server/src/server/agent/provider-registry.ts",
+    "packages/server/src/server/agent/agent-sdk-types.ts",
+    "packages/server/src/server/agent/providers/codex-app-server-agent.ts",
+    "packages/server/src/server/agent/providers/claude/agent.ts",
+    "packages/server/src/server/agent/plugin-provider.ts",
+    "packages/server/src/server/plugins/{index,plugin-process,plugin-process-protocol,runtime}.ts",
+    "packages/server/src/executable-resolution/**",
+    "packages/plugin/src/server/provider.ts",
+    "packages/app/src/!(desktop)/**",
+    "packages/app/e2e/browser/**",
+    "packages/app/e2e/support/**",
+    "packages/app/assets/**",
+    "packages/app/public/**",
+    "packages/app/index.ts",
+    "packages/app/*config.{cjs,js,ts}",
+    "packages/app/package.json",
+  ]);
+});
+
+test("non-required Docker and Nix workflows avoid runners with workflow path filters", () => {
+  for (const workflowPath of [dockerWorkflowPath, nixWorkflowPath]) {
+    const source = readFileSync(workflowPath, "utf8");
+    const trigger = source.split("jobs:", 1)[0];
+    assert.match(trigger, /^\s+paths:\s*$/m);
+    assert.doesNotMatch(source, /dorny\/paths-filter/);
+  }
+});

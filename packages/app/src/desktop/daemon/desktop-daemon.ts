@@ -1,7 +1,17 @@
 import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
 import { invokeDesktopCommand } from "@/desktop/electron/invoke";
+import { isVscodeRuntime } from "@/desktop/vscode/host";
+import type { AgentSkillSelection } from "@getpaseo/protocol/messages";
 
 export type DesktopDaemonState = "starting" | "running" | "stopped" | "errored";
+export type DesktopDaemonStopReason =
+  | "manual_ipc"
+  | "settings"
+  | "host_remove"
+  | "quit"
+  | "app_update"
+  | "version_mismatch"
+  | "restart";
 
 export interface DesktopDaemonStatus {
   serverId: string;
@@ -20,16 +30,60 @@ export interface DesktopDaemonLogs {
   contents: string;
 }
 
-export interface DesktopPairingOffer {
-  relayEnabled: boolean;
-  url: string | null;
-  qr: string | null;
+export interface DesktopAppLogs {
+  logPath: string;
+  contents: string;
+}
+
+export interface DesktopUpdaterDiagnosticFile {
+  path: string;
+  exists: boolean;
+  modifiedAt: string | null;
+  contents: string;
+  error: string | null;
+}
+
+export interface DesktopUpdaterDiagnostics {
+  platform: string;
+  currentVersion: string;
+  targetVersion: string | null;
+  targetVersionError: string | null;
+  shipItDirectory: string | null;
+  state: DesktopUpdaterDiagnosticFile | null;
+  stdout: DesktopUpdaterDiagnosticFile | null;
+  stderr: DesktopUpdaterDiagnosticFile | null;
 }
 
 export interface LocalTransportTarget {
   [key: string]: unknown;
   transportType: "socket" | "pipe";
   transportPath: string;
+}
+
+export interface TcpBridgeTransportTarget {
+  [key: string]: unknown;
+  transportType: "tcp";
+  endpoint: string;
+  protocols?: string[];
+}
+
+export interface RemoteSshTransportTarget {
+  [key: string]: unknown;
+  transportType: "ssh";
+  host: string;
+  sshPort?: number;
+  daemonPort?: number;
+}
+
+export type DesktopDaemonTransportTarget =
+  | LocalTransportTarget
+  | TcpBridgeTransportTarget
+  | RemoteSshTransportTarget;
+
+export interface OpenLocalTransportSessionInput {
+  [key: string]: unknown;
+  sessionId: string;
+  target: DesktopDaemonTransportTarget;
 }
 
 interface LocalTransportEventPayload {
@@ -99,19 +153,42 @@ function parseDesktopDaemonLogs(raw: unknown): DesktopDaemonLogs {
   };
 }
 
-function parseDesktopPairingOffer(raw: unknown): DesktopPairingOffer {
+function parseDesktopUpdaterDiagnosticFile(raw: unknown): DesktopUpdaterDiagnosticFile | null {
+  if (raw === null) return null;
   if (!isRecord(raw)) {
-    throw new Error("Unexpected desktop daemon pairing response.");
+    throw new Error("Unexpected desktop updater diagnostic file response.");
   }
   return {
-    relayEnabled: raw.relayEnabled === true,
-    url: toStringOrNull(raw.url),
-    qr: toStringOrNull(raw.qr),
+    path: toStringOrNull(raw.path) ?? "",
+    exists: raw.exists === true,
+    modifiedAt: toStringOrNull(raw.modifiedAt),
+    contents: typeof raw.contents === "string" ? raw.contents : "",
+    error: toStringOrNull(raw.error),
+  };
+}
+
+function parseDesktopUpdaterDiagnostics(raw: unknown): DesktopUpdaterDiagnostics {
+  if (!isRecord(raw)) {
+    throw new Error("Unexpected desktop updater diagnostics response.");
+  }
+  return {
+    platform: toStringOrNull(raw.platform) ?? "unknown",
+    currentVersion: toStringOrNull(raw.currentVersion) ?? "unknown",
+    targetVersion: toStringOrNull(raw.targetVersion),
+    targetVersionError: toStringOrNull(raw.targetVersionError),
+    shipItDirectory: toStringOrNull(raw.shipItDirectory),
+    state: parseDesktopUpdaterDiagnosticFile(raw.state),
+    stdout: parseDesktopUpdaterDiagnosticFile(raw.stdout),
+    stderr: parseDesktopUpdaterDiagnosticFile(raw.stderr),
   };
 }
 
 export function shouldUseDesktopDaemon(): boolean {
   return isElectronRuntime();
+}
+
+export function shouldUseVscodeDaemon(): boolean {
+  return isVscodeRuntime();
 }
 
 export async function getDesktopDaemonStatus(): Promise<DesktopDaemonStatus> {
@@ -122,8 +199,10 @@ export async function startDesktopDaemon(): Promise<DesktopDaemonStatus> {
   return parseDesktopDaemonStatus(await invokeDesktopCommand("start_desktop_daemon"));
 }
 
-export async function stopDesktopDaemon(): Promise<DesktopDaemonStatus> {
-  return parseDesktopDaemonStatus(await invokeDesktopCommand("stop_desktop_daemon"));
+export async function stopDesktopDaemon(
+  reason: DesktopDaemonStopReason = "manual_ipc",
+): Promise<DesktopDaemonStatus> {
+  return parseDesktopDaemonStatus(await invokeDesktopCommand("stop_desktop_daemon", { reason }));
 }
 
 export async function restartDesktopDaemon(): Promise<DesktopDaemonStatus> {
@@ -134,8 +213,19 @@ export async function getDesktopDaemonLogs(): Promise<DesktopDaemonLogs> {
   return parseDesktopDaemonLogs(await invokeDesktopCommand("desktop_daemon_logs"));
 }
 
-export async function getDesktopDaemonPairing(): Promise<DesktopPairingOffer> {
-  return parseDesktopPairingOffer(await invokeDesktopCommand("desktop_daemon_pairing"));
+export async function getDesktopAppLogs(): Promise<DesktopAppLogs> {
+  const raw = await invokeDesktopCommand("desktop_app_logs");
+  if (!isRecord(raw)) {
+    throw new Error("Unexpected desktop app logs response.");
+  }
+  return {
+    logPath: toStringOrNull(raw.logPath) ?? "",
+    contents: typeof raw.contents === "string" ? raw.contents : "",
+  };
+}
+
+export async function getDesktopUpdaterDiagnostics(): Promise<DesktopUpdaterDiagnostics> {
+  return parseDesktopUpdaterDiagnostics(await invokeDesktopCommand("desktop_update_diagnostics"));
 }
 
 export async function getCliDaemonStatus(): Promise<string> {
@@ -173,12 +263,10 @@ export async function listenToLocalTransportEvents(
   return typeof unlisten === "function" ? unlisten : () => {};
 }
 
-export async function openLocalTransportSession(target: LocalTransportTarget): Promise<string> {
-  const raw = await invokeDesktopCommand<unknown>("open_local_daemon_transport", target);
-  if (typeof raw !== "string" || raw.trim().length === 0) {
-    throw new Error("Unexpected local transport session response.");
-  }
-  return raw;
+export async function openLocalTransportSession(
+  input: OpenLocalTransportSessionInput,
+): Promise<void> {
+  await invokeDesktopCommand("open_local_daemon_transport", input);
 }
 
 export async function sendLocalTransportMessage(input: {
@@ -220,67 +308,12 @@ export async function installCli(): Promise<InstallStatus> {
   return parseInstallStatus(await invokeDesktopCommand("install_cli"));
 }
 
-export type SkillsState = "not-installed" | "up-to-date" | "drift";
-
-export type SkillOp =
-  | { kind: "add"; name: string }
-  | { kind: "update"; name: string }
-  | { kind: "delete"; name: string };
-
-export interface SkillsStatus {
-  state: SkillsState;
-  ops: SkillOp[];
+// COMPAT(desktopSkillSelectionMigration): added in v0.4.0; remove after 2027-02-16.
+export function readLegacySkillSelection(): Promise<AgentSkillSelection | null> {
+  return invokeDesktopCommand("read_legacy_skill_selection") as Promise<AgentSkillSelection | null>;
 }
 
-function parseSkillsState(value: unknown): SkillsState {
-  switch (value) {
-    case "not-installed":
-    case "up-to-date":
-    case "drift":
-      return value;
-    default:
-      throw new Error(`Unexpected skills status state: ${String(value)}`);
-  }
-}
-
-function parseSkillOp(raw: unknown): SkillOp {
-  if (!isRecord(raw)) {
-    throw new Error("Unexpected skill op response.");
-  }
-  const name = toStringOrNull(raw.name);
-  if (!name) throw new Error("Skill op missing name.");
-  switch (raw.kind) {
-    case "add":
-      return { kind: "add", name };
-    case "update":
-      return { kind: "update", name };
-    case "delete":
-      return { kind: "delete", name };
-    default:
-      throw new Error(`Unexpected skill op kind: ${String(raw.kind)}`);
-  }
-}
-
-function parseSkillsStatus(raw: unknown): SkillsStatus {
-  if (!isRecord(raw)) {
-    throw new Error("Unexpected skills status response.");
-  }
-  const ops = Array.isArray(raw.ops) ? raw.ops.map(parseSkillOp) : [];
-  return { state: parseSkillsState(raw.state), ops };
-}
-
-export async function getSkillsStatus(): Promise<SkillsStatus> {
-  return parseSkillsStatus(await invokeDesktopCommand("get_skills_status"));
-}
-
-export async function installSkills(): Promise<SkillsStatus> {
-  return parseSkillsStatus(await invokeDesktopCommand("install_skills"));
-}
-
-export async function updateSkills(): Promise<SkillsStatus> {
-  return parseSkillsStatus(await invokeDesktopCommand("update_skills"));
-}
-
-export async function uninstallSkills(): Promise<SkillsStatus> {
-  return parseSkillsStatus(await invokeDesktopCommand("uninstall_skills"));
+// COMPAT(desktopSkillSelectionMigration): added in v0.4.0; remove after 2027-02-16.
+export async function deleteLegacySkillSelection(): Promise<void> {
+  await invokeDesktopCommand("delete_legacy_skill_selection");
 }

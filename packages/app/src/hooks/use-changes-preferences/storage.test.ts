@@ -28,8 +28,11 @@ describe("loadChangesPreferencesFromStorage", () => {
 
     expect(result).toEqual({
       layout: "unified",
+      desktopTreeVisible: false,
       wrapLines: true,
       hideWhitespace: false,
+      inlineDiff: false,
+      commitsCollapsed: true,
     });
     expect(storage.entries.get(CHANGES_PREFERENCES_STORAGE_KEY)).toBe(JSON.stringify(result));
   });
@@ -37,6 +40,7 @@ describe("loadChangesPreferencesFromStorage", () => {
   it("loads persisted layout and whitespace preferences without rewriting storage", async () => {
     const persisted = JSON.stringify({
       layout: "split",
+      viewMode: "tree",
       hideWhitespace: true,
       wrapLines: false,
     });
@@ -48,11 +52,56 @@ describe("loadChangesPreferencesFromStorage", () => {
 
     expect(result).toEqual({
       layout: "split",
+      desktopTreeVisible: true,
       hideWhitespace: true,
       wrapLines: false,
+      inlineDiff: false,
+      commitsCollapsed: true,
     });
     expect(storage.entries.get(CHANGES_PREFERENCES_STORAGE_KEY)).toBe(persisted);
     expect(storage.entries.size).toBe(1);
+  });
+});
+
+describe("changes preferences commitsCollapsed", () => {
+  it("collapses commits by default", () => {
+    expect(DEFAULT_CHANGES_PREFERENCES.commitsCollapsed).toBe(true);
+  });
+
+  it("round-trips commitsCollapsed: false", async () => {
+    const storage = createInMemoryKeyValueStorage({
+      [CHANGES_PREFERENCES_STORAGE_KEY]: JSON.stringify({ commitsCollapsed: false }),
+    });
+
+    const prefs = await loadChangesPreferencesFromStorage(storage);
+
+    expect(prefs.commitsCollapsed).toBe(false);
+  });
+
+  it("falls back to collapsed for invalid commitsCollapsed", async () => {
+    const storage = createInMemoryKeyValueStorage({
+      [CHANGES_PREFERENCES_STORAGE_KEY]: JSON.stringify({ commitsCollapsed: "nope" }),
+    });
+
+    const prefs = await loadChangesPreferencesFromStorage(storage);
+
+    expect(prefs.commitsCollapsed).toBe(true);
+  });
+});
+
+describe("changes preferences inlineDiff", () => {
+  it("keeps inline diff disabled by default", () => {
+    expect(DEFAULT_CHANGES_PREFERENCES.inlineDiff).toBe(false);
+  });
+
+  it("round-trips the inline diff preference", async () => {
+    const storage = createInMemoryKeyValueStorage({
+      [CHANGES_PREFERENCES_STORAGE_KEY]: JSON.stringify({ inlineDiff: true }),
+    });
+
+    const prefs = await loadChangesPreferencesFromStorage(storage);
+
+    expect(prefs.inlineDiff).toBe(true);
   });
 });
 
@@ -64,11 +113,16 @@ describe("saveChangesPreferences", () => {
 
     await saveChangesPreferences({
       queryClient,
-      updates: { layout: "split", hideWhitespace: true },
+      updates: { layout: "split", desktopTreeVisible: true, hideWhitespace: true },
       storage,
     });
 
-    const expected = { ...DEFAULT_CHANGES_PREFERENCES, layout: "split", hideWhitespace: true };
+    const expected = {
+      ...DEFAULT_CHANGES_PREFERENCES,
+      layout: "split",
+      desktopTreeVisible: true,
+      hideWhitespace: true,
+    };
     expect(queryClient.getQueryData(CHANGES_PREFERENCES_QUERY_KEY)).toEqual(expected);
     expect(storage.entries.get(CHANGES_PREFERENCES_STORAGE_KEY)).toBe(JSON.stringify(expected));
   });

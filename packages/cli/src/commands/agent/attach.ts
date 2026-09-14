@@ -6,10 +6,13 @@ export function addAttachOptions(cmd: Command): Command {
     .argument("<id>", "Agent ID (or prefix)");
 }
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
-import { fetchProjectedTimelineItems } from "../../utils/timeline.js";
+import {
+  fetchProjectedTimelineItems,
+  LIVE_HISTORY_FETCH_TIMEOUT_MS,
+} from "../../utils/timeline.js";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
-import type { AgentStreamEventPayload, AgentStreamMessage } from "@getpaseo/protocol/messages";
+import type { AgentStreamEventPayload } from "@getpaseo/protocol/messages";
 
 export interface AgentAttachOptions {
   host?: string;
@@ -121,7 +124,7 @@ export async function runAttachCommand(
   }
 
   try {
-    const fetchResult = await client.fetchAgent(id);
+    const fetchResult = await client.fetchAgent({ agentId: id });
     if (!fetchResult) {
       console.error(`Error: No agent found matching: ${id}`);
       console.error("Use `paseo ls` to list available agents");
@@ -131,7 +134,7 @@ export async function runAttachCommand(
     const resolvedId = fetchResult.agent.id;
 
     // Print header
-    console.log(`Attaching to agent ${resolvedId.substring(0, 7)}...`);
+    console.log(`Fetching history for agent ${resolvedId.substring(0, 7)}...`);
     console.log(`(Press Ctrl+C to detach)\n`);
 
     // Print existing output from timeline fetch.
@@ -139,6 +142,7 @@ export async function runAttachCommand(
       const timelineItems = await fetchProjectedTimelineItems({
         client,
         agentId: resolvedId,
+        timeoutMs: LIVE_HISTORY_FETCH_TIMEOUT_MS,
       });
       for (const item of timelineItems) {
         printTimelineItem(item);
@@ -148,13 +152,16 @@ export async function runAttachCommand(
     }
 
     // Subscribe to new events
-    const unsubscribe = client.on("agent_stream", (msg: unknown) => {
-      const message = msg as AgentStreamMessage;
-      if (message.type !== "agent_stream") return;
-      if (message.payload.agentId !== resolvedId) return;
-
-      printStreamEvent(message.payload.event);
+    const unsubscribe = client.subscribeAgentTimeline(resolvedId, (message) => {
+      if (message.type === "agent.timeline.replacement") {
+        console.log("\n[Timeline replaced; earlier output is no longer current]");
+      } else {
+        printStreamEvent(message.payload.event);
+      }
     });
+
+    await unsubscribe.ready;
+    console.log(`Attached to agent ${resolvedId.substring(0, 7)}.`);
 
     // Handle Ctrl+C to detach gracefully
     let detached = false;

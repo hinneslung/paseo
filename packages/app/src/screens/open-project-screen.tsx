@@ -7,7 +7,9 @@ import { FolderOpen, Inbox, Plug, Smartphone } from "lucide-react-native";
 import { PaseoLogo } from "@/components/icons/paseo-logo";
 import { CommunityLinks } from "@/components/community-links";
 import { MenuHeader } from "@/components/headers/menu-header";
-import { useOpenProjectPicker } from "@/hooks/use-open-project-picker";
+import { useOpenAddProject } from "@/hooks/use-open-add-project";
+import { useImportSession } from "@/hooks/use-import-session";
+import { useHostChooser } from "@/hosts/host-chooser";
 import { usePanelStore } from "@/stores/panel-store";
 import {
   useIsCompactFormFactor,
@@ -16,32 +18,29 @@ import {
   HEADER_TOP_PADDING_MOBILE,
 } from "@/constants/layout";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
-import { useIsLocalDaemon } from "@/hooks/use-is-local-daemon";
+import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
 import { PairDeviceModal } from "@/desktop/components/pair-device-modal";
-import { buildHostAgentDetailRoute, buildSettingsHostSectionRoute } from "@/utils/host-routes";
-import { ImportSessionSheet } from "@/components/import-session-sheet";
-import { useHostRuntimeClient } from "@/runtime/host-runtime";
-import { useOpenProject } from "@/hooks/use-open-project";
-import type { Href } from "expo-router";
+import { buildSettingsHostSectionRoute } from "@/utils/host-routes";
+import { getIsVscode } from "@/constants/platform";
 
-export function OpenProjectScreen({ serverId }: { serverId: string }) {
+export function OpenProjectScreen() {
   const { t } = useTranslation();
   const router = useRouter();
   const openDesktopAgentList = usePanelStore((s) => s.openDesktopAgentList);
-  const openProjectPicker = useOpenProjectPicker(serverId);
-  const isLocalDaemon = useIsLocalDaemon(serverId);
-  const client = useHostRuntimeClient(serverId);
-  const openProject = useOpenProject(serverId);
+  const openProjectPicker = useOpenAddProject();
+  const importSession = useImportSession();
+  const chooseHost = useHostChooser();
+  const localServerId = useLocalDaemonServerId();
   const [isPairDeviceOpen, setIsPairDeviceOpen] = useState(false);
-  const [isImportSheetOpen, setIsImportSheetOpen] = useState(false);
 
   const isCompactLayout = useIsCompactFormFactor();
+  const isVscodeRuntime = getIsVscode();
 
   useEffect(() => {
-    if (!isCompactLayout) {
+    if (!isCompactLayout && !isVscodeRuntime) {
       openDesktopAgentList();
     }
-  }, [isCompactLayout, openDesktopAgentList]);
+  }, [isCompactLayout, isVscodeRuntime, openDesktopAgentList]);
 
   const handleOpenPicker = useCallback(() => {
     void openProjectPicker();
@@ -50,22 +49,14 @@ export function OpenProjectScreen({ serverId }: { serverId: string }) {
   const handleOpenPairDevice = useCallback(() => setIsPairDeviceOpen(true), []);
   const handleClosePairDevice = useCallback(() => setIsPairDeviceOpen(false), []);
 
-  const handleOpenImportSession = useCallback(() => setIsImportSheetOpen(true), []);
-  const handleCloseImportSession = useCallback(() => setIsImportSheetOpen(false), []);
-
-  const handleImported = useCallback(
-    (agent: { id: string; cwd: string }) => {
-      void (async () => {
-        await openProject(agent.cwd);
-        router.push(buildHostAgentDetailRoute(serverId, agent.id) as Href);
-      })();
-    },
-    [openProject, router, serverId],
-  );
-
   const handleOpenProviders = useCallback(() => {
-    router.push(buildSettingsHostSectionRoute(serverId, "providers"));
-  }, [router, serverId]);
+    chooseHost({
+      title: "Choose host",
+      onChooseHost: (serverId) => {
+        router.push(buildSettingsHostSectionRoute(serverId, "providers"));
+      },
+    });
+  }, [chooseHost, router]);
 
   return (
     <View style={styles.container}>
@@ -88,7 +79,7 @@ export function OpenProjectScreen({ serverId }: { serverId: string }) {
             icon={Inbox}
             title={t("openProject.tiles.importSession.title")}
             description={t("openProject.tiles.importSession.description")}
-            onPress={handleOpenImportSession}
+            onPress={importSession.open}
             testID="open-project-import-session"
           />
           <HomeTile
@@ -98,7 +89,7 @@ export function OpenProjectScreen({ serverId }: { serverId: string }) {
             onPress={handleOpenProviders}
             testID="open-project-setup-providers"
           />
-          {isLocalDaemon ? (
+          {localServerId ? (
             <HomeTile
               icon={Smartphone}
               title={t("openProject.tiles.pairDevice.title")}
@@ -113,17 +104,12 @@ export function OpenProjectScreen({ serverId }: { serverId: string }) {
         <CommunityLinks />
       </View>
       <PairDeviceModal
+        serverId={localServerId ?? ""}
         visible={isPairDeviceOpen}
         onClose={handleClosePairDevice}
         testID="open-project-pair-device-modal"
       />
-      <ImportSessionSheet
-        visible={isImportSheetOpen}
-        client={client}
-        serverId={serverId}
-        onClose={handleCloseImportSession}
-        onImported={handleImported}
-      />
+      {importSession.sheet}
     </View>
   );
 }
@@ -230,7 +216,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   tileDescription: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     lineHeight: 18,
   },
   communityRow: {

@@ -1,8 +1,15 @@
+import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { useCallback, useMemo } from "react";
-import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type QueryKey,
+} from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useSessionStore } from "@/stores/session-store";
-import { agentHistoryQueryKey } from "./agent-history-query-key";
+import { agentHistoryQueryKey, allAgentHistoryQueryRootKey } from "./agent-history-query-key";
 
 export const ARCHIVE_AGENT_PENDING_QUERY_KEY = ["archive-agent-pending"] as const;
 const EMPTY_PENDING_ARCHIVE_AGENT_IDS = new Set<string>();
@@ -29,6 +36,7 @@ export interface AgentsListQueryData {
 
 export interface AgentHistoryQueryAgent {
   id?: string | null;
+  serverId?: string | null;
   archivedAt?: Date | null;
 }
 
@@ -175,7 +183,10 @@ export function markAgentArchivedInHistoryPayload<T extends AgentHistoryQueryDat
 
     let pageChanged = false;
     const agents = page.agents.map((agent) => {
-      if (agent.id !== input.agentId) {
+      if (
+        agent.id !== input.agentId ||
+        (agent.serverId != null && agent.serverId !== input.serverId)
+      ) {
         return agent;
       }
       pageChanged = true;
@@ -200,6 +211,10 @@ export function markAgentArchivedInHistoryCache(
     agentHistoryQueryKey(input.serverId),
     (current) => markAgentArchivedInHistoryPayload(current, input),
   );
+  queryClient.setQueriesData<AgentHistoryQueryData | undefined>(
+    { queryKey: allAgentHistoryQueryRootKey() },
+    (current) => markAgentArchivedInHistoryPayload(current, input),
+  );
 }
 
 export function clearArchiveAgentPending(input: IsAgentArchivingInput): void {
@@ -218,6 +233,7 @@ interface ArchivedAgentListCacheSnapshot {
   sidebarAgentsList: AgentsListQueryData | undefined;
   allAgents: AgentsListQueryData | undefined;
   agentHistory: AgentHistoryQueryData | undefined;
+  allAgentHistory: Array<[QueryKey, AgentHistoryQueryData | undefined]>;
 }
 
 interface ArchiveAgentMutationContext {
@@ -232,27 +248,7 @@ function getStoredAgentSnapshot(input: ArchiveAgentInput) {
 function restoreAgentSnapshot(
   input: ArchiveAgentInput & { agent: ReturnType<typeof getStoredAgentSnapshot> },
 ): void {
-  const setAgents = useSessionStore.getState().setAgents;
-  setAgents(input.serverId, (prev) => {
-    const hasAgent = prev.has(input.agentId);
-    if (!input.agent) {
-      if (!hasAgent) {
-        return prev;
-      }
-      const next = new Map(prev);
-      next.delete(input.agentId);
-      return next;
-    }
-
-    const current = prev.get(input.agentId);
-    if (current === input.agent) {
-      return prev;
-    }
-
-    const next = new Map(prev);
-    next.set(input.agentId, input.agent);
-    return next;
-  });
+  getHostRuntimeStore().restoreAgentSnapshot(input.serverId, input.agentId, input.agent);
 }
 
 function getArchivedAgentListCacheSnapshot(
@@ -268,6 +264,9 @@ function getArchivedAgentListCacheSnapshot(
     agentHistory: queryClient.getQueryData<AgentHistoryQueryData | undefined>(
       agentHistoryQueryKey(serverId),
     ),
+    allAgentHistory: queryClient.getQueriesData<AgentHistoryQueryData | undefined>({
+      queryKey: allAgentHistoryQueryRootKey(),
+    }),
   };
 }
 
@@ -295,6 +294,9 @@ function restoreArchivedAgentListCacheSnapshot(
   );
   restoreCachedQuerySnapshot(queryClient, ["allAgents", serverId], snapshot.allAgents);
   restoreCachedQuerySnapshot(queryClient, agentHistoryQueryKey(serverId), snapshot.agentHistory);
+  for (const [queryKey, querySnapshot] of snapshot.allAgentHistory) {
+    restoreCachedQuerySnapshot(queryClient, queryKey, querySnapshot);
+  }
 }
 
 function markAgentArchivedInStore(input: ArchiveAgentInput & { archivedAt: string }): void {
@@ -303,22 +305,11 @@ function markAgentArchivedInStore(input: ArchiveAgentInput & { archivedAt: strin
     return;
   }
 
-  const setAgents = useSessionStore.getState().setAgents;
-  setAgents(input.serverId, (prev) => {
-    const existing = prev.get(input.agentId);
-    if (!existing) {
-      return prev;
-    }
-    if (existing.archivedAt && existing.archivedAt.getTime() === archivedAt.getTime()) {
-      return prev;
-    }
-    const next = new Map(prev);
-    next.set(input.agentId, {
-      ...existing,
-      archivedAt,
-    });
-    return next;
-  });
+  getHostRuntimeStore().archiveAgentSnapshot(
+    input.serverId,
+    input.agentId,
+    archivedAt.toISOString(),
+  );
 }
 
 interface ApplyArchivedAgentCloseResultsInput {
@@ -359,6 +350,9 @@ export function applyArchivedAgentCloseResults(input: ApplyArchivedAgentCloseRes
     });
     void input.queryClient.invalidateQueries({
       queryKey: agentHistoryQueryKey(input.serverId),
+    });
+    void input.queryClient.invalidateQueries({
+      queryKey: allAgentHistoryQueryRootKey(),
     });
   }
 }
@@ -448,6 +442,9 @@ export function useArchiveAgent() {
       });
       void queryClient.invalidateQueries({
         queryKey: agentHistoryQueryKey(input.serverId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: allAgentHistoryQueryRootKey(),
       });
     },
   });

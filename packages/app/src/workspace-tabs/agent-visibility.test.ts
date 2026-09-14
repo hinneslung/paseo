@@ -23,6 +23,7 @@ function makeAgent(input: {
     id: input.id,
     provider: "codex",
     status: "idle",
+    turn: { phase: "idle", cancellationRequestId: null },
     createdAt,
     updatedAt: createdAt,
     lastUserMessageAt: null,
@@ -129,6 +130,32 @@ describe("workspace agent visibility", () => {
     expect(result.activeAgentIds).toEqual(new Set(["child-agent", "parent-agent"]));
     expect(result.autoOpenAgentIds).toEqual(new Set(["parent-agent"]));
     expect(result.knownAgentIds).toEqual(new Set(["child-agent", "parent-agent"]));
+  });
+
+  it("auto-opens a subagent whose parent belongs to another workspace", () => {
+    const parent = makeAgent({
+      id: "parent-agent",
+      cwd: "/repo",
+      workspaceId: "ws-parent",
+    });
+    const child = makeAgent({
+      id: "child-agent",
+      cwd: "/repo/worktree",
+      workspaceId: WORKSPACE_ID,
+      parentAgentId: parent.id,
+    });
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents: new Map<string, Agent>([
+        [parent.id, parent],
+        [child.id, child],
+      ]),
+      workspaceId: WORKSPACE_ID,
+    });
+
+    expect(result.activeAgentIds).toEqual(new Set(["child-agent"]));
+    expect(result.autoOpenAgentIds).toEqual(new Set(["child-agent"]));
+    expect(result.knownAgentIds).toEqual(new Set(["child-agent"]));
   });
 
   it("keeps archived agents out of activeAgentIds but present in knownAgentIds", () => {
@@ -292,6 +319,40 @@ describe("workspace agent visibility", () => {
     expect(result.knownAgentIds).toEqual(new Set<string>());
   });
 
+  it("falls back to cwd for legacy agents without a workspaceId", () => {
+    const sessionAgents = new Map<string, Agent>([
+      ["legacy-agent", makeAgent({ id: "legacy-agent", cwd: "/repo/worktree/" })],
+    ]);
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents,
+      workspaceId: "ws-1",
+      workspaceDirectory: "/repo/worktree",
+    });
+
+    expect(result.activeAgentIds).toEqual(new Set(["legacy-agent"]));
+    expect(result.autoOpenAgentIds).toEqual(new Set(["legacy-agent"]));
+    expect(result.knownAgentIds).toEqual(new Set(["legacy-agent"]));
+  });
+
+  it("keeps workspaceId authoritative over cwd fallback", () => {
+    const sessionAgents = new Map<string, Agent>([
+      [
+        "other-ws-agent",
+        makeAgent({ id: "other-ws-agent", cwd: "/repo/worktree", workspaceId: "ws-2" }),
+      ],
+    ]);
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents,
+      workspaceId: "ws-1",
+      workspaceDirectory: "/repo/worktree",
+    });
+
+    expect(result.activeAgentIds).toEqual(new Set<string>());
+    expect(result.knownAgentIds).toEqual(new Set<string>());
+  });
+
   it("builds the tab reconciliation snapshot without callers unpacking agent visibility", () => {
     const agentVisibility = {
       activeAgentIds: new Set(["active-agent"]),
@@ -306,6 +367,7 @@ describe("workspace agent visibility", () => {
         terminalsHydrated: true,
         knownTerminalIds: ["terminal-1", "script-terminal"],
         standaloneTerminalIds: ["terminal-1"],
+        hasActivePendingTerminalCreate: false,
         hasActivePendingDraftCreate: false,
       }),
     ).toEqual({
@@ -316,6 +378,7 @@ describe("workspace agent visibility", () => {
       knownAgentIds: agentVisibility.knownAgentIds,
       knownTerminalIds: ["terminal-1", "script-terminal"],
       standaloneTerminalIds: ["terminal-1"],
+      hasActivePendingTerminalCreate: false,
       hasActivePendingDraftCreate: false,
     });
   });

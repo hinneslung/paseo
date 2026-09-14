@@ -40,9 +40,28 @@ export function findActiveFileMention(input: FindActiveFileMentionInput): FileMe
   return null;
 }
 
+export function formatQuotedFileMentionPath(relativePath: string): string {
+  const safePath = relativePath.replace(/"/g, '\\"');
+  return `"${safePath}"`;
+}
+
 export function applyFileMentionReplacement(input: ApplyFileMentionReplacementInput): string {
-  const safePath = input.relativePath.replace(/"/g, '\\"');
   const before = input.text.slice(0, input.mention.start);
   const after = input.text.slice(input.mention.end);
-  return `${before}"${safePath}"${after}`;
+  return `${before}${formatQuotedFileMentionPath(input.relativePath)}${after}`;
+}
+
+export function appendFileMentionPaths(input: {
+  text: string;
+  relativePaths: readonly string[];
+}): string {
+  const mentions = input.relativePaths
+    .filter((path) => path.trim().length > 0)
+    .map(formatQuotedFileMentionPath)
+    .join(" ");
+  if (!mentions) {
+    return input.text;
+  }
+  const separator = input.text.length === 0 || /\s$/.test(input.text) ? "" : " ";
+  return `${input.text}${separator}${mentions}`;
 }

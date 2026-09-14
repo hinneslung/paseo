@@ -1,9 +1,11 @@
+import { createAgentRequestsStub } from "./test-utils/session-stubs.js";
 import { describe, expect, test, vi } from "vitest";
 import path from "node:path";
 import type pino from "pino";
 import { createBranchChangeRouteHandler } from "./script-route-branch-handler.js";
 import { createServiceProxySubsystem, type ServiceProxySubsystem } from "./service-proxy.js";
 import { Session, type SessionOptions } from "./session.js";
+import { OWNER_PERMISSIONS } from "./authorization/index.js";
 import { asInternals, createStub } from "./test-utils/class-mocks.js";
 import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
 import { createTestLogger } from "../test-utils/test-logger.js";
@@ -56,6 +58,15 @@ type WorkspaceUpdatePayload = Extract<
   { type: "workspace_update" }
 >["payload"];
 
+function getWorkspaceUpdates(
+  emitted: Array<{ type: string; payload: unknown }>,
+): Array<{ type: "workspace_update"; payload: WorkspaceUpdatePayload }> {
+  return emitted.filter((message) => message.type === "workspace_update") as Array<{
+    type: "workspace_update";
+    payload: WorkspaceUpdatePayload;
+  }>;
+}
+
 const REPO_CWD = path.resolve("/tmp/repo");
 const REPO_SUBSCRIPTION_REQUEST_ID = `subscription:${REPO_CWD}`;
 
@@ -63,7 +74,7 @@ function createWorkspaceRuntimeSnapshot(
   cwd: string,
   overrides?: {
     git?: Partial<WorkspaceGitRuntimeSnapshot["git"]>;
-    github?: Partial<WorkspaceGitRuntimeSnapshot["github"]>;
+    forge?: Partial<WorkspaceGitRuntimeSnapshot["forge"]>;
   },
 ): WorkspaceGitRuntimeSnapshot {
   const base: WorkspaceGitRuntimeSnapshot = {
@@ -83,7 +94,8 @@ function createWorkspaceRuntimeSnapshot(
       hasRemote: true,
       diffStat: { additions: 1, deletions: 0 },
     },
-    github: {
+    forge: {
+      forge: "github",
       featuresEnabled: true,
       pullRequest: null,
       error: null,
@@ -96,17 +108,17 @@ function createWorkspaceRuntimeSnapshot(
       ...base.git,
       ...overrides?.git,
     },
-    github: {
-      ...base.github,
-      ...overrides?.github,
+    forge: {
+      ...base.forge,
+      ...overrides?.forge,
       pullRequest:
-        overrides?.github && "pullRequest" in overrides.github
-          ? (overrides.github.pullRequest ?? null)
-          : base.github.pullRequest,
+        overrides?.forge && "pullRequest" in overrides.forge
+          ? (overrides.forge.pullRequest ?? null)
+          : base.forge.pullRequest,
       error:
-        overrides?.github && "error" in overrides.github
-          ? (overrides.github.error ?? null)
-          : base.github.error,
+        overrides?.forge && "error" in overrides.forge
+          ? (overrides.forge.error ?? null)
+          : base.forge.error,
     },
   };
 }
@@ -180,11 +192,13 @@ function createSessionForWorkspaceGitWatchTests(options?: {
   };
 
   const session = new Session({
+    agentRequests: createAgentRequestsStub(),
     clientId: "test-client",
+    permissions: OWNER_PERMISSIONS,
     onMessage: (message) => emitted.push(message as { type: string; payload: unknown }),
     logger: createStub<pino.Logger>(logger),
     downloadTokenStore: createStub<SessionOptions["downloadTokenStore"]>({}),
-    pushTokenStore: createStub<SessionOptions["pushTokenStore"]>({}),
+    pushNotifications: createStub<SessionOptions["pushNotifications"]>({}),
     paseoHome: "/tmp/paseo-test",
     agentManager: createStub<SessionOptions["agentManager"]>({
       subscribe: () => () => {},
@@ -196,6 +210,7 @@ function createSessionForWorkspaceGitWatchTests(options?: {
       get: async () => null,
     }),
     projectRegistry: createStub<SessionOptions["projectRegistry"]>({
+      subscribeToMutations: () => () => {},
       initialize: async () => {},
       existsOnDisk: async () => true,
       list: async () => Array.from(projects.values()),
@@ -213,6 +228,7 @@ function createSessionForWorkspaceGitWatchTests(options?: {
       },
     }),
     workspaceRegistry: createStub<SessionOptions["workspaceRegistry"]>({
+      subscribeToMutations: () => () => {},
       initialize: async () => {},
       existsOnDisk: async () => true,
       list: async () => Array.from(workspaces.values()),
@@ -236,6 +252,7 @@ function createSessionForWorkspaceGitWatchTests(options?: {
       }),
       scheduleRefreshForCwd: () => {},
       onWorkspaceStateMayHaveChanged: () => {},
+      invalidateForge: () => {},
       getMetrics: () => ({
         checkoutDiffTargetCount: 0,
         checkoutDiffSubscriptionCount: 0,
@@ -358,12 +375,9 @@ describe("workspace git watch targets", () => {
       }),
     );
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(getWorkspaceUpdates(emitted)).toHaveLength(1));
 
-    const workspaceUpdates = emitted.filter(
-      (message) => message.type === "workspace_update",
-    ) as Array<{ type: "workspace_update"; payload: WorkspaceUpdatePayload }>;
+    const workspaceUpdates = getWorkspaceUpdates(emitted);
     expect(workspaceUpdates).toHaveLength(1);
     expect(workspaceUpdates[0]?.payload).toMatchObject({
       kind: "upsert",
@@ -470,7 +484,6 @@ describe("workspace git watch targets", () => {
         onBranchChanged: handleBranchChange,
       },
     );
-    const sessionAny = session as unknown as SessionInternals;
     seedGitWorkspace({
       projects,
       workspaces,
@@ -480,7 +493,7 @@ describe("workspace git watch targets", () => {
       name: "old-branch",
     });
 
-    syncGitObserver(session, "/tmp/repo", "ws-10");
+    await session.syncWorkspaceGitObserversForExternalWorkspaceIds(["ws-10"]);
 
     subscriptions[0]?.listener(
       createWorkspaceRuntimeSnapshot("/tmp/repo", {
@@ -496,16 +509,6 @@ describe("workspace git watch targets", () => {
         scriptName: "app",
       }),
     ]);
-    expect(sessionAny.buildWorkspaceScriptPayloadSnapshot("ws-10", "/tmp/repo")).toEqual([
-      expect.objectContaining({
-        scriptName: "app",
-        hostname: "app--new-branch--paseo.localhost",
-        localProxyUrl: "http://app--new-branch--paseo.localhost:6767",
-        publicProxyUrl: null,
-        proxyUrl: "http://app--new-branch--paseo.localhost:6767",
-      }),
-    ]);
-
     await session.cleanup();
   });
 
@@ -594,7 +597,7 @@ describe("workspace git watch targets", () => {
 
     subscriptions[0]?.listener(
       createWorkspaceRuntimeSnapshot(REPO_CWD, {
-        github: {
+        forge: {
           featuresEnabled: true,
           pullRequest: {
             number: 456,
@@ -613,7 +616,8 @@ describe("workspace git watch targets", () => {
             ],
             checksStatus: "success",
             reviewDecision: "approved",
-            github: {
+            forgeSpecific: {
+              forge: "github",
               mergeStateStatus: "CLEAN",
               autoMergeRequest: null,
               viewerCanEnableAutoMerge: true,
@@ -642,6 +646,7 @@ describe("workspace git watch targets", () => {
     expect(statusUpdate?.payload.prStatus).toEqual({
       cwd: REPO_CWD,
       status: {
+        forge: "github",
         number: 456,
         url: "https://github.com/acme/repo/pull/456",
         title: "Runtime centralization",
@@ -662,6 +667,24 @@ describe("workspace git watch targets", () => {
         ],
         checksStatus: "success",
         reviewDecision: "approved",
+        forgeSpecific: {
+          forge: "github",
+          mergeStateStatus: "CLEAN",
+          autoMergeRequest: null,
+          viewerCanEnableAutoMerge: true,
+          viewerCanDisableAutoMerge: false,
+          viewerCanMergeAsAdmin: false,
+          viewerCanUpdateBranch: true,
+          repository: {
+            autoMergeAllowed: true,
+            mergeCommitAllowed: true,
+            squashMergeAllowed: true,
+            rebaseMergeAllowed: false,
+            viewerDefaultMergeMethod: "SQUASH",
+          },
+          isMergeQueueEnabled: false,
+          isInMergeQueue: false,
+        },
         github: {
           mergeStateStatus: "CLEAN",
           autoMergeRequest: null,
@@ -680,6 +703,8 @@ describe("workspace git watch targets", () => {
           isInMergeQueue: false,
         },
       },
+      forge: "github",
+      authState: undefined,
       githubFeaturesEnabled: true,
       error: null,
       requestId: REPO_SUBSCRIPTION_REQUEST_ID,
@@ -693,7 +718,7 @@ describe("workspace git watch targets", () => {
 
     workspaceGitService.getSnapshot.mockResolvedValue(
       createWorkspaceRuntimeSnapshot(REPO_CWD, {
-        github: {
+        forge: {
           featuresEnabled: true,
           pullRequest: {
             url: "https://github.com/acme/repo/pull/456",
@@ -719,6 +744,7 @@ describe("workspace git watch targets", () => {
     ).toEqual({
       cwd: REPO_CWD,
       status: {
+        forge: "github",
         number: undefined,
         url: "https://github.com/acme/repo/pull/456",
         title: "Runtime centralization",
@@ -734,6 +760,8 @@ describe("workspace git watch targets", () => {
         checksStatus: undefined,
         reviewDecision: undefined,
       },
+      forge: "github",
+      authState: undefined,
       githubFeaturesEnabled: true,
       error: null,
       requestId: "req-pr-status",

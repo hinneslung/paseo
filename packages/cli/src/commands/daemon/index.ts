@@ -5,8 +5,9 @@ import { runStopCommand } from "./stop.js";
 import { runRestartCommand } from "./restart.js";
 import { runSetPasswordCommand } from "./set-password.js";
 import { pairCommand } from "./pair.js";
+import { runDaemonReloadCommand } from "./reload.js";
 import { withOutput } from "../../output/index.js";
-import { addJsonOption } from "../../utils/command-options.js";
+import { addJsonAndDaemonHostOptions, addJsonOption } from "../../utils/command-options.js";
 
 function resolveHostnamesOption(hostnames: unknown, allowedHosts: unknown): string | undefined {
   if (typeof hostnames === "string") return hostnames;
@@ -19,6 +20,10 @@ export function createDaemonCommand(): Command {
 
   daemon.addCommand(startCommand());
   daemon.addCommand(pairCommand());
+
+  addJsonAndDaemonHostOptions(
+    daemon.command("reload").description("Reload config.json without restarting the daemon"),
+  ).action(withOutput(runDaemonReloadCommand));
 
   addJsonOption(daemon.command("status").description("Show local daemon status"))
     .option("--home <path>", "Paseo home directory (default: ~/.paseo)")
@@ -40,9 +45,12 @@ export function createDaemonCommand(): Command {
       "Listen target for restarted daemon (host:port, port, or unix socket)",
     )
     .option("--port <port>", "Port for restarted daemon listen target")
+    .option("--relay", "Enable relay on restarted daemon")
     .option("--no-relay", "Disable relay on restarted daemon")
     .option("--no-mcp", "Disable Agent MCP on restarted daemon")
     .option("--no-inject-mcp", "Disable auto-injecting the Paseo MCP into created agents")
+    .option("--web-ui", "Enable the bundled daemon web UI on restarted daemon")
+    .option("--no-web-ui", "Disable the bundled daemon web UI on restarted daemon")
     .option(
       "--hostnames <hosts>",
       'Daemon hostnames (comma-separated, e.g. "myhost,.example.com" or "true" for any)',

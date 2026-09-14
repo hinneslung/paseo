@@ -12,7 +12,10 @@ import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   app,
+  autoUpdater as electronAutoUpdater,
   BrowserWindow,
+  ClipboardItem,
+  clipboard,
   Menu,
   ipcMain,
   nativeImage,
@@ -20,11 +23,14 @@ import {
   protocol,
   screen,
   session,
+  shell,
+  webContents,
 } from "electron";
-import { createDaemonCommandHandlers, registerDaemonManager } from "./daemon/daemon-manager.js";
+import { registerDaemonManager } from "./daemon/daemon-manager.js";
 import { parsePassthroughCliArgsFromArgv, runPassthroughCli } from "./daemon/cli/passthrough.js";
 import { closeAllTransportSessions } from "./daemon/local-transport.js";
 import {
+  applyDesktopWindowChromeMode,
   registerWindowManager,
   getMainWindowChromeOptions,
   getWindowBackgroundColor,
@@ -37,27 +43,48 @@ import {
   buildStandardContextMenuItems,
 } from "./window/window-manager.js";
 import { setupDarwinCompositorWatchdog } from "./window/compositor-watchdog/index.js";
+import { resolveDesktopWindowChromeMode, windowChromeModeArgument } from "./window/chrome.js";
 import { registerDialogHandlers } from "./features/dialogs.js";
 import {
   registerNotificationHandlers,
   ensureNotificationCenterRegistration,
 } from "./features/notifications.js";
-import { registerOpenerHandlers } from "./features/opener.js";
-import { registerEditorTargetHandlers } from "./features/editor-targets.js";
+import { createExternalUrlOpener } from "./features/opener.js";
+import { createBrowserCaptureService } from "./features/browser-capture.js";
+import { registerEditorTargetHandlers } from "./features/editor-targets/ipc.js";
+import { resolveAppIconPath } from "./features/stamped-icon.js";
 import { setupApplicationMenu } from "./features/menu.js";
 import {
   BROWSER_NEW_TAB_REQUEST_EVENT,
+  decideBrowserWindowOpenRequest,
   getPaseoBrowserIdForWebContents,
-  getPaseoBrowserWebContents,
-  handleBrowserWindowOpenRequest,
+  getPaseoBrowserWebContentsForHostWindow,
+  getPaseoBrowserWebviewRegistry,
   listRegisteredPaseoBrowserIds,
-  readBrowserIdFromWebviewAttach,
+  isPaseoBrowserWebviewAttach,
+  preparePaseoBrowserWebContents,
+  PendingBrowserWindowOpenRequests,
   registerBrowserWebviewNavigationGuards,
-  registerPaseoBrowserWebContents,
+  unregisterPaseoBrowserFromHost,
+  registerAttachedPaseoBrowser,
   setWorkspaceActivePaseoBrowserId,
+  unregisterPaseoBrowserHost,
 } from "./features/browser-webviews/index.js";
+import {
+  clearPaseoBrowserProfile,
+  getLegacyPaseoBrowserProfileSession,
+  PASEO_BROWSER_PROFILE_PARTITION,
+  getPaseoBrowserProfileSession,
+  getPaseoBrowserProfileSessions,
+  listPaseoBrowserProfileGuests,
+  readLegacyPaseoBrowserIds,
+} from "./features/browser-profile.js";
 import { parseOpenProjectPathFromArgv } from "./open-project-routing.js";
-import { PendingOpenProjectStore } from "./pending-open-project-store.js";
+import {
+  createDesktopWindowOwner,
+  type DesktopWindowOwner,
+  type OwnedDesktopWindow,
+} from "./window/desktop-window-owner.js";
 import { getDesktopSettingsStore } from "./settings/desktop-settings-electron.js";
 import { clampWindowStateToWorkAreas, createWindowStateStore } from "./settings/window-state.js";
 import {
@@ -65,75 +92,99 @@ import {
   stopDesktopDaemonViaCli,
 } from "./daemon/daemon-manager.js";
 import {
-  createBeforeQuitHandler,
+  createQuitLifecycle,
+  registerExternalQuitSignals,
   stopDesktopManagedDaemonOnQuitIfNeeded,
 } from "./daemon/quit-lifecycle.js";
 import { runDesktopStartup } from "./desktop-startup.js";
-import { autoUpdateInstalledSkills } from "./integrations/skills/index.js";
+import { registerBrowserAutomationIpc } from "./features/browser-automation/ipc.js";
+import { BrowserKeyboard } from "./features/browser-keyboard/index.js";
+import { installAppUpdateOnQuit } from "./features/auto-updater.js";
+import {
+  buildAgentDeepLinkRoute,
+  parseAgentDeepLink,
+  type AgentDeepLinkTarget,
+} from "@getpaseo/protocol/agent-deep-link";
+import { AgentNavigationInbox, parseAgentDeepLinkFromArgv } from "./agent-navigation.js";
 
 const DEV_SERVER_URL = process.env.EXPO_DEV_URL ?? "http://localhost:8081";
 const APP_SCHEME = "paseo";
 const PASEO_DEBUG = process.env.PASEO_DEBUG === "1";
 const DISABLE_SINGLE_INSTANCE_LOCK = process.env.PASEO_DISABLE_SINGLE_INSTANCE_LOCK === "1";
 const APP_NAME = process.env.PASEO_TEST_APP_NAME?.trim() || "Paseo";
+const DESKTOP_WINDOW_CHROME_MODE = resolveDesktopWindowChromeMode({
+  platform: process.platform,
+  override: process.env.PASEO_DESKTOP_WINDOW_CONTROLS,
+  isPackaged: app.isPackaged,
+});
+const UPDATE_QUIT_DEADLINE_MS = 5_000;
+const pendingBrowserWindowOpenRequests = new PendingBrowserWindowOpenRequests();
+const agentNavigationInbox = new AgentNavigationInbox();
 
-const BROWSER_SHORTCUT_EVENT = "paseo:event:browser-shortcut";
-const BROWSER_FORWARDED_KEY_EVENT = "paseo:event:browser-forwarded-key";
+// A second-instance launch can arrive before the packaged protocol handler,
+// IPC handlers, and first window exist. Wait for full bootstrap, not just
+// app.whenReady(), before delivering navigation to the renderer.
+let resolveBootstrapComplete: () => void;
+const bootstrapComplete = new Promise<void>((resolve) => {
+  resolveBootstrapComplete = resolve;
+});
+let bootstrapIsComplete = false;
 
-const FORWARDED_PASEO_SHORTCUT_KEYS = new Set([
-  "b",
-  "e",
-  "w",
-  "t",
-  "k",
-  "/",
-  "\\",
-  ",",
-  ".",
-  "1",
-  "2",
-  "3",
-  "4",
-  "5",
-  "6",
-  "7",
-  "8",
-  "9",
-  "enter",
-  "arrowleft",
-  "arrowright",
-  "arrowup",
-  "arrowdown",
-]);
-const DESKTOP_SMOKE_ENV = "PASEO_DESKTOP_SMOKE";
-const DESKTOP_SMOKE_STOP_REQUEST = "paseo-smoke-stop";
 app.setName(APP_NAME);
+log.info("[desktop] app startup", {
+  version: app.getVersion(),
+  platform: process.platform,
+  arch: process.arch,
+  isPackaged: app.isPackaged,
+});
 
-const pendingBrowserWebviewIds: string[] = [];
-
-function isBrowserRefreshInput(input: Electron.Input): boolean {
-  if (input.type !== "keyDown" || input.alt || input.shift) {
-    return false;
-  }
-  return (input.meta || input.control) && input.key.toLowerCase() === "r";
+interface AttachedBrowserInput {
+  browserId: string;
+  workspaceId: string;
+  webContentsId: number;
 }
 
-function isBrowserLocationInput(input: Electron.Input): boolean {
-  if (input.type !== "keyDown" || input.alt || input.shift) {
-    return false;
+function readAttachedBrowserInput(input: unknown): AttachedBrowserInput | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return null;
   }
-  return (input.meta || input.control) && input.key.toLowerCase() === "l";
+  const record = input as Record<string, unknown>;
+  if (typeof record.browserId !== "string" || record.browserId.trim().length === 0) {
+    return null;
+  }
+  if (typeof record.workspaceId !== "string" || record.workspaceId.trim().length === 0) {
+    return null;
+  }
+  if (
+    typeof record.webContentsId !== "number" ||
+    !Number.isInteger(record.webContentsId) ||
+    record.webContentsId <= 0
+  ) {
+    return null;
+  }
+  return {
+    browserId: record.browserId.trim(),
+    workspaceId: record.workspaceId.trim(),
+    webContentsId: record.webContentsId,
+  };
 }
 
-function isForwardablePaseoShortcutInput(input: Electron.Input): boolean {
-  if (input.type !== "keyDown") {
-    return false;
+function readActiveBrowserInput(
+  input: unknown,
+): { workspaceId: string; browserId: string | null } | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return null;
   }
-  if (!input.meta && !input.control) {
-    return false;
+  const record = input as Record<string, unknown>;
+  if (typeof record.workspaceId !== "string" || record.workspaceId.trim().length === 0) {
+    return null;
   }
-  return FORWARDED_PASEO_SHORTCUT_KEYS.has(input.key.toLowerCase());
+  const browserId = typeof record.browserId === "string" ? record.browserId.trim() : null;
+  return { workspaceId: record.workspaceId.trim(), browserId: browserId || null };
 }
+
+const browserKeyboard = new BrowserKeyboard(getPaseoBrowserWebviewRegistry());
+browserKeyboard.registerIpc();
 
 function showBrowserWebviewContextMenu(
   win: BrowserWindow,
@@ -167,6 +218,79 @@ function showBrowserWebviewContextMenu(
         ]),
   ]);
   menu.popup({ window: win });
+}
+
+function getBrowserPopupWindowOptions(
+  mainWindow: BrowserWindow,
+): Electron.BrowserWindowConstructorOptions {
+  return {
+    parent: mainWindow,
+    show: true,
+    autoHideMenuBar: true,
+    webPreferences: {
+      partition: PASEO_BROWSER_PROFILE_PARTITION,
+      nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
+      nodeIntegrationInWorker: false,
+      contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false,
+      allowRunningInsecureContent: false,
+    },
+  };
+}
+
+function installBrowserWindowOpenHandler(input: {
+  contents: Electron.WebContents;
+  sourceContents: Electron.WebContents;
+  mainWindow: BrowserWindow;
+}): void {
+  const { contents, sourceContents, mainWindow } = input;
+
+  contents.setWindowOpenHandler(({ url, disposition, frameName, features, postBody }) => {
+    const decision = decideBrowserWindowOpenRequest({
+      url,
+      disposition,
+      frameName,
+      features,
+      hasPostBody: postBody !== undefined && postBody !== null,
+    });
+
+    if (decision.kind === "deny") {
+      return { action: "deny" };
+    }
+    if (decision.kind === "popup") {
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: getBrowserPopupWindowOptions(mainWindow),
+      };
+    }
+
+    const sourceBrowserId = getPaseoBrowserIdForWebContents(sourceContents);
+    if (sourceBrowserId) {
+      mainWindow.webContents.send(BROWSER_NEW_TAB_REQUEST_EVENT, {
+        sourceBrowserId,
+        url: decision.url,
+      });
+    } else {
+      pendingBrowserWindowOpenRequests.add(sourceContents.id, decision.url);
+    }
+    return { action: "deny" };
+  });
+
+  contents.on("did-create-window", (popupWindow) => {
+    const popupContents = popupWindow.webContents;
+    registerBrowserWebviewNavigationGuards(popupContents);
+    popupContents.on("context-menu", (_event, params) => {
+      showBrowserWebviewContextMenu(popupWindow, popupContents, params);
+    });
+    installBrowserWindowOpenHandler({
+      contents: popupContents,
+      sourceContents,
+      mainWindow,
+    });
+  });
 }
 
 // In dev mode, detect git worktrees and isolate each instance so multiple
@@ -229,12 +353,13 @@ let pendingOpenProjectPath = parseOpenProjectPathFromArgv({
   argv: process.argv,
   isDefaultApp: process.defaultApp,
 });
+let pendingAgentNavigation = parseAgentDeepLinkFromArgv(process.argv);
 
 // Each window pulls its own pending open-project path on mount, keyed by
 // webContents id, so deep-linked windows (second-instance launches, the
 // in-app "Open in new window" action) land on the right project without
 // racing a global.
-const pendingOpenProjectStore = new PendingOpenProjectStore();
+let desktopWindowOwner: DesktopWindowOwner<AgentDeepLinkTarget>;
 
 if (PASEO_DEBUG) {
   log.info("[open-project] argv:", process.argv);
@@ -246,7 +371,7 @@ if (PASEO_DEBUG) {
 // a race where the push event arrives before React registers its listener.
 ipcMain.handle("paseo:get-pending-open-project", (event) => {
   const webContentsId = event.sender.id;
-  const result = pendingOpenProjectStore.take(webContentsId);
+  const result = desktopWindowOwner.takePendingProject(webContentsId);
   log.info("[open-project] renderer requested pending path:", {
     webContentsId,
     pendingPath: result,
@@ -254,11 +379,91 @@ ipcMain.handle("paseo:get-pending-open-project", (event) => {
   return result;
 });
 
-ipcMain.handle("paseo:browser:set-workspace-active-browser", (_event, browserId: unknown) => {
-  setWorkspaceActivePaseoBrowserId(typeof browserId === "string" ? browserId : null);
+ipcMain.handle("paseo:agent-navigation:ready", (event) => {
+  return agentNavigationInbox.windowReady(event.sender.id);
 });
 
-ipcMain.handle("paseo:browser:open-devtools", (_event, browserId: unknown) => {
+ipcMain.handle("paseo:browser:register-attached", (event, rawInput: unknown) => {
+  const input = readAttachedBrowserInput(rawInput);
+  if (!input) {
+    throw new Error("Invalid attached browser registration");
+  }
+  const registered = registerAttachedPaseoBrowser({
+    ...input,
+    sender: event.sender,
+    profileSession: getPaseoBrowserProfileSession(session),
+    findWebContents: (webContentsId) => webContents.fromId(webContentsId) ?? null,
+  });
+  if (!registered) {
+    throw new Error("Attached browser registration was rejected");
+  }
+  const guest = webContents.fromId(input.webContentsId);
+  if (!guest) {
+    throw new Error("Attached browser guest disappeared after registration");
+  }
+  browserKeyboard.attach({ contents: guest, hostContents: event.sender });
+  log.info("[browser-webview] registered", {
+    browserId: input.browserId,
+    webContentsId: input.webContentsId,
+    registeredBrowserIds: listRegisteredPaseoBrowserIds(),
+  });
+  for (const url of pendingBrowserWindowOpenRequests.take(input.webContentsId)) {
+    event.sender.send(BROWSER_NEW_TAB_REQUEST_EVENT, {
+      sourceBrowserId: input.browserId,
+      url,
+    });
+  }
+});
+
+ipcMain.handle("paseo:browser:unregister-workspace-browser", async (event, browserId: unknown) => {
+  if (typeof browserId === "string" && browserId.trim().length > 0) {
+    const normalizedBrowserId = browserId.trim();
+    const hasOtherHost = getPaseoBrowserWebviewRegistry().hasBrowserInOtherHostWindow(
+      event.sender.id,
+      normalizedBrowserId,
+    );
+    unregisterPaseoBrowserFromHost(event.sender.id, normalizedBrowserId);
+    // COMPAT(browserProfile): added in v0.1.108; remove after 2027-01-15.
+    const legacyProfile = hasOtherHost
+      ? null
+      : getLegacyPaseoBrowserProfileSession(session, normalizedBrowserId);
+    if (legacyProfile) {
+      try {
+        await clearPaseoBrowserProfile({
+          profileSessions: [legacyProfile],
+          listGuests: () => [],
+          logReloadError: () => {},
+        });
+      } catch (error) {
+        log.warn("[browser-profile] failed to clear legacy tab profile", {
+          browserId: normalizedBrowserId,
+          error,
+        });
+      }
+    }
+  }
+});
+
+ipcMain.handle("paseo:browser:set-workspace-active-browser", (event, rawInput: unknown) => {
+  const input = readActiveBrowserInput(rawInput);
+  if (input) {
+    setWorkspaceActivePaseoBrowserId({ ...input, hostWebContentsId: event.sender.id });
+  }
+});
+
+ipcMain.handle("paseo:browser:focus", (event, browserId: unknown): boolean => {
+  if (typeof browserId !== "string" || browserId.trim().length === 0) {
+    return false;
+  }
+  const contents = getPaseoBrowserWebContentsForHostWindow(browserId, event.sender.id);
+  if (!contents) {
+    return false;
+  }
+  contents.focus();
+  return true;
+});
+
+ipcMain.handle("paseo:browser:open-devtools", (event, browserId: unknown) => {
   if (typeof browserId !== "string" || browserId.trim().length === 0) {
     const result = {
       ok: false,
@@ -269,7 +474,7 @@ ipcMain.handle("paseo:browser:open-devtools", (_event, browserId: unknown) => {
     log.warn("[browser-devtools] open-devtools.invalid", result);
     return result;
   }
-  const contents = getPaseoBrowserWebContents(browserId);
+  const contents = getPaseoBrowserWebContentsForHostWindow(browserId, event.sender.id);
   if (!contents) {
     const result = {
       ok: false,
@@ -299,13 +504,51 @@ ipcMain.handle("paseo:browser:open-devtools", (_event, browserId: unknown) => {
   return result;
 });
 
-ipcMain.handle("paseo:browser:clear-partition", async (_event, browserId: unknown) => {
-  if (typeof browserId !== "string" || browserId.trim().length === 0) {
-    return;
-  }
-  const partition = `persist:paseo-browser-${browserId}`;
-  await session.fromPartition(partition).clearStorageData();
+ipcMain.handle("paseo:browser:clear-profile", async (_event, rawLegacyBrowserIds: unknown) => {
+  const profileSessions = getPaseoBrowserProfileSessions(
+    session,
+    readLegacyPaseoBrowserIds(rawLegacyBrowserIds),
+  );
+  const profileSession = profileSessions[0];
+  await clearPaseoBrowserProfile({
+    profileSessions,
+    listGuests: () =>
+      listPaseoBrowserProfileGuests({
+        profileSession,
+        webContents: webContents.getAllWebContents(),
+      }),
+    logReloadError: (webContentsId, error) => {
+      log.warn("[browser-profile] failed to reload guest", { webContentsId, error });
+    },
+  });
 });
+
+const browserCapture = createBrowserCaptureService<Electron.NativeImage>({
+  findGuest: getPaseoBrowserWebContentsForHostWindow,
+  decodeImage: (dataUrl) => nativeImage.createFromDataURL(dataUrl),
+  clipboard: {
+    write: async ({ text, image }) => {
+      const items: Record<string, string | Blob> = {};
+      if (text) items["text/plain"] = text;
+      if (image) {
+        const png = image.toPNG();
+        const bytes = new Uint8Array(png.byteLength);
+        bytes.set(png);
+        items["image/png"] = new Blob([bytes], { type: "image/png" });
+      }
+      await clipboard.write([new ClipboardItem(items)]);
+    },
+  },
+  warn: (event, details) => log.warn(`[browser-capture] ${event}`, details),
+});
+
+ipcMain.handle("paseo:browser:capture-element", (event, browserId: unknown, rect: unknown) =>
+  browserCapture.capture({ browserId, hostWebContentsId: event.sender.id, rect }),
+);
+
+ipcMain.handle("paseo:browser:copy-element", (_event, payload: unknown) =>
+  browserCapture.copy(payload),
+);
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -320,6 +563,10 @@ protocol.registerSchemesAsPrivileged([
 
 function getPreloadPath(): string {
   return path.join(__dirname, "preload.js");
+}
+
+function getBrowserKeyboardPreloadPath(): string {
+  return path.join(__dirname, "features", "browser-keyboard", "guest-preload.js");
 }
 
 function getAppDistDir(): string {
@@ -342,11 +589,15 @@ function getWindowIconCandidates(): string[] {
   }
   if (process.platform === "win32") {
     return [
+      path.resolve(__dirname, "../assets/icon-dev.png"),
       path.resolve(__dirname, "../assets/icon.ico"),
       path.resolve(__dirname, "../assets/icon.png"),
     ];
   }
-  return [path.resolve(__dirname, "../assets/icon.png")];
+  return [
+    path.resolve(__dirname, "../assets/icon-dev.png"),
+    path.resolve(__dirname, "../assets/icon.png"),
+  ];
 }
 
 function getWindowIconPath(): string | null {
@@ -354,13 +605,42 @@ function getWindowIconPath(): string | null {
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
-function applyAppIcon(): void {
-  if (process.platform !== "darwin") {
+function getDevBuildLabel(): string | null {
+  if (app.isPackaged) {
+    return null;
+  }
+  return process.env.EXPO_PUBLIC_PASEO_DEV_BUILD_LABEL?.trim() || null;
+}
+
+let cachedEffectiveIconPath: string | null = null;
+
+async function getEffectiveAppIconPath(): Promise<string | null> {
+  if (cachedEffectiveIconPath !== null) {
+    return cachedEffectiveIconPath;
+  }
+  const baseIconPath = getWindowIconPath();
+  if (app.isPackaged || !baseIconPath) {
+    cachedEffectiveIconPath = baseIconPath;
+    return baseIconPath;
+  }
+  const devLabel = getDevBuildLabel();
+  cachedEffectiveIconPath = await resolveAppIconPath({
+    isPackaged: false,
+    baseIconPath,
+    devLabel,
+    cacheDir: app.getPath("userData"),
+  });
+  return cachedEffectiveIconPath;
+}
+
+async function applyAppIcon(): Promise<void> {
+  // Packaged apps keep the bundle icon and its macOS system appearance.
+  if (app.isPackaged || process.platform !== "darwin") {
     return;
   }
 
-  const iconPath = path.resolve(__dirname, "../assets/icon.png");
-  if (!existsSync(iconPath)) {
+  const iconPath = await getEffectiveAppIconPath();
+  if (!iconPath) {
     return;
   }
 
@@ -382,11 +662,13 @@ function getWorkAreasPrimaryFirst(): Electron.Rectangle[] {
 
 async function createWindow(
   options: {
-    pendingOpenProjectPath?: string | null;
+    initialRoute?: string | null;
     restoreWindowState?: boolean;
+    onCreated?: (webContentsId: number) => void;
+    onClosed?: (webContentsId: number) => void;
   } = {},
 ): Promise<BrowserWindow> {
-  const iconPath = getWindowIconPath();
+  const iconPath = await getEffectiveAppIconPath();
   const systemTheme = resolveSystemWindowTheme();
 
   // Only the first window of a session restores and persists saved geometry.
@@ -410,21 +692,30 @@ async function createWindow(
     backgroundColor: getWindowBackgroundColor(systemTheme),
     ...(iconPath ? { icon: iconPath } : {}),
     ...getMainWindowChromeOptions({
-      platform: process.platform,
-      theme: systemTheme,
+      mode: DESKTOP_WINDOW_CHROME_MODE,
     }),
     webPreferences: {
       preload: getPreloadPath(),
+      additionalArguments: [windowChromeModeArgument(DESKTOP_WINDOW_CHROME_MODE)],
       contextIsolation: true,
       nodeIntegration: false,
       webviewTag: true,
     },
   });
+  applyDesktopWindowChromeMode({ win: mainWindow, mode: DESKTOP_WINDOW_CHROME_MODE });
 
   const webContentsId = mainWindow.webContents.id;
-  pendingOpenProjectStore.set(webContentsId, options.pendingOpenProjectPath);
+  options.onCreated?.(webContentsId);
+  mainWindow.webContents.on("did-start-navigation", (_event, _url, isSameDocument, isMainFrame) => {
+    if (isMainFrame && !isSameDocument) {
+      agentNavigationInbox.windowLoading(webContentsId);
+    }
+  });
   mainWindow.on("closed", () => {
-    pendingOpenProjectStore.delete(webContentsId);
+    options.onClosed?.(webContentsId);
+    agentNavigationInbox.removeWindow(webContentsId);
+    unregisterPaseoBrowserHost(webContentsId);
+    browserKeyboard.detachHost(webContentsId);
   });
 
   if (devWorktreeName) {
@@ -443,14 +734,14 @@ async function createWindow(
   setupDefaultContextMenu(mainWindow);
   setupDragDropPrevention(mainWindow);
   mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-    const browserId = readBrowserIdFromWebviewAttach(params);
-    if (!browserId) {
+    if (!isPaseoBrowserWebviewAttach(params)) {
       event.preventDefault();
       return;
     }
-    pendingBrowserWebviewIds.push(browserId);
     webPreferences.nodeIntegration = false;
-    webPreferences.nodeIntegrationInSubFrames = false;
+    // The sandboxed keyboard preload must run in every frame so focused iframes keep
+    // the same page-first shortcut boundary. Node integration remains disabled.
+    webPreferences.nodeIntegrationInSubFrames = true;
     webPreferences.nodeIntegrationInWorker = false;
     webPreferences.contextIsolation = true;
     webPreferences.sandbox = true;
@@ -461,57 +752,18 @@ async function createWindow(
     delete params.preload;
     delete (webPreferences as { preloadURL?: string }).preloadURL;
     delete (params as { preloadURL?: string }).preloadURL;
+    webPreferences.preload = getBrowserKeyboardPreloadPath();
   });
   mainWindow.webContents.on("did-attach-webview", (_event, contents) => {
-    const browserId = pendingBrowserWebviewIds.shift() ?? null;
-    if (browserId) {
-      registerPaseoBrowserWebContents(contents, browserId);
-      log.info("[browser-webview] registered", {
-        browserId,
-        webContentsId: contents.id,
-        registeredBrowserIds: listRegisteredPaseoBrowserIds(),
-      });
-    }
-    contents.on("before-input-event", (event, input) => {
-      if (isBrowserRefreshInput(input)) {
-        event.preventDefault();
-        if (contents.isLoadingMainFrame()) {
-          contents.stop();
-        } else {
-          contents.reload();
-        }
-        return;
-      }
-      if (isBrowserLocationInput(input)) {
-        event.preventDefault();
-        const focusedBrowserId = getPaseoBrowserIdForWebContents(contents);
-        mainWindow.webContents.send(BROWSER_SHORTCUT_EVENT, {
-          action: "focus-url",
-          ...(focusedBrowserId ? { browserId: focusedBrowserId } : {}),
-        });
-        return;
-      }
-      if (isForwardablePaseoShortcutInput(input)) {
-        event.preventDefault();
-        mainWindow.webContents.send(BROWSER_FORWARDED_KEY_EVENT, {
-          key: input.key,
-          code: input.code,
-          meta: input.meta,
-          control: input.control,
-          shift: input.shift,
-          alt: input.alt,
-        });
-      }
+    preparePaseoBrowserWebContents(contents);
+    contents.once("destroyed", () => {
+      pendingBrowserWindowOpenRequests.delete(contents.id);
     });
-    contents.setWindowOpenHandler(({ url }) =>
-      handleBrowserWindowOpenRequest({
-        url,
-        sourceBrowserId: getPaseoBrowserIdForWebContents(contents),
-        requestNewTab: (payload) => {
-          mainWindow.webContents.send(BROWSER_NEW_TAB_REQUEST_EVENT, payload);
-        },
-      }),
-    );
+    installBrowserWindowOpenHandler({
+      contents,
+      sourceContents: contents,
+      mainWindow,
+    });
     contents.on("context-menu", (_contextMenuEvent, params) => {
       showBrowserWebviewContextMenu(mainWindow, contents, params);
     });
@@ -525,26 +777,84 @@ async function createWindow(
   if (!app.isPackaged) {
     const { loadReactDevTools } = await import("./features/react-devtools.js");
     await loadReactDevTools();
-    await mainWindow.loadURL(DEV_SERVER_URL);
+    const initialUrl = options.initialRoute
+      ? new URL(options.initialRoute, `${DEV_SERVER_URL}/`).toString()
+      : DEV_SERVER_URL;
+    await mainWindow.loadURL(initialUrl);
     return mainWindow;
   }
 
-  await mainWindow.loadURL(`${APP_SCHEME}://app/`);
+  await mainWindow.loadURL(`${APP_SCHEME}://app${options.initialRoute ?? "/"}`);
   return mainWindow;
 }
+
+function ownedDesktopWindow(win: BrowserWindow): OwnedDesktopWindow<AgentDeepLinkTarget> {
+  return {
+    webContentsId: win.webContents.id,
+    isDestroyed: () => win.isDestroyed(),
+    isVisible: () => win.isVisible(),
+    isMinimized: () => win.isMinimized(),
+    restore: () => win.restore(),
+    show: () => win.show(),
+    focus: () => win.focus(),
+    sendAgent: (target) => win.webContents.send("paseo:event:open-agent", target),
+  };
+}
+
+desktopWindowOwner = createDesktopWindowOwner<AgentDeepLinkTarget>({
+  async create(input) {
+    const win = await createWindow({
+      initialRoute: input.initialRoute,
+      restoreWindowState: input.restoreWindowState,
+      onCreated: input.onCreated,
+      onClosed: input.onClosed,
+    });
+    return ownedDesktopWindow(win);
+  },
+  windows: () => BrowserWindow.getAllWindows().map(ownedDesktopWindow),
+  focusedWindow: () => {
+    const win = BrowserWindow.getFocusedWindow();
+    if (!win) return null;
+    return ownedDesktopWindow(win);
+  },
+  agentRoute: buildAgentDeepLinkRoute,
+  deliverAgent: (webContentsId, target) =>
+    agentNavigationInbox.deliverOrQueue(webContentsId, target),
+});
 
 // ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
 
-// Resolves once bootstrap() has registered the custom protocol handler and IPC
-// handlers and created the first window. second-instance window creation waits
-// on this rather than app.whenReady(): in packaged mode createWindow loads
-// `paseo://app/`, which fails if the protocol handler isn't registered yet, and
-// a second instance can arrive mid-cold-start.
-let resolveBootstrapComplete: () => void;
-const bootstrapComplete = new Promise<void>((resolve) => {
-  resolveBootstrapComplete = resolve;
+function receiveAgentDeepLink(input: string): void {
+  const target = parseAgentDeepLink(input);
+  if (!target) {
+    return;
+  }
+
+  if (bootstrapIsComplete) {
+    void desktopWindowOwner
+      .openOrFocusAgent(target)
+      .catch((error) => log.error("[window] failed to route agent link", error));
+    return;
+  }
+
+  pendingAgentNavigation = target;
+  void bootstrapComplete.then(() => {
+    if (pendingAgentNavigation !== target) {
+      return undefined;
+    }
+    pendingAgentNavigation = null;
+    void desktopWindowOwner
+      .openOrFocusAgent(target)
+      .catch((error) => log.error("[window] failed to route queued agent link", error));
+    return undefined;
+  });
+}
+
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  receiveAgentDeepLink(url);
 });
 
 function setupSingleInstanceLock(): boolean {
@@ -560,6 +870,14 @@ function setupSingleInstanceLock(): boolean {
   }
 
   app.on("second-instance", (_event, commandLine) => {
+    const agentTarget = parseAgentDeepLinkFromArgv(commandLine);
+    if (agentTarget) {
+      void bootstrapComplete
+        .then(() => desktopWindowOwner.openOrFocusAgent(agentTarget))
+        .catch((error) => log.error("[window] failed to route second-instance agent link", error));
+      return;
+    }
+
     log.info("[open-project] second-instance commandLine:", commandLine);
     const openProjectPath = parseOpenProjectPathFromArgv({
       argv: commandLine,
@@ -570,7 +888,7 @@ function setupSingleInstanceLock(): boolean {
     // window rather than focusing the existing one. Wait for bootstrap (not just
     // app.whenReady) so the protocol + IPC handlers exist before the window loads.
     void bootstrapComplete
-      .then(() => createWindow({ pendingOpenProjectPath: openProjectPath }))
+      .then(() => desktopWindowOwner.openAdditional({ pendingProjectPath: openProjectPath }))
       .catch((error) => {
         log.error("[window] failed to create window from second-instance", error);
       });
@@ -595,53 +913,6 @@ async function runCliPassthroughIfRequested(): Promise<boolean> {
   }
 
   return true;
-}
-
-async function runDesktopSmokeIfRequested(): Promise<boolean> {
-  if (process.env[DESKTOP_SMOKE_ENV] !== "1") {
-    return false;
-  }
-
-  const handlers = createDaemonCommandHandlers();
-  const startStatus = await handlers.start_desktop_daemon();
-  process.stdout.write(
-    `[paseo-smoke] ${JSON.stringify({
-      type: "desktop-daemon-smoke-started",
-      status: startStatus,
-    })}\n`,
-  );
-
-  await waitForDesktopSmokeStopRequest();
-
-  const stopStatus = await handlers.stop_desktop_daemon();
-  process.stdout.write(
-    `[paseo-smoke] ${JSON.stringify({
-      type: "desktop-daemon-smoke-stopped",
-      stopStatus,
-    })}\n`,
-  );
-
-  app.exit(0);
-  return true;
-}
-
-function waitForDesktopSmokeStopRequest(): Promise<void> {
-  return new Promise((resolve) => {
-    let buffer = "";
-    const stop = () => {
-      process.stdin.off("data", onData);
-      resolve();
-    };
-    const onData = (chunk: Buffer | string) => {
-      buffer += chunk.toString();
-      if (buffer.includes(DESKTOP_SMOKE_STOP_REQUEST)) {
-        stop();
-      }
-    };
-
-    process.stdin.on("data", onData);
-    process.stdin.resume();
-  });
 }
 
 async function bootstrap(): Promise<void> {
@@ -678,24 +949,23 @@ async function bootstrap(): Promise<void> {
     return net.fetch(pathToFileURL(filePath).toString());
   });
 
-  applyAppIcon();
+  await applyAppIcon();
   setupApplicationMenu({
     onNewWindow: () => {
-      void createWindow().catch((error) => {
+      void desktopWindowOwner.openAdditional().catch((error) => {
         log.error("[window] failed to create window from menu", error);
       });
     },
   });
   ensureNotificationCenterRegistration();
-  if (await runDesktopSmokeIfRequested()) {
-    return;
-  }
   registerDaemonManager();
-  registerWindowManager();
+  registerWindowManager({ mode: DESKTOP_WINDOW_CHROME_MODE });
   registerDialogHandlers();
   registerNotificationHandlers();
-  registerOpenerHandlers();
+  const openExternalUrl = createExternalUrlOpener({ open: shell.openExternal });
+  ipcMain.handle("paseo:opener:openUrl", (_event, value: unknown) => openExternalUrl(value));
   registerEditorTargetHandlers();
+  registerBrowserAutomationIpc();
 
   // In-app "Open in new window": opens a window that lands on the given project
   // via the same open-project flow as a CLI launch (no move, no ownership).
@@ -704,36 +974,43 @@ async function bootstrap(): Promise<void> {
       options && typeof options === "object" && "pendingOpenProjectPath" in options
         ? (options as { pendingOpenProjectPath?: unknown }).pendingOpenProjectPath
         : null;
-    await createWindow({
-      pendingOpenProjectPath: typeof pendingPath === "string" ? pendingPath : null,
+    await desktopWindowOwner.openAdditional({
+      pendingProjectPath: typeof pendingPath === "string" ? pendingPath : null,
     });
   });
 
   // The first window of the session restores and persists saved geometry.
-  await createWindow({ pendingOpenProjectPath, restoreWindowState: true });
+  const initialAgentNavigation = pendingAgentNavigation;
+  pendingAgentNavigation = null;
+  await desktopWindowOwner.openPrimary({
+    initialRoute: initialAgentNavigation ? buildAgentDeepLinkRoute(initialAgentNavigation) : null,
+    pendingProjectPath: pendingOpenProjectPath,
+  });
   pendingOpenProjectPath = null;
 
   // Protocol + IPC handlers and the first window now exist: release any
   // second-instance launches that arrived during cold start.
+  bootstrapIsComplete = true;
   resolveBootstrapComplete();
 
-  app.on("activate", async () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      await createWindow({ restoreWindowState: true });
-    }
+  if (pendingAgentNavigation) {
+    const target = pendingAgentNavigation;
+    pendingAgentNavigation = null;
+    await desktopWindowOwner.openOrFocusAgent(target);
+  }
+
+  app.on("activate", () => {
+    void desktopWindowOwner.restoreWhenActivated().catch((error) => {
+      console.error("Failed to restore a desktop window after activation", error);
+    });
   });
 }
 
 void runDesktopStartup({
-  hasPendingOpenProjectPath: Boolean(pendingOpenProjectPath),
+  hasPendingGuiLaunchRequest: Boolean(pendingOpenProjectPath || pendingAgentNavigation),
   runCliPassthroughIfRequested,
   inheritLoginShellEnv,
   bootstrapGui: bootstrap,
-  autoUpdateInstalledSkills: () => {
-    void autoUpdateInstalledSkills().catch((error) => {
-      log.error("[skills] auto-update failed", error);
-    });
-  },
 }).catch((error) => {
   const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
   process.stderr.write(`${message}\n`);
@@ -746,23 +1023,40 @@ function showDaemonShutdownDialog(): void {
   }
 }
 
-app.on(
-  "before-quit",
-  createBeforeQuitHandler({
-    app,
-    closeTransportSessions: closeAllTransportSessions,
-    stopDesktopManagedDaemonIfNeeded: () =>
-      stopDesktopManagedDaemonOnQuitIfNeeded({
-        settingsStore: getDesktopSettingsStore(),
-        isDesktopManagedDaemonRunning: isDesktopManagedDaemonRunningSync,
-        stopDaemon: stopDesktopDaemonViaCli,
-        showShutdownFeedback: showDaemonShutdownDialog,
-      }),
-    onStopError: (error) => {
-      log.error("[desktop daemon] failed to stop managed daemon on quit", error);
-    },
-  }),
-);
+const quitLifecycle = createQuitLifecycle({
+  app,
+  closeTransportSessions: closeAllTransportSessions,
+  stopDesktopManagedDaemonIfNeeded: () =>
+    stopDesktopManagedDaemonOnQuitIfNeeded({
+      settingsStore: getDesktopSettingsStore(),
+      isDesktopManagedDaemonRunning: isDesktopManagedDaemonRunningSync,
+      stopDaemon: () => stopDesktopDaemonViaCli("quit"),
+      showShutdownFeedback: showDaemonShutdownDialog,
+    }),
+  installAppUpdateOnQuit: async (signal) => {
+    const settings = await getDesktopSettingsStore().get();
+    return installAppUpdateOnQuit({
+      currentVersion: app.getVersion(),
+      releaseChannel: settings.releaseChannel,
+      signal,
+    });
+  },
+  createUpdateDeadlineSignal: () => AbortSignal.timeout(UPDATE_QUIT_DEADLINE_MS),
+  onStopError: (error) => {
+    log.error("[desktop daemon] failed to stop managed daemon on quit", error);
+  },
+  onUpdateError: (error) => {
+    log.error("[auto-updater] failed to validate downloaded update on quit", error);
+  },
+});
+
+// electron-updater forwards this event through Electron's built-in autoUpdater.
+electronAutoUpdater.on("before-quit-for-update", () => {
+  log.info("[auto-updater] before-quit-for-update", { currentVersion: app.getVersion() });
+  quitLifecycle.handleBeforeQuitForUpdate();
+});
+app.on("before-quit", quitLifecycle.handleBeforeQuit);
+registerExternalQuitSignals({ signals: process, quit: () => app.quit() });
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

@@ -1,0 +1,34 @@
+## R4 — final bounded delta review, `46f3385a3..2c6cd2b38`
+
+**No material defects.** Single commit, 3 files, 4 lines of runtime change. Plan untouched in the delta; `2429fbc0f` remains source of truth.
+
+### First: PIC's overrule of my R3 streaming claim was correct
+
+I wrote that the spec asserted "genuine streaming, not just final state" because labels were checked before `waitForFinish`. That inference was invalid. With a 25 ms interval the response could complete before the first probe ran, and `waitForFinish` returning afterwards says nothing about whether a turn was live when the SVG rendered. The observation was equally consistent with the property being false, and I attached a strong claim to it anyway.
+
+That is the same error I made in R2 — inferring "call sites preserved" from "module preserved." Twice now I've upgraded a weak signal into a strong claim. The correction is to ask what the observation would look like if the property were *false*, and if the answer is "the same," it proves nothing. The new `Stop agent` visibility check while the SVG is present is the assertion that actually discriminates.
+
+### The fix — correct, minimal, right abstraction
+
+`composer/index.tsx:1459` swaps `setUserInput` → `replaceUserInput`. The two are not interchangeable:
+
+- `setUserInput = onChangeText` (`:1233`) is the input's *change handler*, wired at `:2360`. Called programmatically it updates draft state only — the uncontrolled input keeps rendering stale text, which is exactly the dropped-mention symptom.
+- `replaceUserInput` (`:1297-1306`) routes through `messageInputRef.current.replaceText(...)`, and `input/input.tsx:1247-1258` writes the DOM value, sets `selectionRef` to end-of-text, *and* calls `onChangeText` itself.
+
+So the fix restores DOM and state together; the old call did state only. I checked the caret specifically, since the call passes no `selection` while `setCursorIndex(nextInput.length)` remains: `replaceText` defaults to `{ start: nextText.length, end: nextText.length }` (`:1252`), so the real caret and `cursorIndex` agree. No disagreement introduced.
+
+On simplicity — this reuses the existing setter rather than adding a wrapper, matching all six other programmatic mutations (`:1318`, `:1347`, `:1568`, `:1879`) and the `setUserInput: replaceUserInput` aliasing already handed to children at `:1367` and `:1610`. It aligns with the established contract instead of inventing one, per plan rule 2. The dependency array is updated correspondingly and `replaceUserInput` is a stable `useCallback`.
+
+Security: no new surface. The setter choice doesn't touch path resolution or scheme handling; dropped paths still flow through the existing workspace-constrained mention path.
+
+### Coverage — tested at the only level that discriminates
+
+`runFileUriDropProbe` asserts `await textarea.inputValue()` — the DOM value. This matters: a state-level assertion would have passed against the regression, since state was always correct. Reading back the rendered input is the one check that separates bug from fix, so the test design is right rather than incidental. Hygiene is sound too — it clears the textarea before and after, disposes the `DataTransfer` in `finally`, and runs before `sendAgentMessage` so it can't perturb the transcript spec.
+
+The pacing change (25 → 75 ms) plus the Stop-control wait is a real active-turn proof, and `docs/vscode-ci.md` now states that condition explicitly instead of the vague "streamed" framing it inherited from my R3 reading — integrated into the existing section, not appended.
+
+### Scope
+
+Inspected: the setter semantics and both call paths, caret agreement, consistency with sibling call sites, dependency correctness, drop-probe assertion level and isolation, streaming-proof validity, doc accuracy, and that the delta introduces no other runtime change (the remaining two files are the e2e harness and docs).
+
+Not verified, deliberately: I did not re-run the 18 targeted tests, typecheck/lint/format/build, or the CDP RED→GREEN transition — those are Fattie's report and your gate. One factual scope note, not a defect and not a request: this regression class is now guarded only by the ubuntu CDP job, so it is not covered by fast unit CI; a unit-level guard would require rendering the full composer, which is why the e2e is the reasonable level. Prior future-hardening items remain deferred per your ruling.

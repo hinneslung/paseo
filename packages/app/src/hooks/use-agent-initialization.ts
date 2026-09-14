@@ -1,25 +1,44 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { useSessionStore } from "@/stores/session-store";
+import { selectAgentTimelineState, useSessionStore } from "@/stores/session-store";
 import {
-  attachInitTimeout,
   createInitDeferred,
   getInitDeferred,
   getInitKey,
+  INIT_TIMEOUT_MS,
   rejectInitDeferred,
+  refreshInitTimeout,
 } from "@/utils/agent-initialization";
-import { planInitialAgentTimelineSync, planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
+import { getHostRuntimeStore, type HostRuntimeStore } from "@/runtime/host-runtime";
+import { planTimelineResumeFetch, planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
 import { i18n } from "@/i18n/i18next";
 
-export const INIT_TIMEOUT_MS = 30_000;
-
 export type SetAgentInitializing = (agentId: string, initializing: boolean) => void;
+
+export function createHistorySyncTimeoutError(): Error {
+  return new Error(`History sync timed out after ${Math.round(INIT_TIMEOUT_MS / 1000)}s`);
+}
+
+export function refreshAgentInitializationTimeout(input: {
+  key: string;
+  agentId: string;
+  setAgentInitializing: SetAgentInitializing;
+}): void {
+  refreshInitTimeout({
+    key: input.key,
+    onTimeout: () => {
+      input.setAgentInitializing(input.agentId, false);
+      rejectInitDeferred(input.key, createHistorySyncTimeoutError());
+    },
+  });
+}
 
 export interface EnsureAgentIsInitializedInput {
   serverId: string;
   agentId: string;
   client: Pick<DaemonClient, "fetchAgentTimeline"> | null;
+  runtime: Pick<HostRuntimeStore, "fetchAgentTimeline">;
   setAgentInitializing: SetAgentInitializing;
   hostDisconnectedMessage?: string;
 }
@@ -32,20 +51,13 @@ export function ensureAgentIsInitialized(input: EnsureAgentIsInitializedInput): 
     return existing.promise;
   }
 
-  const session = useSessionStore.getState().sessions[serverId];
-  const cursor = session?.agentTimelineCursor.get(agentId);
-  const hasAuthoritativeHistory = session?.agentAuthoritativeHistoryApplied.get(agentId) === true;
-  const timelineRequest = planInitialAgentTimelineSync({ cursor, hasAuthoritativeHistory });
+  const timeline = selectAgentTimelineState(useSessionStore.getState().sessions[serverId], agentId);
+  const timelineRequest = planTimelineResumeFetch(
+    timeline.status === "synced" ? timeline.range : null,
+  );
 
   const deferred = createInitDeferred(key, timelineRequest.direction);
-  const timeoutId = setTimeout(() => {
-    setAgentInitializing(agentId, false);
-    rejectInitDeferred(
-      key,
-      new Error(`History sync timed out after ${Math.round(INIT_TIMEOUT_MS / 1000)}s`),
-    );
-  }, INIT_TIMEOUT_MS);
-  attachInitTimeout(key, timeoutId);
+  refreshAgentInitializationTimeout({ key, agentId, setAgentInitializing });
 
   setAgentInitializing(agentId, true);
 
@@ -58,7 +70,7 @@ export function ensureAgentIsInitialized(input: EnsureAgentIsInitializedInput): 
     return deferred.promise;
   }
 
-  client.fetchAgentTimeline(agentId, timelineRequest).catch((error) => {
+  input.runtime.fetchAgentTimeline(serverId, agentId, timelineRequest).catch((error) => {
     setAgentInitializing(agentId, false);
     rejectInitDeferred(key, error instanceof Error ? error : new Error(String(error)));
   });
@@ -67,14 +79,16 @@ export function ensureAgentIsInitialized(input: EnsureAgentIsInitializedInput): 
 }
 
 export interface RefreshAgentInput {
+  serverId: string;
   agentId: string;
-  client: Pick<DaemonClient, "refreshAgent" | "fetchAgentTimeline"> | null;
+  client: Pick<DaemonClient, "refreshAgent"> | null;
+  runtime: Pick<HostRuntimeStore, "fetchAgentTimeline">;
   setAgentInitializing: SetAgentInitializing;
   hostDisconnectedMessage?: string;
 }
 
 export async function refreshAgent(input: RefreshAgentInput): Promise<void> {
-  const { agentId, client, setAgentInitializing } = input;
+  const { serverId, agentId, client, runtime, setAgentInitializing } = input;
   if (!client) {
     throw new Error(input.hostDisconnectedMessage ?? i18n.t("workspace.terminal.hostDisconnected"));
   }
@@ -82,7 +96,7 @@ export async function refreshAgent(input: RefreshAgentInput): Promise<void> {
 
   try {
     await client.refreshAgent(agentId);
-    await client.fetchAgentTimeline(agentId, planTimelineTailFetch());
+    await runtime.fetchAgentTimeline(serverId, agentId, planTimelineTailFetch());
   } catch (error) {
     setAgentInitializing(agentId, false);
     throw error;
@@ -125,6 +139,7 @@ export function useAgentInitialization({
         serverId,
         agentId,
         client,
+        runtime: getHostRuntimeStore(),
         setAgentInitializing,
         hostDisconnectedMessage: t("workspace.terminal.hostDisconnected"),
       }),
@@ -134,12 +149,14 @@ export function useAgentInitialization({
   const refreshAgentCallback = useCallback(
     (agentId: string): Promise<void> =>
       refreshAgent({
+        serverId,
         agentId,
         client,
+        runtime: getHostRuntimeStore(),
         setAgentInitializing,
         hostDisconnectedMessage: t("workspace.terminal.hostDisconnected"),
       }),
-    [client, setAgentInitializing, t],
+    [client, serverId, setAgentInitializing, t],
   );
 
   return {

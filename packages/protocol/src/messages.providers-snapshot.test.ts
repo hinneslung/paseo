@@ -38,37 +38,16 @@ describe("provider snapshot message schemas", () => {
     expect(parsed.enabled).toBe(true);
   });
 
-  test("normalizes thinking option defaults on provider snapshot models", () => {
+  test("preserves provider snapshot entry source", () => {
     const parsed = ProviderSnapshotEntrySchema.parse({
-      provider: "claude",
+      provider: "gemini",
       status: "ready",
-      models: [
-        {
-          provider: "claude",
-          id: "MiniMax-M2.7",
-          label: "MiniMax-M2.7",
-          isDefault: true,
-          thinkingOptions: [
-            { id: "off", label: "Off" },
-            { id: "max", label: "Max", isDefault: true },
-          ],
-        },
-      ],
+      enabled: true,
+      source: "custom",
+      label: "Gemini",
     });
 
-    expect(parsed.models).toEqual([
-      {
-        provider: "claude",
-        id: "MiniMax-M2.7",
-        label: "MiniMax-M2.7",
-        isDefault: true,
-        thinkingOptions: [
-          { id: "off", label: "Off" },
-          { id: "max", label: "Max", isDefault: true },
-        ],
-        defaultThinkingOptionId: "max",
-      },
-    ]);
+    expect(parsed.source).toBe("custom");
   });
 
   test("defaults missing enabled state in providers snapshot response entries", () => {
@@ -114,4 +93,21 @@ describe("provider snapshot message schemas", () => {
 
     expect(parsed.payload.entries[0]?.enabled).toBe(true);
   });
+});
+
+test("accepts a bodyless announcement with separate discovery freshness", async () => {
+  const { validateWSOutboundMessage } = await import("./validation/ws-outbound.js");
+  const message = {
+    type: "providers_snapshot_update",
+    payload: {
+      cwd: "/project",
+      entries: [],
+      snapshotHash: "content-hash",
+      fetchedAt: { codex: "2026-09-06T12:00:00.000Z" },
+      generatedAt: "2026-09-06T13:00:00.000Z",
+    },
+  };
+  expect(ProvidersSnapshotUpdateMessageSchema.parse(message)).toEqual(message);
+  const result = validateWSOutboundMessage({ type: "session", message });
+  expect(result.success).toBe(true);
 });
