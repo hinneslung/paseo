@@ -1,4 +1,6 @@
 /** @vitest-environment jsdom */
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { withMermaidRuntimeCspNonce } from "./csp-nonce";
 import { mermaidRuntimeHtml } from "./html.gen";
@@ -26,5 +28,26 @@ describe("withMermaidRuntimeCspNonce", () => {
     expect(withMermaidRuntimeCspNonce("<script>run()</script>", 'a&"<')).toContain(
       'nonce="a&amp;&quot;&lt;"',
     );
+  });
+
+  it("keeps inline and fullscreen diagrams on the shared IDL-nonce runtime", () => {
+    const mermaidDirectory = path.resolve(import.meta.dirname, "..");
+    const inlineSource = readFileSync(path.join(mermaidDirectory, "host.web.tsx"), "utf8");
+    const fullscreenSource = readFileSync(
+      path.join(mermaidDirectory, "fullscreen-viewer.web.tsx"),
+      "utf8",
+    );
+    const runtimeSource = readFileSync(
+      path.join(mermaidDirectory, "iframe-runtime.web.tsx"),
+      "utf8",
+    );
+
+    for (const source of [inlineSource, fullscreenSource]) {
+      expect(source).toContain('from "./iframe-runtime.web"');
+      expect(source).toContain("<MermaidIframeRuntime");
+    }
+    expect(runtimeSource).toContain('querySelector<HTMLScriptElement>("script[nonce]")?.nonce');
+    expect(runtimeSource).not.toContain("getAttribute");
+    expect(runtimeSource).not.toContain("unsafe-eval");
   });
 });
