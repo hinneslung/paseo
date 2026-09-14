@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { relative as relativePath } from "node:path";
 import test from "node:test";
@@ -67,6 +68,23 @@ function namedStepBlocks(source) {
 
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function namedStepRunScript(source, name) {
+  const block = namedStepBlocks(source).get(name);
+  const runIndex = block?.indexOf("        run: |") ?? -1;
+  if (!block || runIndex < 0) throw new Error(`Missing run block for step: ${name}`);
+
+  return block
+    .slice(runIndex + 1)
+    .map((line) => {
+      if (line === "") return line;
+      if (!line.startsWith("          ")) {
+        throw new Error(`Unexpected indentation in run block for step: ${name}`);
+      }
+      return line.slice(10);
+    })
+    .join("\n");
 }
 
 function loadFilters(path) {
@@ -283,6 +301,62 @@ test("VS Code Marketplace diagnostics are manual, read-only, and fail closed", (
   assert.match(publish, /VSCE_PAT: \$\{\{ secrets\.VSCE_PAT \}\}/);
   assert.equal(source.match(/npx @vscode\/vsce publish --packagePath paseo\.vsix/g)?.length, 1);
   assert.equal(source.match(/VSCE_PAT: \$\{\{ secrets\.VSCE_PAT \}\}/g)?.length, 2);
+});
+
+test("Marketplace anonymous probe reports synthetic curl failures under GitHub Bash flags", () => {
+  const source = readFileSync(vscodePublishWorkflowPath, "utf8");
+  const probe = namedStepRunScript(source, "Probe Marketplace gallery anonymously");
+
+  function runProbe(metrics, curlStatus) {
+    return spawnSync(
+      "bash",
+      [
+        "--noprofile",
+        "--norc",
+        "-e",
+        "-o",
+        "pipefail",
+        "-c",
+        `curl() {
+  printf '%s' "$STUB_CURL_METRICS"
+  return "$STUB_CURL_STATUS"
+}
+${probe}`,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          STUB_CURL_METRICS: metrics,
+          STUB_CURL_STATUS: String(curlStatus),
+        },
+      },
+    );
+  }
+
+  const timeoutMetrics =
+    "http_status=000 connect_seconds=0.001 tls_seconds=0.000 total_seconds=15.000";
+  const timeout = runProbe(timeoutMetrics, 28);
+  assert.equal(timeout.status, 28);
+  assert.match(timeout.stdout, new RegExp(`Anonymous gallery OPTIONS: ${timeoutMetrics}`));
+  assert.match(timeout.stdout, /Anonymous Marketplace gallery probe failed with curl exit 28/);
+
+  const unauthorizedMetrics =
+    "http_status=401 connect_seconds=0.001 tls_seconds=0.010 total_seconds=0.020";
+  const unauthorized = runProbe(unauthorizedMetrics, 0);
+  assert.equal(unauthorized.status, 0);
+  assert.match(
+    unauthorized.stdout,
+    new RegExp(`Anonymous gallery OPTIONS: ${unauthorizedMetrics}`),
+  );
+  assert.doesNotMatch(unauthorized.stdout, /::error::/);
+
+  const unexpectedMetrics =
+    "http_status=503 connect_seconds=0.001 tls_seconds=0.010 total_seconds=0.020";
+  const unexpected = runProbe(unexpectedMetrics, 0);
+  assert.equal(unexpected.status, 1);
+  assert.match(unexpected.stdout, new RegExp(`Anonymous gallery OPTIONS: ${unexpectedMetrics}`));
+  assert.match(unexpected.stdout, /Anonymous Marketplace gallery probe expected HTTP 401/);
 });
 
 test("focused contracts stay inside existing required checks", () => {

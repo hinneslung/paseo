@@ -86,6 +86,7 @@ jobs:
         run: |
           set -uo pipefail
 
+          curl_status=0
           metrics="$(curl \
             --silent \
             --show-error \
@@ -93,8 +94,7 @@ jobs:
             --max-time 15 \
             --request OPTIONS \
             --write-out "http_status=%{http_code} connect_seconds=%{time_connect} tls_seconds=%{time_appconnect} total_seconds=%{time_total}" \
-            https://marketplace.visualstudio.com/_apis/gallery)"
-          curl_status=$?
+            https://marketplace.visualstudio.com/_apis/gallery)" || curl_status=$?
           echo "Anonymous gallery OPTIONS: $metrics"
 
           if (( curl_status != 0 )); then
