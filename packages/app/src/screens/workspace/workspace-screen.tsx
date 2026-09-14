@@ -193,7 +193,7 @@ import {
 } from "@/panels/panel-instance-attributes";
 import { findAdjacentPane } from "@/utils/split-navigation";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
-import { getIsElectron, isNative, isWeb } from "@/constants/platform";
+import { getIsElectron, getIsVscode, isNative, isWeb } from "@/constants/platform";
 import type { SurfaceBackdrop } from "@/styles/surface-backdrop";
 import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
 import { useWorkspaceTerminals } from "@/screens/workspace/terminals/use-workspace-terminals";
@@ -212,6 +212,7 @@ import {
 import { RenderProfile } from "@/utils/render-profiler";
 import { useWorkspaceCheckoutStatus } from "@/screens/workspace/use-workspace-checkout-status";
 import { useHasPullRequest } from "@/panels/pull-request";
+import { tryOpenWorkspaceFileInVscode } from "./vscode-file-open";
 
 const WORKSPACE_FLOATING_PANEL_PORTAL_HOST_PREFIX = "workspace-floating-panels";
 const EMPTY_UI_TABS: WorkspaceTab[] = [];
@@ -2296,6 +2297,17 @@ function WorkspaceScreenContent({
   }) {
     if (focusPaneBeforeOpen && paneId && persistenceKey) {
       focusWorkspacePane(persistenceKey, paneId);
+    }
+    if (
+      tryOpenWorkspaceFileInVscode({
+        isVscode: getIsVscode(),
+        location: request.location,
+        workspaceDirectory,
+        failedOpenFileMessage: t("workspace.git.openInEditor.failedOpenFile"),
+        onError: (message) => toast.error(message),
+      })
+    ) {
+      return;
     }
     if (request.disposition === "side") {
       const location = normalizeWorkspaceFileLocation(request.location);

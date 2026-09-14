@@ -14,6 +14,7 @@ import {
   waitForCdp,
   waitForWorkbench,
 } from "./lib/cdp-harness.mjs";
+import { connectSeedClient } from "./lib/daemon-seed.mjs";
 import { startDaemon } from "./lib/daemon-harness.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -26,6 +27,18 @@ const artifactDir =
   process.env.PASEO_VSCODE_E2E_ARTIFACT_DIR ?? path.join(packageRoot, "artifacts", "vscode-e2e");
 const workspaceMarkerSelector = '[data-testid="workspace-header-title"]';
 const splashSelector = '[data-testid="startup-splash"]';
+const linkedFileRelativePath = ".github/paseo-vscode-cdp.ts";
+const linkedFileLine = 3;
+const linkedFileTarget = `${linkedFileRelativePath}:${linkedFileLine}`;
+const streamedTranscript = [
+  "```mermaid",
+  "flowchart LR",
+  "  Bridge --> Runtime",
+  "  Runtime --> NativeLink",
+  "```",
+  "",
+  `[${linkedFileTarget}](${linkedFileRelativePath}#L${linkedFileLine})`,
+].join("\n");
 
 const log = (...args) => console.log("[vscode-e2e]", ...args);
 
@@ -156,12 +169,15 @@ async function runEditingShortcutsProbe(appFrame) {
   log("editing-shortcuts passed");
 }
 
-async function screenshot(workbench, name) {
+async function screenshot(workbench, name, { required = false } = {}) {
   mkdirSync(artifactDir, { recursive: true });
   const file = path.join(artifactDir, `${name}.png`);
-  await workbench.screenshot({ path: file }).catch((error) => {
+  try {
+    await workbench.screenshot({ path: file });
+  } catch (error) {
     log("screenshot failed", error.message);
-  });
+    if (required) throw error;
+  }
   log("screenshot", file);
 }
 
@@ -182,6 +198,170 @@ async function terminateVsCode(child) {
   ]);
 }
 
+async function waitForProbe(label, probe, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastValue;
+  while (Date.now() < deadline) {
+    lastValue = await probe();
+    if (lastValue?.ready) return lastValue;
+    await sleep(200);
+  }
+  throw new Error(`${label} did not become ready. Last probe: ${JSON.stringify(lastValue)}`);
+}
+
+function buildAgentRoute(frameUrl, serverId, workspaceId, agentId) {
+  const route = new URL(frameUrl);
+  route.pathname = `/h/${encodeURIComponent(serverId)}/workspace/${encodeURIComponent(workspaceId)}`;
+  route.search = `?open=${encodeURIComponent(`agent:${agentId}`)}`;
+  route.hash = "";
+  return route.href;
+}
+
+async function openSeededAgent(appFrame, seed) {
+  const route = buildAgentRoute(appFrame.url(), seed.serverId, seed.workspaceId, seed.agentId);
+  await appFrame.evaluate((url) => {
+    history.pushState({}, "", url);
+    window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+  }, route);
+  await appFrame.waitForURL(
+    (url) =>
+      url.pathname.includes(`/workspace/${seed.workspaceId}`) && !url.searchParams.has("open"),
+    { timeout: 30_000 },
+  );
+  await appFrame.getByTestId("message-input-root").waitFor({ state: "visible", timeout: 30_000 });
+}
+
+async function assertDiagramLabels(svg, labels) {
+  await svg.waitFor({ state: "visible", timeout: 30_000 });
+  await waitForProbe(
+    `Mermaid labels ${labels.join(", ")}`,
+    async () => {
+      const text = await svg.textContent().catch(() => "");
+      return { ready: labels.every((label) => text?.includes(label)), text };
+    },
+    30_000,
+  );
+}
+
+async function assertNativeEditorLocation(workbench, fileName, line) {
+  return waitForProbe(
+    `VS Code editor ${fileName}:${line}`,
+    () =>
+      workbench.evaluate(
+        ({ expectedFileName, expectedLine }) => {
+          const activeTab = document.querySelector(".tabs-container .tab.active");
+          const tabText = `${activeTab?.getAttribute("aria-label") ?? ""} ${activeTab?.textContent ?? ""}`;
+          const statusItems = Array.from(document.querySelectorAll(".statusbar-item")).map((item) =>
+            `${item.getAttribute("aria-label") ?? ""} ${item.textContent ?? ""}`.trim(),
+          );
+          const activeLineNumbers = Array.from(
+            document.querySelectorAll(".monaco-editor.focused .line-numbers.active-line-number"),
+          ).map((item) => item.textContent?.trim() ?? "");
+          const linePattern = new RegExp(`(?:Ln|Line)\\s*${expectedLine}(?:\\D|$)`, "i");
+          return {
+            activeLineNumbers,
+            ready:
+              tabText.includes(expectedFileName) &&
+              (activeLineNumbers.includes(String(expectedLine)) ||
+                statusItems.some((item) => linePattern.test(item))),
+            statusItems,
+            tabText,
+          };
+        },
+        { expectedFileName: fileName, expectedLine: line },
+      ),
+    30_000,
+  );
+}
+
+function parseWorkspaceRoute(frameUrl) {
+  const match = new URL(frameUrl).pathname.match(/^\/h\/([^/]+)\/workspace\/([^/]+)$/);
+  if (!match?.[1] || !match[2]) {
+    throw new Error(`Cannot seed an agent from non-workspace route ${frameUrl}.`);
+  }
+  return { serverId: decodeURIComponent(match[1]), workspaceId: decodeURIComponent(match[2]) };
+}
+
+async function runRichTranscriptAndFileLinkSpec({
+  appFrame,
+  password,
+  port,
+  workbench,
+  workspaceDir,
+}) {
+  const linkedFile = path.join(workspaceDir, linkedFileRelativePath);
+  mkdirSync(path.dirname(linkedFile), { recursive: true });
+  writeFileSync(
+    linkedFile,
+    [
+      "export const first = 1;",
+      "export const second = 2;",
+      "export const selectedByNativeLink = 3;",
+      "export const fourth = 4;",
+    ].join("\n"),
+  );
+
+  const route = parseWorkspaceRoute(appFrame.url());
+  const client = await connectSeedClient({ port, password });
+  try {
+    const serverInfo = client.getLastServerInfoMessage();
+    if (serverInfo?.serverId !== route.serverId) {
+      throw new Error(
+        `Seed client resolved server ${serverInfo?.serverId ?? "unknown"}, expected ${route.serverId}.`,
+      );
+    }
+    const agent = await client.createAgent({
+      provider: "mock",
+      cwd: workspaceDir,
+      workspaceId: route.workspaceId,
+      title: "VS Code rich transcript fixture",
+      modeId: "load-test",
+      model: "e2e-fast-stream",
+      featureValues: {
+        mockStreamingAssistantResponse: streamedTranscript,
+        mockStreamingAssistantIntervalMs: 25,
+      },
+    });
+    const seed = { ...route, agentId: agent.id };
+    await openSeededAgent(appFrame, seed);
+    await client.sendAgentMessage(agent.id, "Render the diagram and link the generated file.");
+
+    const inlineDiagram = appFrame.getByRole("img", { name: "Diagram" }).last();
+    const inlineSvg = inlineDiagram.locator("iframe").contentFrame().locator("#diagram svg");
+    await assertDiagramLabels(inlineSvg, ["Bridge", "Runtime"]);
+    await client.waitForFinish(agent.id, 30_000);
+    await assertDiagramLabels(inlineSvg, ["Bridge", "Runtime", "NativeLink"]);
+    const fileLink = appFrame.getByText(linkedFileTarget, { exact: true }).last();
+    await fileLink.waitFor({ state: "visible", timeout: 30_000 });
+    await screenshot(workbench, "rich-transcript-inline-success", { required: true });
+
+    await appFrame.getByTestId("mermaid-viewport-canvas").last().hover();
+    await appFrame.getByTestId("mermaid-fullscreen").last().click();
+    const fullscreenViewport = appFrame.getByTestId("mermaid-fullscreen-viewport");
+    await fullscreenViewport.waitFor({ state: "visible", timeout: 30_000 });
+    const fullscreenSvg = fullscreenViewport
+      .getByTestId("mermaid-fullscreen-viewport-canvas")
+      .locator("iframe")
+      .contentFrame()
+      .locator("#diagram svg");
+    await assertDiagramLabels(fullscreenSvg, ["Bridge", "Runtime", "NativeLink"]);
+    await screenshot(workbench, "rich-transcript-fullscreen-success", { required: true });
+    await appFrame.getByTestId("mermaid-fullscreen-close").click();
+    await fullscreenViewport.waitFor({ state: "detached", timeout: 10_000 });
+
+    await fileLink.click();
+    const editor = await assertNativeEditorLocation(
+      workbench,
+      path.basename(linkedFile),
+      linkedFileLine,
+    );
+    await screenshot(workbench, "native-file-link-success", { required: true });
+    log("rich-transcript-file-link passed", JSON.stringify(editor));
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
 async function runWorkspaceOpenSpec() {
   log("playwright resolves to", import.meta.resolve("playwright"));
 
@@ -194,10 +374,15 @@ async function runWorkspaceOpenSpec() {
     password,
     home: daemonHome,
     logPrefix: "[vscode-e2e-daemon]",
+    environment: {
+      NODE_ENV: "development",
+      PASEO_NODE_ENV: "development",
+    },
   });
   let browser = null;
   let workbench = null;
   let vscodeProcess = null;
+  const relevantCspViolations = [];
 
   try {
     log(`starting password-protected daemon on ${daemon.listen}`);
@@ -232,7 +417,13 @@ async function runWorkspaceOpenSpec() {
     if (runHeadless) {
       await workbench.setViewportSize({ width: 1440, height: 900 });
     }
-    workbench.on("console", (message) => log(`workbench:${message.type()}`, message.text()));
+    workbench.on("console", (message) => {
+      const text = message.text();
+      log(`workbench:${message.type()}`, text);
+      if (/content security policy|script-src|unsafe-eval/i.test(text)) {
+        relevantCspViolations.push(text);
+      }
+    });
     workbench.on("pageerror", (error) => log("workbench pageerror", error.message));
 
     await openPaseo(workbench);
@@ -243,6 +434,20 @@ async function runWorkspaceOpenSpec() {
     log("workspace-open passed", JSON.stringify(state));
 
     await runEditingShortcutsProbe(appFrame);
+    await screenshot(workbench, "workspace-open-success", { required: true });
+    await runRichTranscriptAndFileLinkSpec({
+      appFrame,
+      password,
+      port: daemonPort,
+      workbench,
+      workspaceDir,
+    });
+    if (relevantCspViolations.length > 0) {
+      throw new Error(
+        `Relevant CSP violations were logged: ${JSON.stringify(relevantCspViolations)}`,
+      );
+    }
+    log("CSP console check passed");
   } catch (error) {
     if (workbench) await screenshot(workbench, "workspace-open-failure");
     writeArtifact("workspace-open-error.txt", error.stack || error.message || String(error));
@@ -257,12 +462,4 @@ async function runWorkspaceOpenSpec() {
   }
 }
 
-async function runFileLinkClickSpec() {
-  // TODO(WS4 spec2): add this once the test can seed a durable agent timeline fixture through
-  // the daemon's supported JSON persistence/API. The manual CDP harness assumes an already-seeded
-  // live daemon; guessing at private agent/timeline files here would make the CI job flaky.
-  log("skipping file-link click spec; deterministic agent seeding fixture is not available yet");
-}
-
 await runWorkspaceOpenSpec();
-await runFileLinkClickSpec();
