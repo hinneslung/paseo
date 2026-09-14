@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   answerPasswordPrompt,
   launchVsCode,
@@ -231,6 +231,34 @@ async function openSeededAgent(appFrame, seed) {
   await appFrame.getByTestId("message-input-root").waitFor({ state: "visible", timeout: 30_000 });
 }
 
+async function runFileUriDropProbe(appFrame, linkedFile) {
+  const textarea = appFrame.getByTestId("message-input-root").locator("textarea").first();
+  await textarea.fill("");
+  const dataTransfer = await appFrame.evaluateHandle((fileUri) => {
+    const transfer = new DataTransfer();
+    transfer.setData("text/uri-list", fileUri);
+    return transfer;
+  }, pathToFileURL(linkedFile).href);
+  try {
+    await textarea.dispatchEvent("dragenter", { dataTransfer });
+    await textarea.dispatchEvent("dragover", { dataTransfer });
+    await textarea.dispatchEvent("drop", { dataTransfer });
+    const mention = `"${linkedFileRelativePath}"`;
+    await waitForProbe(
+      "file URI drop mention",
+      async () => {
+        const value = await textarea.inputValue();
+        return { ready: value === mention, value };
+      },
+      10_000,
+    );
+    log("file-uri-drop passed", mention);
+    await textarea.fill("");
+  } finally {
+    await dataTransfer.dispose();
+  }
+}
+
 async function assertDiagramLabels(svg, labels) {
   await svg.waitFor({ state: "visible", timeout: 30_000 });
   await waitForProbe(
@@ -319,16 +347,22 @@ async function runRichTranscriptAndFileLinkSpec({
       model: "e2e-fast-stream",
       featureValues: {
         mockStreamingAssistantResponse: streamedTranscript,
-        mockStreamingAssistantIntervalMs: 25,
+        mockStreamingAssistantIntervalMs: 75,
       },
     });
     const seed = { ...route, agentId: agent.id };
     await openSeededAgent(appFrame, seed);
+    await runFileUriDropProbe(appFrame, linkedFile);
     await client.sendAgentMessage(agent.id, "Render the diagram and link the generated file.");
 
     const inlineDiagram = appFrame.getByRole("img", { name: "Diagram" }).last();
     const inlineSvg = inlineDiagram.locator("iframe").contentFrame().locator("#diagram svg");
     await assertDiagramLabels(inlineSvg, ["Bridge", "Runtime"]);
+    await appFrame.getByRole("button", { name: "Stop agent" }).waitFor({
+      state: "visible",
+      timeout: 10_000,
+    });
+    log("Mermaid streaming active-turn check passed");
     await client.waitForFinish(agent.id, 30_000);
     await assertDiagramLabels(inlineSvg, ["Bridge", "Runtime", "NativeLink"]);
     const fileLink = appFrame.getByText(linkedFileTarget, { exact: true }).last();

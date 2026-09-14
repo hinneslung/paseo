@@ -122,9 +122,12 @@ present. This guards `a46672ad`.
 Spec 2, **rich transcript and native file link**, creates a mock-provider agent
 through the real daemon client API. Its streamed response contains Mermaid and a
 line-targeted link to a generated file under `.github/`. The spec checks the
-inline and fullscreen SVG labels, closes fullscreen, clicks the link, and checks
-the active VS Code editor path and line. It also fails on relevant CSP console
-violations and captures success screenshots for each surface.
+inline SVG while the Stop control proves the turn is still active, then checks
+the completed fullscreen SVG and closes it. It also drops a `text/uri-list` URI
+into the composer and checks the inserted file mention before clicking the
+transcript link and checking the active VS Code editor path and line. Relevant
+CSP console violations fail the spec, which captures success screenshots for
+each surface.
 
 The job uploads `packages/vscode/artifacts/vscode-e2e` on failure.
 

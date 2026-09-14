@@ -1456,11 +1456,11 @@ function ComposerContentImpl({
     (relativePaths: string[]) => {
       const nextInput = appendFileMentionPaths({ text: userInput, relativePaths });
       if (nextInput === userInput) return;
-      setUserInput(nextInput);
+      replaceUserInput(nextInput);
       setCursorIndex(nextInput.length);
       messageInputRef.current?.focus();
     },
-    [setUserInput, userInput],
+    [replaceUserInput, userInput],
   );
 
   const submitMessage = useCallback(
