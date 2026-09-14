@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { relative as relativePath } from "node:path";
 import test from "node:test";
@@ -46,6 +47,44 @@ function jobBlocks(source) {
     if (currentJob) jobs.get(currentJob).push(line);
   }
   return jobs;
+}
+
+function namedStepBlocks(source) {
+  const steps = new Map();
+  let currentStep;
+
+  for (const line of source.split("\n")) {
+    const stepMatch = /^      - name: (.+)\s*$/.exec(line);
+    if (stepMatch) {
+      currentStep = stepMatch[1];
+      steps.set(currentStep, []);
+      continue;
+    }
+    if (line.startsWith("      - ")) currentStep = undefined;
+    if (currentStep) steps.get(currentStep).push(line);
+  }
+  return steps;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function namedStepRunScript(source, name) {
+  const block = namedStepBlocks(source).get(name);
+  const runIndex = block?.indexOf("        run: |") ?? -1;
+  if (!block || runIndex < 0) throw new Error(`Missing run block for step: ${name}`);
+
+  return block
+    .slice(runIndex + 1)
+    .map((line) => {
+      if (line === "") return line;
+      if (!line.startsWith("          ")) {
+        throw new Error(`Unexpected indentation in run block for step: ${name}`);
+      }
+      return line.slice(10);
+    })
+    .join("\n");
 }
 
 function loadFilters(path) {
@@ -196,6 +235,128 @@ test("VS Code release tags select only the extension publish workflow", () => {
   assert.equal(selectsPushTag(vscodePublishPatterns, "vscode-v0.8.0"), true);
   assert.equal(selectsPushTag(vscodePublishPatterns, "vscode-v0.9.0-beta.1"), true);
   assert.equal(selectsPushTag(vscodePublishPatterns, "v0.8.0"), false);
+});
+
+test("VS Code Marketplace diagnostics are manual, read-only, and fail closed", () => {
+  const source = readFileSync(vscodePublishWorkflowPath, "utf8");
+  const trigger = source.split("concurrency:", 1)[0];
+  const publishJob = jobBlocks(source).get("publish")?.join("\n") ?? "";
+  const steps = namedStepBlocks(source);
+  const validate = steps.get("Validate publish tag")?.join("\n") ?? "";
+  const install = steps.get("Install dependencies")?.join("\n") ?? "";
+  const anonymousProbe = steps.get("Probe Marketplace gallery anonymously")?.join("\n") ?? "";
+  const credentialProbe = steps.get("Verify Marketplace publisher access")?.join("\n") ?? "";
+  const diagnosticResult =
+    steps.get("Require successful Marketplace diagnostics")?.join("\n") ?? "";
+  const build = steps.get("Build and package VS Code extension")?.join("\n") ?? "";
+  const publish = steps.get("Publish to VS Code Marketplace")?.join("\n") ?? "";
+
+  assert.match(
+    trigger,
+    /diagnostic_only:\s*\n\s+description: .*\n\s+required: false\s*\n\s+default: false\s*\n\s+type: boolean/,
+  );
+  assert.match(publishJob, /^    environment: marketplace$/m);
+  assert.match(source, /^permissions:\s*\n  contents: read$/m);
+  assert.match(
+    source,
+    /ref: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.tag \|\| github\.ref_name \}\}/,
+  );
+  assert.match(source, /git merge-base --is-ancestor/);
+  assert.match(source, /expected_tag="vscode-v\$\{package_version\}"/);
+  assert.doesNotMatch(validate, /^        if:/m);
+  assert.doesNotMatch(install, /^        if:/m);
+  assert.doesNotMatch(validate, /continue-on-error|always\(\)|!cancelled\(\)/);
+  assert.doesNotMatch(install, /continue-on-error|always\(\)|!cancelled\(\)/);
+  assert.doesNotMatch(source, /uses: actions\/checkout@v4\s*\n\s+continue-on-error:/);
+
+  const diagnosticCondition =
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_only }}";
+  assert.match(anonymousProbe, new RegExp(`^        ${escapeRegex(diagnosticCondition)}$`, "m"));
+  assert.match(anonymousProbe, /--max-time 15/);
+  assert.match(anonymousProbe, /--request OPTIONS/);
+  assert.match(anonymousProbe, /--output \/dev\/null/);
+  assert.doesNotMatch(anonymousProbe, /VSCE_PAT|Authorization|--dump-header|--include/);
+  assert.doesNotMatch(anonymousProbe, /always\(\)|!cancelled\(\)/);
+
+  assert.match(credentialProbe, new RegExp(`^        ${escapeRegex(diagnosticCondition)}$`, "m"));
+  assert.match(credentialProbe, /if \[\[ -z "\$\{VSCE_PAT:-\}" \]\]/);
+  assert.match(credentialProbe, /npx @vscode\/vsce verify-pat hinnes/);
+  assert.match(credentialProbe, /VSCE_PAT: \$\{\{ secrets\.VSCE_PAT \}\}/);
+  assert.doesNotMatch(credentialProbe, /vsce publish|--packagePath|--pat|Authorization/);
+  assert.doesNotMatch(credentialProbe, /always\(\)|!cancelled\(\)/);
+
+  assert.match(diagnosticResult, /always\(\).*inputs\.diagnostic_only/);
+  assert.match(diagnosticResult, /steps\.anonymous-marketplace\.outcome/);
+  assert.match(diagnosticResult, /steps\.publisher-access\.outcome/);
+  assert.match(anonymousProbe, /^        continue-on-error: true$/m);
+  assert.match(credentialProbe, /^        continue-on-error: true$/m);
+
+  const normalCondition =
+    "if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic_only == false }}";
+  for (const step of [build, publish]) {
+    assert.match(step, new RegExp(`^        ${escapeRegex(normalCondition)}$`, "m"));
+  }
+  assert.match(build, /npm run build:vscode/);
+  assert.match(publish, /npx @vscode\/vsce publish --packagePath paseo\.vsix/);
+  assert.match(publish, /VSCE_PAT: \$\{\{ secrets\.VSCE_PAT \}\}/);
+  assert.equal(source.match(/npx @vscode\/vsce publish --packagePath paseo\.vsix/g)?.length, 1);
+  assert.equal(source.match(/VSCE_PAT: \$\{\{ secrets\.VSCE_PAT \}\}/g)?.length, 2);
+});
+
+test("Marketplace anonymous probe reports synthetic curl failures under GitHub Bash flags", () => {
+  const source = readFileSync(vscodePublishWorkflowPath, "utf8");
+  const probe = namedStepRunScript(source, "Probe Marketplace gallery anonymously");
+
+  function runProbe(metrics, curlStatus) {
+    return spawnSync(
+      "bash",
+      [
+        "--noprofile",
+        "--norc",
+        "-e",
+        "-o",
+        "pipefail",
+        "-c",
+        `curl() {
+  printf '%s' "$STUB_CURL_METRICS"
+  return "$STUB_CURL_STATUS"
+}
+${probe}`,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          STUB_CURL_METRICS: metrics,
+          STUB_CURL_STATUS: String(curlStatus),
+        },
+      },
+    );
+  }
+
+  const timeoutMetrics =
+    "http_status=000 connect_seconds=0.001 tls_seconds=0.000 total_seconds=15.000";
+  const timeout = runProbe(timeoutMetrics, 28);
+  assert.equal(timeout.status, 28);
+  assert.match(timeout.stdout, new RegExp(`Anonymous gallery OPTIONS: ${timeoutMetrics}`));
+  assert.match(timeout.stdout, /Anonymous Marketplace gallery probe failed with curl exit 28/);
+
+  const unauthorizedMetrics =
+    "http_status=401 connect_seconds=0.001 tls_seconds=0.010 total_seconds=0.020";
+  const unauthorized = runProbe(unauthorizedMetrics, 0);
+  assert.equal(unauthorized.status, 0);
+  assert.match(
+    unauthorized.stdout,
+    new RegExp(`Anonymous gallery OPTIONS: ${unauthorizedMetrics}`),
+  );
+  assert.doesNotMatch(unauthorized.stdout, /::error::/);
+
+  const unexpectedMetrics =
+    "http_status=503 connect_seconds=0.001 tls_seconds=0.010 total_seconds=0.020";
+  const unexpected = runProbe(unexpectedMetrics, 0);
+  assert.equal(unexpected.status, 1);
+  assert.match(unexpected.stdout, new RegExp(`Anonymous gallery OPTIONS: ${unexpectedMetrics}`));
+  assert.match(unexpected.stdout, /Anonymous Marketplace gallery probe expected HTTP 401/);
 });
 
 test("focused contracts stay inside existing required checks", () => {

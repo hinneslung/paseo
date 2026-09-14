@@ -3,8 +3,8 @@ name: Publish VS Code Extension
 # Publishes packages/vscode to the VS Code Marketplace when a namespaced VS Code
 # extension tag is pushed, e.g. `vscode-v0.1.0`. The tag must match
 # packages/vscode/package.json and point at a commit reachable from
-# `vscode-extension`. Gated on the `marketplace` environment so a human can
-# approve the run. Auth uses the VSCE_PAT secret (a global Azure DevOps PAT,
+# `vscode-extension`. The `marketplace` environment applies any configured
+# protection rules. Auth uses the VSCE_PAT secret (a global Azure DevOps PAT,
 # Marketplace > Manage). The PAT path is the temporary bootstrap; migrate to
 # Microsoft Entra (workload identity federation) before global PATs retire on
 # 2026-12-01.
@@ -19,6 +19,11 @@ on:
         description: "vscode-v* tag to publish"
         required: true
         type: string
+      diagnostic_only:
+        description: "Check Marketplace reachability and publisher access without publishing"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: vscode-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -73,10 +78,70 @@ jobs:
       - name: Install dependencies
         uses: ./.github/actions/npm-install
 
+      - name: Probe Marketplace gallery anonymously
+        id: anonymous-marketplace
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_only }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          curl_status=0
+          metrics="$(curl \
+            --silent \
+            --show-error \
+            --output /dev/null \
+            --max-time 15 \
+            --request OPTIONS \
+            --write-out "http_status=%{http_code} connect_seconds=%{time_connect} tls_seconds=%{time_appconnect} total_seconds=%{time_total}" \
+            https://marketplace.visualstudio.com/_apis/gallery)" || curl_status=$?
+          echo "Anonymous gallery OPTIONS: $metrics"
+
+          if (( curl_status != 0 )); then
+            echo "::error::Anonymous Marketplace gallery probe failed with curl exit $curl_status."
+            exit "$curl_status"
+          fi
+          if [[ "$metrics" != http_status=401\ * ]]; then
+            echo "::error::Anonymous Marketplace gallery probe expected HTTP 401."
+            exit 1
+          fi
+
+      - name: Verify Marketplace publisher access
+        id: publisher-access
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_only }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${VSCE_PAT:-}" ]]; then
+            echo "::error::VSCE_PAT is not configured."
+            exit 1
+          fi
+          npx @vscode/vsce verify-pat hinnes
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Require successful Marketplace diagnostics
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.diagnostic_only }}
+        shell: bash
+        env:
+          ANONYMOUS_OUTCOME: ${{ steps.anonymous-marketplace.outcome }}
+          PUBLISHER_OUTCOME: ${{ steps.publisher-access.outcome }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$ANONYMOUS_OUTCOME" != "success" || "$PUBLISHER_OUTCOME" != "success" ]]; then
+            echo "::error::Marketplace diagnostics failed; inspect both probe steps."
+            exit 1
+          fi
+
       - name: Build and package VS Code extension
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic_only == false }}
         run: npm run build:vscode
 
       - name: Publish to VS Code Marketplace
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic_only == false }}
         # vsce reads the token from the VSCE_PAT environment variable, so the
         # secret never appears in the command line / process args.
         run: cd packages/vscode && npx @vscode/vsce publish --packagePath paseo.vsix
