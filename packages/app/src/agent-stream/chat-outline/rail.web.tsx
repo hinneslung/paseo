@@ -241,7 +241,7 @@ const styles = StyleSheet.create((theme) => ({
     ...theme.shadow.md,
   },
   previewText: {
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foreground,
   },
 }));

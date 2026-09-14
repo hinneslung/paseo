@@ -27,6 +27,21 @@ interface AvailableDesktopEditorBridge {
   openTarget: NonNullable<DesktopEditorBridge["openTarget"]>;
 }
 
+interface SelectDesktopOpenTargetsInput {
+  canListTargets: boolean;
+  targets: DesktopOpenTarget[] | undefined;
+}
+
+export function selectDesktopOpenTargets({
+  canListTargets,
+  targets,
+}: SelectDesktopOpenTargetsInput): DesktopOpenTarget[] {
+  if (!canListTargets) {
+    return [];
+  }
+  return targets ?? [];
+}
+
 function getDesktopEditorBridge(): AvailableDesktopEditorBridge | null {
   const bridge = getDesktopHost()?.editor;
   if (!bridge?.listTargets || !bridge.openTarget) {
@@ -68,9 +83,13 @@ export function useDesktopOpenTargets(input: { isLocalExecution: boolean }) {
     retry: false,
     queryFn: listDesktopOpenTargets,
   });
+  const targets = selectDesktopOpenTargets({
+    canListTargets,
+    targets: query.data,
+  });
 
   return {
-    targets: query.data ?? [],
+    targets,
     isAvailable: canListTargets,
   };
 }

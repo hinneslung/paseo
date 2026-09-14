@@ -23,7 +23,7 @@ function makeAgent(input: {
     id: input.id,
     provider: "codex",
     status: "idle",
-    activeTurn: null,
+    turn: { phase: "idle", cancellationRequestId: null },
     createdAt,
     updatedAt: createdAt,
     lastUserMessageAt: null,
@@ -367,6 +367,7 @@ describe("workspace agent visibility", () => {
         terminalsHydrated: true,
         knownTerminalIds: ["terminal-1", "script-terminal"],
         standaloneTerminalIds: ["terminal-1"],
+        hasActivePendingTerminalCreate: false,
         hasActivePendingDraftCreate: false,
       }),
     ).toEqual({
@@ -377,6 +378,7 @@ describe("workspace agent visibility", () => {
       knownAgentIds: agentVisibility.knownAgentIds,
       knownTerminalIds: ["terminal-1", "script-terminal"],
       standaloneTerminalIds: ["terminal-1"],
+      hasActivePendingTerminalCreate: false,
       hasActivePendingDraftCreate: false,
     });
   });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defaultHostAppearance } from "@/hosts/appearance";
 import {
+  createRemoteSshHostConnection,
   normalizeStoredHostProfile,
   orderHostsLocalFirst,
   resolveActiveHostServerId,
@@ -127,7 +128,6 @@ describe("normalizeStoredHostProfile", () => {
           id: "bridge:localhost:6767",
           type: "directTcpBridge",
           endpoint: "127.0.0.1:6767",
-          password: "not-used-in-webview",
         },
       ],
     });
@@ -137,6 +137,21 @@ describe("normalizeStoredHostProfile", () => {
       type: "directTcpBridge",
       endpoint: "127.0.0.1:6767",
     });
+  });
+
+  it("rejects passwords in renderer-owned bridge connections", () => {
+    expect(
+      normalizeStoredHostProfile({
+        serverId: "srv_vscode",
+        connections: [
+          {
+            type: "directTcpBridge",
+            endpoint: "127.0.0.1:6767",
+            password: "must-stay-in-extension-host",
+          },
+        ],
+      }),
+    ).toBeNull();
   });
 
   it("drops invalid direct TCP bridge connections", () => {
@@ -175,6 +190,51 @@ describe("normalizeStoredHostProfile", () => {
     });
 
     expect(profile?.appearance).toEqual({ color: "teal", badgeDisplay: "icon" });
+  });
+
+  it("normalizes stored Remote SSH connection parameters", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_ssh",
+      connections: [
+        {
+          type: "remoteSsh",
+          host: " deploy@example.com ",
+          sshPort: 2222,
+          daemonPort: 7777,
+        },
+      ],
+    });
+
+    expect(profile?.connections[0]).toEqual({
+      id: "ssh:deploy%40example.com:2222:7777",
+      type: "remoteSsh",
+      host: "deploy@example.com",
+      sshPort: 2222,
+      daemonPort: 7777,
+    });
+  });
+});
+
+describe("createRemoteSshHostConnection", () => {
+  it("keeps optional SSH settings absent", () => {
+    expect(createRemoteSshHostConnection({ host: "build-box" })).toEqual({
+      id: "ssh:build-box::",
+      type: "remoteSsh",
+      host: "build-box",
+    });
+  });
+
+  it("rejects invalid SSH destinations and ports", () => {
+    expect(() => createRemoteSshHostConnection({ host: "" })).toThrow("SSH host is required");
+    expect(() => createRemoteSshHostConnection({ host: "bad host" })).toThrow(
+      "SSH host is invalid",
+    );
+    expect(() => createRemoteSshHostConnection({ host: "build-box", sshPort: 70000 })).toThrow(
+      "SSH port must be between 1 and 65535",
+    );
+    expect(() => createRemoteSshHostConnection({ host: "build-box", daemonPort: 0 })).toThrow(
+      "Daemon port must be between 1 and 65535",
+    );
   });
 });
 
@@ -238,6 +298,43 @@ describe("upsertHostConnectionInProfiles", () => {
 
     expect(profile.connections).toEqual([replacement]);
     expect(profile.preferredConnectionId).toBe(replacement.id);
+  });
+
+  it("uses the reported hostname when a bridge connection re-keys to another daemon", () => {
+    const existing: HostProfile = {
+      ...makeHost("srv_machine_a"),
+      label: "machine-a",
+      connections: [connection],
+      preferredConnectionId: connection.id,
+    };
+
+    const [profile] = upsertHostConnectionInProfiles({
+      profiles: [existing],
+      serverId: "srv_machine_b",
+      label: "machine-b",
+      connection,
+    });
+
+    expect(profile.serverId).toBe("srv_machine_b");
+    expect(profile.label).toBe("machine-b");
+  });
+
+  it("keeps a custom label when the same daemon reconnects", () => {
+    const existing: HostProfile = {
+      ...makeHost("srv_known"),
+      label: "my laptop",
+      connections: [connection],
+      preferredConnectionId: connection.id,
+    };
+
+    const [profile] = upsertHostConnectionInProfiles({
+      profiles: [existing],
+      serverId: "srv_known",
+      label: "hostname-from-daemon",
+      connection,
+    });
+
+    expect(profile.label).toBe("my laptop");
   });
 });
 

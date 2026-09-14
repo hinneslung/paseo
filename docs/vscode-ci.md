@@ -93,16 +93,17 @@ Also runs inside `vscode-smoke`. The wrapper
 [run-smoke-with-daemon.mjs](../packages/vscode/scripts/run-smoke-with-daemon.mjs)
 uses the shared
 [daemon-harness.mjs](../packages/vscode/scripts/lib/daemon-harness.mjs) helper to
-boot a real password-protected Paseo daemon on `127.0.0.1:6788`. The helper
-writes `~/.paseo/config.json` with the daemon listen target and starts the daemon
-with `PASEO_PASSWORD` set. The wrapper then runs the smoke with
+boot a real password-protected Paseo daemon on `127.0.0.1:6788`. The wrapper
+creates a scratch user home, writes its home-relative `.paseo/config.json`, and
+starts the daemon with `PASEO_PASSWORD` set. The smoke inherits that scratch
+`HOME`/`USERPROFILE` and runs with
 `PASEO_VSCODE_TEST_PASSWORD` set so `runBridgeRoundTrip`
 ([vscode-smoke.ts](../packages/vscode/src/test/vscode-smoke.ts)) executes.
 
 This exercises **config discovery (the `~` expansion path) + the authenticated
 transport handshake end-to-end** on Linux and Windows. Windows directly guards
-the `da0be24d` class because the fixture writes the real home-relative config
-path that `expandHomePath` must resolve.
+the `da0be24d` class because the fixture writes the home-relative config path
+that `expandHomePath` must resolve.
 
 ### Layer 3 — workspace-open + file-link e2e (CI: ubuntu)
 
@@ -148,9 +149,9 @@ The job uploads `packages/vscode/artifacts/vscode-e2e` on failure.
 
 - Linux display is resolved by using `xvfb-run -a` for both smoke and Layer 3;
   keep that wrapper unless a replacement is proven in CI.
-- Windows home-path layout for `config.json` is covered by Layer 2. Do not move
-  the fixture away from `~/.paseo/config.json`; that path is the thing under
-  test.
+- Windows home-path layout for `config.json` is covered by Layer 2. Keep the
+  fixture at `~/.paseo/config.json` under the scratch home; never write the
+  runner user's real config.
 - The deferred file-link spec still needs a supported deterministic agent
   timeline fixture, not the manual scripts' live LAN daemon or guessed private
   JSON.

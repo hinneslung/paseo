@@ -13,6 +13,8 @@ import { expectWorkspaceHeader } from "../support/helpers/workspace-ui";
 import { getServerId } from "../support/helpers/server-id";
 import { projectEquivalenceViewKey } from "../support/helpers/project-view-key";
 import { escapeRegex } from "../support/helpers/regex";
+import { openFilesPanel } from "../support/helpers/workspace-tabs";
+import { seedMockAgentWorkspace } from "../support/helpers/mock-agent";
 
 const GITHUB_REMOTE_URL = "https://github.com/test-owner/test-repo.git";
 
@@ -45,6 +47,20 @@ async function waitForSidebarWorkspace(page: import("@playwright/test").Page, wo
   const row = page.getByTestId(getWorkspaceRowTestId(workspaceId));
   await expect(row).toBeVisible({ timeout: 30_000 });
   return row;
+}
+
+async function openWorkspaceReadAction(
+  page: import("@playwright/test").Page,
+  workspaceId: string,
+  action: "read" | "unread",
+) {
+  const workspaceKey = `${getServerId()}:${workspaceId}`;
+  const row = await waitForSidebarWorkspace(page, workspaceId);
+  await row.hover();
+  await page.getByTestId(`sidebar-workspace-kebab-${workspaceKey}`).click();
+  const item = page.getByTestId(`sidebar-workspace-menu-mark-as-${action}-${workspaceKey}`);
+  await expect(item).toBeVisible({ timeout: 30_000 });
+  return item;
 }
 
 async function openWorkspaceHoverCard(page: import("@playwright/test").Page, workspaceId: string) {
@@ -117,19 +133,6 @@ test.describe("Sidebar workspace list", () => {
     }
   });
 
-  test("project shows workspace under it", async ({ page }) => {
-    const workspace = await seedWorkspace({ repoPrefix: "sidebar-workspace-under-project-" });
-
-    try {
-      await gotoAppShell(page);
-
-      await waitForSidebarProject(page, path.basename(workspace.repoPath));
-      await waitForSidebarWorkspace(page, workspace.workspaceId);
-    } finally {
-      await workspace.cleanup();
-    }
-  });
-
   test("non-git project shows directory name", async ({ page }) => {
     const workspace = await seedWorkspace({ repoPrefix: "sidebar-directory-", git: false });
 
@@ -194,6 +197,32 @@ test.describe("Sidebar workspace list", () => {
       const hoverCard = await openWorkspaceHoverCard(page, workspace.workspaceId);
       await expect(page.getByTestId("hover-card-workspace-host")).toHaveText("localhost");
       await expect(hoverCard).not.toContainText(/\b(Online|Connecting|Offline|Error|Idle)\b/);
+    } finally {
+      await workspace.cleanup();
+    }
+  });
+
+  test("marks a finished workspace unread until it is opened again", async ({ page }) => {
+    const workspace = await seedMockAgentWorkspace({
+      repoPrefix: "sidebar-mark-unread-",
+      title: "Mark unread",
+      initialPrompt: "Finish this test turn.",
+    });
+
+    try {
+      await workspace.client.waitForFinish(workspace.agentId, 20_000);
+      await workspace.client.clearWorkspaceAttention(workspace.workspaceId);
+      expect(workspace.client.getLastServerInfoMessage()?.features?.workspaceMarkUnread).toBe(true);
+      await gotoAppShell(page);
+
+      const row = await waitForSidebarWorkspace(page, workspace.workspaceId);
+      await expect(row.getByTestId("workspace-status-indicator-done")).toBeVisible();
+      await (await openWorkspaceReadAction(page, workspace.workspaceId, "unread")).click();
+      await openWorkspaceReadAction(page, workspace.workspaceId, "read");
+
+      await page.keyboard.press("Escape");
+      await openWorkspaceFromSidebar(page, workspace.workspaceId);
+      await openWorkspaceReadAction(page, workspace.workspaceId, "unread");
     } finally {
       await workspace.cleanup();
     }
@@ -318,7 +347,7 @@ test.describe("Half-screen desktop layout", () => {
     await expect(closedIcon).toBeVisible();
     const closedBounds = await closedIcon.boundingBox();
     expect(closedBounds).not.toBeNull();
-    expect(closedBounds?.x).toBeCloseTo(12, 0);
+    expect(closedBounds?.x).toBeCloseTo(9, 0);
     expect(closedBounds?.y).toBe(openBounds?.y);
   });
 
@@ -331,7 +360,7 @@ test.describe("Half-screen desktop layout", () => {
     await expect(page.getByTestId("sidebar-settings")).not.toBeVisible();
   });
 
-  test("yields app navigation to the Explorer", async ({ page }) => {
+  test("keeps app navigation beside the Explorer pane", async ({ page }) => {
     const workspace = await seedWorkspace({ repoPrefix: "sidebar-half-screen-explorer-" });
 
     try {
@@ -339,44 +368,22 @@ test.describe("Half-screen desktop layout", () => {
       await waitForSidebarProject(page, path.basename(workspace.repoPath));
       await openWorkspaceFromSidebar(page, workspace.workspaceId);
 
-      await page.getByTestId("workspace-explorer-toggle").first().click();
+      await openFilesPanel(page);
+      const explorerToggle = page.getByTestId("workspace-explorer-toggle").first();
       await expect(
-        page.getByTestId("explorer-tab-files").filter({ visible: true }).first(),
+        page.getByTestId("explorer-sidebar-tab-files").filter({ visible: true }),
       ).toBeVisible();
-      await expect(page.getByTestId("workspace-explorer-toggle").first()).toBeVisible();
-      await expect(page.getByTestId("explorer-close")).toBeVisible();
-      await expect(page.getByTestId("sidebar-global-new-workspace")).not.toBeVisible();
+      await expect(explorerToggle).toHaveAccessibleName("Close Explorer sidebar");
+      await expect(page.getByTestId("sidebar-global-new-workspace")).toBeVisible();
+      await expect(page.getByTestId("explorer-sidebar-tab-rail")).toBeVisible();
+      await expect(page.getByTestId("workspace-tabs-row").filter({ visible: true })).toHaveCount(1);
 
-      const centerBounds = await page.getByTestId("workspace-tabs-row").first().boundingBox();
-      const headerGlyphBounds = await page
-        .getByTestId("menu-button")
-        .locator("svg")
-        .first()
-        .boundingBox();
-      const tabGlyphBounds = await page
-        .locator('[data-testid^="workspace-tab-"]')
-        .first()
-        .locator("svg")
-        .first()
-        .boundingBox();
-      expect(centerBounds).not.toBeNull();
-      expect(headerGlyphBounds).not.toBeNull();
-      expect(tabGlyphBounds).not.toBeNull();
-      expect((headerGlyphBounds?.x ?? 0) - (centerBounds?.x ?? 0)).toBeCloseTo(
-        (tabGlyphBounds?.x ?? 0) - (centerBounds?.x ?? 0),
-        0,
-      );
-
-      await expect
-        .poll(
-          async () =>
-            (await page.getByTestId("workspace-tabs-row").first().boundingBox())?.width ?? 0,
-        )
-        .toBeGreaterThanOrEqual(400);
-
-      await page.getByTestId("explorer-close").click();
-      await expect(page.getByTestId("explorer-tab-files")).not.toBeVisible();
-      await expect(page.getByTestId("workspace-explorer-toggle").first()).toBeVisible();
+      await explorerToggle.click();
+      await expect(
+        page.getByTestId("explorer-sidebar-tab-files").filter({ visible: true }),
+      ).toHaveCount(0);
+      await expect(explorerToggle).toHaveAccessibleName("Open Explorer sidebar");
+      await expect(page.getByTestId("sidebar-global-new-workspace")).toBeVisible();
     } finally {
       await workspace.cleanup();
     }

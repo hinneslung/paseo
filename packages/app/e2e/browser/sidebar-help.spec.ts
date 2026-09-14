@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "../support/fixtures";
 import { gotoAppShell, openSettings } from "../support/helpers/app";
 import { openSettingsSection } from "../support/helpers/settings";
+import { openWhatsNew, release, serveChangelog } from "../support/helpers/changelog";
 
 const DISCORD_DESTINATION =
   /^https:\/\/(?:discord\.gg\/jz8T2uahpH|discord\.com\/invite\/jz8T2uahpH)(?:[/?#]|$)/;
@@ -41,46 +42,79 @@ async function expectExternalPage(
   await popup.close();
 }
 
-test("opens troubleshooting tools from the sidebar help menu", async ({ page }) => {
+test("opens troubleshooting and support destinations", async ({ page }) => {
   await gotoAppShell(page);
   await expect(page.getByTestId("sidebar-help")).toBeVisible();
 
-  await openHelpMenu(page);
-  const triggerBox = await page.getByTestId("sidebar-help").evaluate((element) => {
-    const { y, height } = element.getBoundingClientRect();
-    return { y, height };
-  });
-  const menuBox = await page.getByTestId("sidebar-help-menu").evaluate((element) => {
-    const { y, height } = element.getBoundingClientRect();
-    return { y, height };
-  });
-  expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(triggerBox.y);
-  await expect(page.getByText("Help", { exact: true })).toBeVisible();
-  await expect(page.getByText("Report an issue", { exact: true })).toBeVisible();
-  await expect(page.getByText("What's new", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("sidebar-help-version")).toHaveText(APP_VERSION);
+  await test.step("opens diagnostics and keyboard shortcuts", async () => {
+    await openHelpMenu(page);
+    await expect(page.getByText("Help", { exact: true })).toBeVisible();
+    await expect(page.getByText("Report an issue", { exact: true })).toBeVisible();
+    await expect(page.getByText("What's new", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("sidebar-help-version")).toHaveText(APP_VERSION);
 
-  await page.getByTestId("sidebar-help-diagnostics").click();
-  await expectDiagnosticReport(page);
-  await closeSheet(page, "app-diagnostic-sheet");
+    await page.getByTestId("sidebar-help-diagnostics").click();
+    await expectDiagnosticReport(page);
+    await closeSheet(page, "app-diagnostic-sheet");
 
-  await openHelpMenu(page);
-  await page.getByTestId("sidebar-help-shortcuts").click();
-  await expect(page.getByTestId("keyboard-shortcuts-dialog")).toBeVisible();
-  await closeSheet(page, "keyboard-shortcuts-dialog");
+    await openHelpMenu(page);
+    await page.getByTestId("sidebar-help-shortcuts").click();
+    await expect(page.getByTestId("keyboard-shortcuts-dialog")).toBeVisible();
+    await closeSheet(page, "keyboard-shortcuts-dialog");
+  });
+
+  await test.step("opens support pages", async () => {
+    await openHelpMenu(page);
+    await expectExternalPage(page, "sidebar-help-discord", DISCORD_DESTINATION);
+
+    await openHelpMenu(page);
+    await expectExternalPage(page, "sidebar-help-github", GITHUB_ISSUE_DESTINATION);
+  });
 });
 
-test("opens support and release destinations", async ({ page }) => {
+test("renders the changelog in the app and links the website", async ({ page }) => {
+  // A callout, a section name the app has never seen, and a fenced sample whose
+  // contents look like a release heading.
+  await serveChangelog(page, [
+    "# Changelog",
+    "",
+    "## 9.1.0 - 2026-03-04",
+    "",
+    "Headline release note.",
+    "",
+    "> [!WARNING]",
+    "> Read this before upgrading.",
+    "",
+    "### Sparkles",
+    "",
+    "- Added a brand new thing",
+    "",
+    "```md",
+    "## 0.0.0 - 1999-01-01",
+    "```",
+    "",
+    "## 9.0.0 - 2026-02-01",
+    "",
+    "### Fixed",
+    "",
+    "- Fixed an older thing",
+    "",
+  ]);
   await gotoAppShell(page);
 
-  await openHelpMenu(page);
-  await expectExternalPage(page, "sidebar-help-discord", DISCORD_DESTINATION);
+  const sheet = await openWhatsNew(page);
+  const latest = release(sheet, "9.1.0");
 
-  await openHelpMenu(page);
-  await expectExternalPage(page, "sidebar-help-github", GITHUB_ISSUE_DESTINATION);
+  await expect(latest.getByText("March 4, 2026", { exact: true })).toBeVisible();
+  await expect(latest.getByText("Headline release note.")).toBeVisible();
+  await expect(latest.getByText("Read this before upgrading.")).toBeVisible();
+  await expect(latest.getByText("Sparkles", { exact: true })).toBeVisible();
+  await expect(latest.getByText("Added a brand new thing")).toBeVisible();
+  await expect(release(sheet, "9.0.0")).toBeVisible();
+  await expect(release(sheet, "0.0.0")).toHaveCount(0);
 
-  await openHelpMenu(page);
-  await expectExternalPage(page, "sidebar-help-changelog", CHANGELOG_DESTINATION);
+  await expectExternalPage(page, "changelog-open-website", CHANGELOG_DESTINATION);
+  await closeSheet(page, "changelog-sheet");
 });
 
 test("searches keyboard shortcuts from the sidebar help menu", async ({ page }) => {

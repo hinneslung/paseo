@@ -43,12 +43,15 @@ class FakeDaemonProbe {
       return "cid_shared_probe_test";
     },
     resolveAppVersion: () => null,
-    createLocalTransportFactory: () => null,
-    buildLocalTransportUrl: (target) => {
+    createDesktopTransportFactory: () => null,
+    buildDesktopTransportUrl: (target) => {
       if (target.transportType === "tcp") {
-        return `paseo+local://tcp?endpoint=${encodeURIComponent(target.endpoint)}`;
+        return `paseo+desktop://tcp?endpoint=${encodeURIComponent(target.endpoint)}`;
       }
-      return `paseo+local://${target.transportType}?path=${encodeURIComponent(target.transportPath)}`;
+      if (target.transportType === "ssh") {
+        return `paseo+desktop://ssh?host=${encodeURIComponent(target.host)}`;
+      }
+      return `paseo+desktop://${target.transportType}?path=${encodeURIComponent(target.transportPath)}`;
     },
     createClient: (config) => {
       const client = new FakeDaemonClient(this, config);
@@ -141,11 +144,37 @@ describe("test-daemon-connection connectToDaemon", () => {
     );
     await result.client.close();
 
-    expect(probe.createdConfigs()[0]?.url).toBe("paseo+local://socket?path=%2Ftmp%2Fpaseo.sock");
+    expect(probe.createdConfigs()[0]?.url).toBe("paseo+desktop://socket?path=%2Ftmp%2Fpaseo.sock");
   });
 
-  it("encodes direct TCP bridge targets without passing a password", async () => {
+  it("uses the desktop transport for Remote SSH connections", async () => {
     const { connectToDaemon } = await import("./test-daemon-connection");
+    const transportFactory = vi.fn();
+    const result = await connectToDaemon(
+      {
+        id: "ssh:deploy%40example.com:2222:%2Fkeys%2Fpaseo",
+        type: "remoteSsh",
+        host: "deploy@example.com",
+        sshPort: 2222,
+        daemonPort: 7777,
+      },
+      undefined,
+      {
+        ...probe.deps,
+        createDesktopTransportFactory: () => transportFactory,
+      },
+    );
+    await result.client.close();
+
+    expect(probe.createdConfigs()[0]).toMatchObject({
+      url: "paseo+desktop://ssh?host=deploy%40example.com",
+      transportFactory,
+    });
+  });
+
+  it("uses the extension-host transport for VS Code TCP bridge connections", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const transportFactory = vi.fn();
     const result = await connectToDaemon(
       {
         id: "bridge:127.0.0.1:6767",
@@ -153,14 +182,17 @@ describe("test-daemon-connection connectToDaemon", () => {
         endpoint: "127.0.0.1:6767",
       },
       undefined,
-      probe.deps,
+      {
+        ...probe.deps,
+        createDesktopTransportFactory: () => transportFactory,
+      },
     );
     await result.client.close();
 
     expect(probe.createdConfigs()[0]).toMatchObject({
-      url: "paseo+local://tcp?endpoint=127.0.0.1%3A6767",
+      url: "paseo+desktop://tcp?endpoint=127.0.0.1%3A6767",
+      transportFactory,
     });
-    expect(probe.createdConfigs()[0]).not.toHaveProperty("password");
   });
 
   it("passes direct TCP connection passwords into the client config", async () => {

@@ -8,13 +8,12 @@ import type { ListTerminalsResponse } from "@getpaseo/protocol/messages";
 import { deriveTerminalActivityStatusBucket } from "@getpaseo/protocol/terminal-activity";
 import { TerminalPane } from "@/components/terminal-pane";
 import { usePaneContext, usePaneFocus } from "@/panels/pane-context";
-import type { PanelDescriptor, PanelRegistration } from "@/panels/panel-registry";
+import { definePanel, type PanelDescriptor } from "@/panels/panel-registry";
 import { queryClient } from "@/data/query-client";
 import { buildTerminalsQueryKey } from "@/screens/workspace/terminals/state";
 import { usePanelStore } from "@/stores/panel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useWorkspaceDirectory, useWorkspaceFields } from "@/stores/session-store-hooks";
-import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 type ListTerminalsPayload = ListTerminalsResponse["payload"];
 
@@ -70,7 +69,7 @@ function useTerminalPanelDescriptor(
     label,
     subtitle: t("workspace.tabs.fallback.terminal"),
     tooltip: label,
-    titleState: "ready",
+    titleState: terminalsQuery.isPending ? "loading" : "ready",
     icon: Terminal,
     statusBucket: deriveTerminalActivityStatusBucket(terminal?.activity),
   };
@@ -85,17 +84,13 @@ function TerminalPanel() {
   }));
   const workspaceDirectory = workspaceFields?.workspaceDirectory || null;
   const isGitCheckout = workspaceFields?.isGitCheckout ?? false;
-  const showFileExplorer = getWorkspaceSurfaceConfig().showFileExplorer;
-  const openFileExplorerForCheckout = usePanelStore((state) => state.openFileExplorerForCheckout);
+  const openCompactFileExplorer = usePanelStore((state) => state.openCompactFileExplorer);
   const handleOpenFileExplorer = useCallback(() => {
-    if (!showFileExplorer || !workspaceDirectory) {
+    if (!workspaceDirectory) {
       return;
     }
-    openFileExplorerForCheckout({
-      isCompact: true,
-      checkout: { serverId, cwd: workspaceDirectory, isGit: isGitCheckout },
-    });
-  }, [isGitCheckout, openFileExplorerForCheckout, serverId, showFileExplorer, workspaceDirectory]);
+    openCompactFileExplorer({ serverId, cwd: workspaceDirectory, isGit: isGitCheckout });
+  }, [isGitCheckout, openCompactFileExplorer, serverId, workspaceDirectory]);
   invariant(target.kind === "terminal", "TerminalPanel requires terminal target");
 
   if (!workspaceDirectory) {
@@ -119,8 +114,7 @@ function TerminalPanel() {
   );
 }
 
-export const terminalPanelRegistration: PanelRegistration<"terminal"> = {
-  kind: "terminal",
+export const terminalPanelRegistration = definePanel("terminal", {
   component: TerminalPanel,
   useDescriptor: useTerminalPanelDescriptor,
-};
+});

@@ -1,6 +1,6 @@
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { useState, useCallback, useMemo } from "react";
-import { View, Text, TextInput, Pressable, type PressableStateCallbackType } from "react-native";
+import { View, Text, Pressable, type PressableStateCallbackType } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { Check, X } from "lucide-react-native";
@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import type { PendingPermission } from "@/types/shared";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { isWeb } from "@/constants/platform";
+import { EditingTextInput as TextInput } from "@/components/ui/text-input";
 import {
   areQuestionsAnswered,
   buildQuestionFormAnswers,
@@ -79,8 +80,11 @@ function QuestionOptionRow({
   );
 
   const optionLabelStyle = useMemo(
-    () => [styles.optionLabel, { color: theme.colors.foreground }],
-    [theme.colors.foreground],
+    () => [
+      styles.optionLabel,
+      { color: isSelected ? theme.colors.foreground : theme.colors.foregroundMuted },
+    ],
+    [isSelected, theme.colors.foreground, theme.colors.foregroundMuted],
   );
   const optionDescriptionStyle = useMemo(
     () => [styles.optionDescription, { color: theme.colors.foregroundMuted }],
@@ -95,11 +99,11 @@ function QuestionOptionRow({
       styles.selectionControl,
       multiSelect ? styles.selectionControlCheckbox : styles.selectionControlRadio,
       {
-        borderColor: isSelected ? theme.colors.accent : theme.colors.foregroundMuted,
+        borderColor: isSelected ? theme.colors.accent : theme.colors.foregroundExtraMuted,
         backgroundColor: isSelected && multiSelect ? theme.colors.accent : "transparent",
       },
     ],
-    [isSelected, multiSelect, theme.colors.accent, theme.colors.foregroundMuted],
+    [isSelected, multiSelect, theme.colors.accent, theme.colors.foregroundExtraMuted],
   );
   const radioDotStyle = useMemo(
     () => [styles.selectionRadioDot, { backgroundColor: theme.colors.accent }],
@@ -304,7 +308,7 @@ function QuestionOtherInput({
       accessibilityLabel={accessibilityLabel}
       placeholder={placeholder}
       placeholderTextColor={theme.colors.foregroundMuted}
-      value={value}
+      initialValue={value}
       onChangeText={handleChange}
       onSubmitEditing={onSubmit}
       editable={!isResponding}
@@ -627,7 +631,7 @@ const styles = StyleSheet.create((theme) => ({
   questionText: {
     flex: 1,
     fontSize: theme.fontSize.base,
-    fontWeight: theme.fontWeight.medium,
+    fontWeight: theme.fontWeight.normal,
     lineHeight: 22,
   },
   optionsWrap: {
@@ -651,8 +655,8 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: theme.borderWidth[1],
   },
   questionNavText: {
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
+    fontSize: theme.fontSize.base,
+    fontWeight: theme.fontWeight.normal,
   },
   optionItem: {
     flexDirection: "row",
@@ -676,11 +680,11 @@ const styles = StyleSheet.create((theme) => ({
   },
   optionLabel: {
     fontSize: theme.fontSize.base,
-    fontWeight: theme.fontWeight.semibold,
+    fontWeight: theme.fontWeight.normal,
     lineHeight: 22,
   },
   optionDescription: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     lineHeight: 20,
   },
   selectionControl: {
@@ -707,7 +711,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.borderRadius.lg,
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[3],
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
   actionsContainer: {
     gap: theme.spacing[2],
@@ -730,6 +734,6 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
   },
   actionText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
 }));

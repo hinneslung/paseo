@@ -7,12 +7,18 @@ import {
   enrollmentTokenSchema,
   installResponseSchema,
   projectsResponseSchema,
+  triggersResponseSchema,
+  triggerInstallationResponseSchema,
+  triggerValidationResponseSchema,
   validationResponseSchema,
   type CliAuthorization,
   type CliAuthorizationPoll,
   type HubInstallResult,
   type HubConfigurationResources,
   type HubProject,
+  type HubTrigger,
+  type HubTriggerInstallationResult,
+  type HubTriggerValidationResult,
   type HubValidationResult,
 } from "./internal/contracts.js";
 import { requestHub } from "./internal/transport.js";
@@ -23,6 +29,9 @@ export type {
   HubInstallResult,
   HubConfigurationResources,
   HubProject,
+  HubTrigger,
+  HubTriggerInstallationResult,
+  HubTriggerValidationResult,
   HubValidationResult,
 } from "./internal/contracts.js";
 
@@ -81,6 +90,53 @@ export class HubHttpClient {
       failureMessage: "Hub project listing failed",
     });
     return response.projects;
+  }
+
+  async listTriggers(origin: string, apiKey: string): Promise<HubTrigger[]> {
+    const response = await requestHub({
+      origin,
+      path: "/api/v1/triggers",
+      method: "GET",
+      apiKey,
+      successStatus: 200,
+      schema: triggersResponseSchema,
+      failureMessage: "Hub trigger export failed",
+    });
+    return response.triggers;
+  }
+
+  validateTrigger(
+    origin: string,
+    apiKey: string,
+    yaml: string,
+  ): Promise<HubTriggerValidationResult> {
+    return requestHub({
+      origin,
+      path: "/api/v1/triggers/validate",
+      method: "POST",
+      apiKey,
+      body: { yaml },
+      successStatus: 200,
+      schema: triggerValidationResponseSchema,
+      failureMessage: "Hub trigger validation failed",
+    });
+  }
+
+  installTrigger(
+    origin: string,
+    apiKey: string,
+    yaml: string,
+  ): Promise<HubTriggerInstallationResult> {
+    return requestHub({
+      origin,
+      path: "/api/v1/triggers/install",
+      method: "POST",
+      apiKey,
+      body: { yaml },
+      successStatus: 201,
+      schema: triggerInstallationResponseSchema,
+      failureMessage: "Hub trigger deployment failed",
+    });
   }
 
   listConfigurationResources(origin: string, apiKey: string): Promise<HubConfigurationResources> {
