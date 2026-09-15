@@ -541,6 +541,22 @@ function onceFirstHostIs(store: HostRuntimeStore, serverId: string): Promise<voi
   return onceHostListMatches(store, () => store.getHosts()[0]?.serverId === serverId);
 }
 
+function onceHostIsOnline(store: HostRuntimeStore, serverId: string): Promise<void> {
+  if (store.getSnapshot(serverId)?.connectionStatus === "online") {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let unsubscribe = (): void => {};
+    unsubscribe = store.subscribe(serverId, () => {
+      if (store.getSnapshot(serverId)?.connectionStatus !== "online") {
+        return;
+      }
+      unsubscribe();
+      resolve();
+    });
+  });
+}
+
 class BrowserClientLifecycle {
   public active: Array<{ serverId: string; connectionId: string }> = [];
 
@@ -977,7 +993,7 @@ describe("HostRuntimeController", () => {
         }),
         getClientId: async () => "cid_test_runtime",
       },
-      onReconcileServerId: () => undefined,
+      onAdoptServerId: () => "rejected",
     });
 
     await controller.start({ autoProbe: false });
@@ -3663,12 +3679,97 @@ describe("HostRuntimeStore", () => {
         await store.boot();
         await onceFirstHostIs(store, "srv_machine_b");
 
-        expect(store.getHosts()).toMatchObject([{ serverId: "srv_machine_b", label: "machine-b" }]);
-        expect(store.getSnapshot("srv_machine_a")).toBeNull();
-
-        store.syncHosts([]);
+        try {
+          await store.runProbeCycleNow("srv_machine_b");
+          expect(store.getHosts()).toHaveLength(1);
+          expect(store.getHosts()).toMatchObject([
+            { serverId: "srv_machine_b", label: "machine-b" },
+          ]);
+          expect(store.getSnapshot("srv_machine_a")).toBeNull();
+          expect(store.getSnapshot("srv_machine_b")?.connectionStatus).toBe("online");
+        } finally {
+          store.syncHosts([]);
+        }
       },
     );
+  });
+
+  it("moves only the bridge when the profile also reaches the daemon it names", async () => {
+    const direct: HostConnection = {
+      id: "direct:machine-a:6767",
+      type: "directTcp",
+      endpoint: "machine-a:6767",
+    };
+    const bridge: HostConnection = {
+      id: "bridge:127.0.0.1:6767",
+      type: "directTcpBridge",
+      endpoint: "127.0.0.1:6767",
+    };
+    const clientA = makeConnectedProbeClient(5);
+    const clientB = makeConnectedProbeClient(10);
+    // Hold the bridge until the direct connection is live, so the adoption has to decide what
+    // happens to a client that is already serving the profile.
+    const bridgeReply = createDeferred<{
+      client: DaemonClient;
+      serverId: string;
+      hostname: string;
+    }>();
+    const store = new HostRuntimeStore({
+      storage: createMemoryHostRuntimeStorage({
+        "@paseo:e2e": "1",
+        "@paseo:daemon-registry": JSON.stringify([
+          makeHost({
+            serverId: "srv_machine_a",
+            label: "machine-a",
+            connections: [direct, bridge],
+            preferredConnectionId: direct.id,
+          }),
+        ]),
+      }),
+      deps: {
+        createClient: () => {
+          throw new Error("The already connected probe client should be reused");
+        },
+        connectToDaemon: async ({ connection }) => {
+          if (connection.type === "directTcpBridge") {
+            return bridgeReply.promise;
+          }
+          return {
+            client: clientA as unknown as DaemonClient,
+            serverId: "srv_machine_a",
+            hostname: "machine-a",
+          };
+        },
+        getClientId: async () => "cid_test_runtime",
+      },
+    });
+
+    try {
+      await store.boot();
+      await onceHostIsOnline(store, "srv_machine_a");
+      expect(store.getClient("srv_machine_a")).toBe(clientA);
+
+      const cycle = store.runProbeCycleNow("srv_machine_a");
+      bridgeReply.resolve({
+        client: clientB as unknown as DaemonClient,
+        serverId: "srv_machine_b",
+        hostname: "machine-b",
+      });
+      await cycle;
+      await onceHostIsOnline(store, "srv_machine_b");
+
+      const hosts = store.getHosts();
+      expect(hosts.map((host) => host.serverId)).toEqual(["srv_machine_a", "srv_machine_b"]);
+      expect(hosts[0]?.label).toBe("machine-a");
+      expect(hosts[0]?.connections.map((connection) => connection.id)).toEqual([direct.id]);
+      expect(hosts[0]?.preferredConnectionId).toBe(direct.id);
+      expect(hosts[1]?.label).toBe("machine-b");
+      expect(hosts[1]?.connections.map((connection) => connection.id)).toEqual([bridge.id]);
+      expect(store.getClient("srv_machine_a")).toBe(clientA);
+      expect(store.getClient("srv_machine_b")).toBe(clientB);
+    } finally {
+      store.syncHosts([]);
+    }
   });
 
   it("uses the advertised hostname when adding a relay host from a pairing offer", async () => {
