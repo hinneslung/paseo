@@ -301,23 +301,26 @@ describe("upsertHostConnectionInProfiles", () => {
     expect(profile.preferredConnectionId).toBe(replacement.id);
   });
 
-  it("uses the reported hostname when a bridge connection re-keys to another daemon", () => {
+  it("keeps a user label when the same endpoint answers as a different daemon", () => {
+    // A daemon that resets its identity on the same endpoint is still the machine the user
+    // named, so the reported hostname does not replace the name they chose.
     const existing: HostProfile = {
-      ...makeHost("srv_machine_a"),
-      label: "machine-a",
+      ...makeHost("srv_before_reset"),
+      label: "my mac",
       connections: [connection],
       preferredConnectionId: connection.id,
     };
 
-    const [profile] = upsertHostConnectionInProfiles({
+    const profiles = upsertHostConnectionInProfiles({
       profiles: [existing],
-      serverId: "srv_machine_b",
-      label: "machine-b",
+      serverId: "srv_after_reset",
+      label: "hostname-from-daemon",
       connection,
     });
 
-    expect(profile.serverId).toBe("srv_machine_b");
-    expect(profile.label).toBe("machine-b");
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0].serverId).toBe("srv_after_reset");
+    expect(profiles[0].label).toBe("my mac");
   });
 
   it("keeps a custom label when the same daemon reconnects", () => {
