@@ -3687,6 +3687,7 @@ describe("HostRuntimeStore", () => {
           ]);
           expect(store.getSnapshot("srv_machine_a")).toBeNull();
           expect(store.getSnapshot("srv_machine_b")?.connectionStatus).toBe("online");
+          expect(store.getHosts()[0]?.label).toBe("machine-b");
         } finally {
           store.syncHosts([]);
         }

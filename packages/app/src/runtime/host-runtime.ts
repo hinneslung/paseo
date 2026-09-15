@@ -1362,8 +1362,8 @@ export class HostRuntimeController {
     throw new Error(`Connection resolved to ${input.serverId}, expected ${this.host.serverId}.`);
   }
 
-  adoptReconciledServerId(newServerId: string): void {
-    this.host = { ...this.host, serverId: newServerId };
+  adoptReconciledServerId(newServerId: string, label?: string): void {
+    this.host = { ...this.host, serverId: newServerId, label: label ?? this.host.label };
     this.snapshot = { ...this.snapshot, serverId: newServerId };
     for (const listener of this.listeners) {
       listener();
@@ -1827,7 +1827,9 @@ export class HostRuntimeStore {
         prepareAgent: (agentId) => directory.prepareAgentRoute(agentId),
       }),
     );
-    controller.adoptReconciledServerId(newServerId);
+    // The profile now names a different machine, so the stored label named the one it
+    // replaced.
+    controller.adoptReconciledServerId(newServerId, reportedLabel?.trim() || undefined);
     const snapshot = controller.getSnapshot();
     this.clearHostReplica(oldServerId);
     this.syncSessionReplica(newServerId, snapshot);
