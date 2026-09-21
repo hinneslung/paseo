@@ -200,16 +200,6 @@ function upsertHostConnectionById(
   return next;
 }
 
-function resolveUpsertedLabel(prev: HostProfile, serverId: string, label: string): string {
-  if (prev.label === prev.serverId) {
-    return label || serverId;
-  }
-  if (prev.serverId !== serverId && label) {
-    return label;
-  }
-  return prev.label;
-}
-
 export function upsertHostConnectionInProfiles(input: {
   profiles: HostProfile[];
   serverId: string;
@@ -257,7 +247,7 @@ export function upsertHostConnectionInProfiles(input: {
     input.connection,
   );
   const nextLifecycle = prev.lifecycle;
-  const nextLabel = resolveUpsertedLabel(prev, serverId, labelTrimmed);
+  const nextLabel = prev.label === prev.serverId ? derivedLabel : prev.label;
   const nextPreferredConnectionId =
     prev.preferredConnectionId &&
     nextConnections.some((connection) => connection.id === prev.preferredConnectionId)
@@ -299,6 +289,96 @@ export function upsertHostConnectionInProfiles(input: {
   const matchingIndexSet = new Set(matchingIndexes);
   const next = existing.filter((_daemon, index) => !matchingIndexSet.has(index));
   next.splice(firstIndex, 0, nextProfile);
+  return next;
+}
+
+/**
+ * Moves one connection onto the daemon that answered on it.
+ *
+ * A bridge endpoint names a different daemon on every machine, so a stored
+ * profile can hold a bridge connection that now reaches somewhere else while its
+ * other connections still reach the machine the profile names. Re-keying the
+ * whole profile would drag those connections — and the live client on one of
+ * them — under an id that never reported them, so only the connection that
+ * disagreed moves.
+ *
+ * The source profile is dropped when the moved connection was its last one.
+ */
+export function moveHostConnectionToServer(input: {
+  profiles: HostProfile[];
+  fromServerId: string;
+  serverId: string;
+  label?: string;
+  connection: HostConnection;
+  now?: string;
+}): HostProfile[] {
+  const serverId = input.serverId.trim();
+  if (!serverId) {
+    throw new Error("serverId is required");
+  }
+  if (serverId === input.fromServerId) {
+    return input.profiles;
+  }
+
+  const sourceIndex = input.profiles.findIndex(
+    (profile) => profile.serverId === input.fromServerId,
+  );
+  const source = sourceIndex === -1 ? null : input.profiles[sourceIndex];
+  if (!source || !source.connections.some((connection) => connection.id === input.connection.id)) {
+    return input.profiles;
+  }
+
+  const now = input.now ?? new Date().toISOString();
+  const label = input.label?.trim() ?? "";
+  const remaining = source.connections.filter(
+    (connection) => connection.id !== input.connection.id,
+  );
+
+  const next = input.profiles.flatMap((profile) => {
+    if (profile.serverId !== input.fromServerId) {
+      return [profile];
+    }
+    if (remaining.length === 0) {
+      return [];
+    }
+    return [
+      {
+        ...profile,
+        connections: remaining,
+        preferredConnectionId: remaining.some(
+          (connection) => connection.id === profile.preferredConnectionId,
+        )
+          ? profile.preferredConnectionId
+          : remaining[0].id,
+        updatedAt: now,
+      } satisfies HostProfile,
+    ];
+  });
+
+  const targetIndex = next.findIndex((profile) => profile.serverId === serverId);
+  if (targetIndex === -1) {
+    // A source that lost its last connection is gone from the list, so the daemon that
+    // replaced it takes its place. A source that survives keeps its own.
+    next.splice(remaining.length === 0 ? sourceIndex : next.length, 0, {
+      serverId,
+      label: label || serverId,
+      appearance: defaultHostAppearance(),
+      lifecycle: defaultLifecycle(),
+      connections: [input.connection],
+      preferredConnectionId: input.connection.id,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return next;
+  }
+
+  const target = next[targetIndex];
+  next[targetIndex] = {
+    ...target,
+    label: target.label === target.serverId && label ? label : target.label,
+    connections: upsertHostConnectionById(target.connections, input.connection),
+    updatedAt: now,
+  };
   return next;
 }
 

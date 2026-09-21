@@ -43,6 +43,9 @@ jobs:
       - name: Run VS Code unit tests
         run: cd packages/vscode && npx vitest run src/**/*.test.ts --bail=1
 
+      - name: Run host runtime unit tests
+        run: npm test --workspace=@getpaseo/app -- src/runtime/host-runtime.test.ts --bail=1
+
       - name: Upload VSIX artifact
         uses: actions/upload-artifact@v4
         with:

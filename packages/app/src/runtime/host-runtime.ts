@@ -10,6 +10,7 @@ import {
 import {
   connectionFromListen,
   createRemoteSshHostConnection,
+  moveHostConnectionToServer,
   normalizeStoredHostProfile,
   upsertHostConnectionInProfiles,
   registryHasConnection,
@@ -613,12 +614,27 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
   };
 }
 
+export interface AdoptServerIdInput {
+  previousServerId: string;
+  serverId: string;
+  hostname: string | null;
+  connection: HostConnection;
+  client: DaemonClient;
+}
+
+/**
+ * What the store did with a connection whose daemon reported a different server id.
+ *
+ * `rekeyed` re-points the whole profile, so the calling controller keeps the client.
+ * `moved` hands the connection and its client to another controller.
+ * `rejected` leaves the registry alone.
+ */
+export type AdoptServerIdResult = "rekeyed" | "moved" | "rejected";
+
 export class HostRuntimeController {
   private host: HostProfile;
   private deps: HostRuntimeControllerDeps;
-  private onReconcileServerId:
-    | ((oldId: string, newId: string, reportedLabel?: string) => void)
-    | null;
+  private onAdoptServerId: ((input: AdoptServerIdInput) => AdoptServerIdResult) | null;
   private connectionMachineState: HostRuntimeConnectionMachineState;
   private connectionEpoch = 0;
   private snapshot: HostRuntimeSnapshot;
@@ -641,11 +657,11 @@ export class HostRuntimeController {
   constructor(input: {
     host: HostProfile;
     deps?: HostRuntimeControllerDeps;
-    onReconcileServerId?: (oldId: string, newId: string, reportedLabel?: string) => void;
+    onAdoptServerId?: (input: AdoptServerIdInput) => AdoptServerIdResult;
   }) {
     this.host = input.host;
     this.deps = input.deps ?? createDefaultDeps();
-    this.onReconcileServerId = input.onReconcileServerId ?? null;
+    this.onAdoptServerId = input.onAdoptServerId ?? null;
     this.connectionMachineState = {
       tag: "booting",
     };
@@ -1005,18 +1021,7 @@ export class HostRuntimeController {
                 connection,
               });
               if (serverId !== this.host.serverId) {
-                const canReconcileServerId =
-                  isPlaceholderServerId(this.host.serverId) ||
-                  connection.type === "directTcpBridge";
-                if (canReconcileServerId && this.onReconcileServerId) {
-                  this.onReconcileServerId(this.host.serverId, serverId, hostname ?? undefined);
-                }
-                if (serverId !== this.host.serverId) {
-                  await client.close().catch(() => undefined);
-                  throw new Error(
-                    `Connection resolved to ${serverId}, expected ${this.host.serverId}.`,
-                  );
-                }
+                await this.settleServerIdMismatch({ serverId, hostname, connection, client });
               }
               connectedClient = client;
               shouldCloseClient = true;
@@ -1321,8 +1326,44 @@ export class HostRuntimeController {
     }
   }
 
-  adoptReconciledServerId(newServerId: string): void {
-    this.host = { ...this.host, serverId: newServerId };
+  /**
+   * Handles a connection whose daemon reported a server id this host does not have.
+   *
+   * Returns once the host adopted that id, and throws otherwise so the caller stops probing
+   * a connection that is no longer its own.
+   */
+  private async settleServerIdMismatch(input: {
+    serverId: string;
+    hostname: string | null;
+    connection: HostConnection;
+    client: DaemonClient;
+  }): Promise<void> {
+    // A bridge endpoint names a different daemon on every machine, so a disagreeing serverId
+    // means the stored profile is stale rather than the wrong daemon.
+    const canAdoptServerId =
+      isPlaceholderServerId(this.host.serverId) || input.connection.type === "directTcpBridge";
+    const adoption =
+      canAdoptServerId && this.onAdoptServerId
+        ? this.onAdoptServerId({
+            previousServerId: this.host.serverId,
+            serverId: input.serverId,
+            hostname: input.hostname,
+            connection: input.connection,
+            client: input.client,
+          })
+        : "rejected";
+    if (input.serverId === this.host.serverId) {
+      return;
+    }
+    // A moved connection took the client with it; anything else leaves it here to close.
+    if (adoption !== "moved") {
+      await input.client.close().catch(() => undefined);
+    }
+    throw new Error(`Connection resolved to ${input.serverId}, expected ${this.host.serverId}.`);
+  }
+
+  adoptReconciledServerId(newServerId: string, label?: string): void {
+    this.host = { ...this.host, serverId: newServerId, label: label ?? this.host.label };
     this.snapshot = { ...this.snapshot, serverId: newServerId };
     for (const listener of this.listeners) {
       listener();
@@ -1700,16 +1741,63 @@ export class HostRuntimeStore {
     }
   }
 
-  reconcileServerId(oldServerId: string, newServerId: string, reportedLabel?: string): void {
+  /**
+   * Re-points a stored profile at the daemon a connection actually reported.
+   *
+   * A profile that only reaches the daemon through this one connection is
+   * re-keyed whole, which keeps its controller, live client, and subscribers.
+   * A profile with other connections keeps them — and the id they report — and
+   * only the disagreeing connection moves.
+   */
+  private adoptServerId(adoption: AdoptServerIdInput): AdoptServerIdResult {
+    const profile = this.hosts.find((host) => host.serverId === adoption.previousServerId);
+    if (!profile) {
+      return "rejected";
+    }
+    if (profile.connections.length <= 1) {
+      const rekeyed = this.reconcileServerId(
+        adoption.previousServerId,
+        adoption.serverId,
+        adoption.hostname ?? undefined,
+      );
+      return rekeyed ? "rekeyed" : "rejected";
+    }
+    const next = moveHostConnectionToServer({
+      profiles: this.hosts,
+      fromServerId: adoption.previousServerId,
+      serverId: adoption.serverId,
+      label: adoption.hostname ?? undefined,
+      connection: adoption.connection,
+    });
+    if (next === this.hosts) {
+      return "rejected";
+    }
+    // The client already proved which daemon it reaches, so the host that now owns the
+    // connection takes it instead of dialing again.
+    this.setHostsAndSync(next, {
+      initialConnectionByServerId: new Map([
+        [
+          adoption.serverId,
+          { connectionId: adoption.connection.id, existingClient: adoption.client },
+        ],
+      ]),
+    });
+    void this.persistHosts().catch((error) =>
+      console.error("[HostRuntime] Failed to persist host registry", error),
+    );
+    return "moved";
+  }
+
+  reconcileServerId(oldServerId: string, newServerId: string, reportedLabel?: string): boolean {
     if (oldServerId === newServerId) {
-      return;
+      return false;
     }
     const controller = this.controllers.get(oldServerId);
     if (!controller) {
-      return;
+      return false;
     }
     if (this.controllers.has(newServerId)) {
-      return;
+      return false;
     }
 
     rekeyMap(this.controllers, oldServerId, newServerId);
@@ -1739,7 +1827,9 @@ export class HostRuntimeStore {
         prepareAgent: (agentId) => directory.prepareAgentRoute(agentId),
       }),
     );
-    controller.adoptReconciledServerId(newServerId);
+    // The profile now names a different machine, so the stored label named the one it
+    // replaced.
+    controller.adoptReconciledServerId(newServerId, reportedLabel?.trim() || undefined);
     const snapshot = controller.getSnapshot();
     this.clearHostReplica(oldServerId);
     this.syncSessionReplica(newServerId, snapshot);
@@ -1777,6 +1867,7 @@ export class HostRuntimeStore {
     void this.persistHosts().catch((error) =>
       console.error("[HostRuntime] Failed to persist host registry", error),
     );
+    return true;
   }
 
   async upsertDirectConnection(input: {
@@ -2139,8 +2230,7 @@ export class HostRuntimeStore {
       const controller = new HostRuntimeController({
         host,
         deps: this.deps,
-        onReconcileServerId: (oldId, newId, reportedLabel) =>
-          this.reconcileServerId(oldId, newId, reportedLabel),
+        onAdoptServerId: (adoption) => this.adoptServerId(adoption),
       });
       this.controllers.set(host.serverId, controller);
       useSessionStore.getState().initializeSession(host.serverId, null);
