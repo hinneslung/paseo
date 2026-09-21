@@ -1,14 +1,25 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { DaemonClient, FetchAgentsEntry } from "@getpaseo/client/internal/daemon-client";
-import { useSessionStore, type Agent } from "@/stores/session-store";
+import { useSessionStore, type Agent, type WorkspaceDescriptor } from "@/stores/session-store";
 import { deriveWorkspaceAgentVisibility } from "@/workspace-tabs/agent-visibility";
+import { buildWorkspaceStructureProjects } from "@/projects/workspace-structure";
 import {
   applyLegacyDaemonWorkspaceOwnership,
-  backfillLegacyDaemonWorkspaceDirectoryIfEmpty,
   buildLegacyDaemonWorkspaceSnapshot,
 } from "./legacy-daemon-workspaces";
 
 const SERVER_ID = "srv_legacy";
+
+function legacyProjectFromWorkspace(workspace: WorkspaceDescriptor) {
+  return {
+    projectId: workspace.projectId,
+    projectKey: null,
+    projectDisplayName: workspace.projectDisplayName,
+    projectCustomName: workspace.projectCustomName ?? null,
+    projectRootPath: workspace.projectRootPath,
+    projectKind: workspace.projectKind,
+  };
+}
 
 function legacyAgent(input: {
   id: string;
@@ -118,6 +129,38 @@ describe("buildLegacyDaemonWorkspaceSnapshot", () => {
     ]);
   });
 
+  it("keeps matching legacy path projects separate across hosts", () => {
+    const first = buildLegacyDaemonWorkspaceSnapshot({
+      serverId: "host-a",
+      entries: [legacyAgent({ id: "agent-a", cwd: "/repo/app" })],
+    });
+    const second = buildLegacyDaemonWorkspaceSnapshot({
+      serverId: "host-b",
+      entries: [legacyAgent({ id: "agent-b", cwd: "/repo/app" })],
+    });
+
+    const projects = buildWorkspaceStructureProjects({
+      sessions: [
+        {
+          serverId: "host-a",
+          projects: Array.from(first.workspaces.values(), legacyProjectFromWorkspace),
+          workspaces: first.workspaces.values(),
+        },
+        {
+          serverId: "host-b",
+          projects: Array.from(second.workspaces.values(), legacyProjectFromWorkspace),
+          workspaces: second.workspaces.values(),
+        },
+      ],
+    });
+
+    expect(projects).toHaveLength(2);
+    expect(projects.map((project) => project.hosts[0]?.serverId).sort()).toEqual([
+      "host-a",
+      "host-b",
+    ]);
+  });
+
   it("keeps old-daemon agent updates attached to the path-backed workspace", () => {
     const snapshot = buildLegacyDaemonWorkspaceSnapshot({
       serverId: SERVER_ID,
@@ -152,48 +195,5 @@ describe("buildLegacyDaemonWorkspaceSnapshot", () => {
 
     expect(stampedUpdate.workspaceId).toBe("/repo/app");
     expect(visibility.activeAgentIds).toEqual(new Set(["agent-running"]));
-  });
-
-  it("does not backfill path-backed workspaces after hydration is cancelled", async () => {
-    const store = useSessionStore.getState();
-    store.initializeSession(SERVER_ID, null as unknown as DaemonClient);
-    store.updateSessionServerInfo(SERVER_ID, {
-      serverId: SERVER_ID,
-      hostname: null,
-      version: "0.1.96",
-    });
-    let cancelled = false;
-    let didFetchAgents = false;
-    const client: Pick<DaemonClient, "fetchAgents"> = {
-      fetchAgents: async () => {
-        didFetchAgents = true;
-        cancelled = true;
-        return {
-          requestId: "req_cancelled_backfill",
-          subscriptionId: null,
-          entries: [legacyAgent({ id: "agent-cancelled", cwd: "/repo/app" })],
-          pageInfo: {
-            nextCursor: null,
-            prevCursor: null,
-            hasMore: false,
-          },
-        };
-      },
-    };
-
-    const didBackfill = await backfillLegacyDaemonWorkspaceDirectoryIfEmpty({
-      client,
-      serverId: SERVER_ID,
-      workspaces: new Map(),
-      emptyProjects: new Map(),
-      isCancelled: () => cancelled,
-    });
-
-    const session = useSessionStore.getState().sessions[SERVER_ID];
-    expect(didFetchAgents).toBe(true);
-    expect(didBackfill).toBe(true);
-    expect(session?.agents.size).toBe(0);
-    expect(session?.workspaces.size).toBe(0);
-    expect(session?.hasHydratedWorkspaces).toBe(false);
   });
 });

@@ -1,9 +1,17 @@
-export type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface PiImageContent {
   type: "image";
   data: string;
   mimeType: string;
+}
+export interface PiPromptAck {
+  agentInvoked?: boolean;
+}
+
+export interface PiPromptAck {
+  requestId?: string;
+  agentInvoked?: boolean;
 }
 
 export interface PiTextContent {
@@ -50,6 +58,7 @@ export type PiAgentMessage =
       toolName: string;
       content: unknown;
       isError?: boolean;
+      details?: unknown;
     }
   | {
       role: "bashExecution";
@@ -85,6 +94,12 @@ export interface PiSessionState {
   sessionName?: string;
   messageCount: number;
   pendingMessageCount: number;
+  contextUsage?: {
+    tokens?: number | null;
+    contextWindow?: number | null;
+    percent?: number | null;
+  };
+  todoPhases?: unknown;
 }
 
 export interface PiSessionStats {
@@ -108,12 +123,13 @@ export interface PiRpcSlashCommand {
   description?: string;
   source: "extension" | "prompt" | "skill";
   sourceInfo?: Record<string, unknown>;
+  input?: { hint?: string };
 }
-
-export type PiCommandsRpcType = "get_commands" | "get_available_commands";
 
 export type PiRpcCommand =
   | { id?: string; type: "prompt"; message: string; images?: PiImageContent[] }
+  | { id?: string; type: "steer"; message: string; images?: PiImageContent[] }
+  | { id?: string; type: "clear_queue" }
   | { id?: string; type: "compact"; customInstructions?: string }
   | { id?: string; type: "set_auto_compaction"; enabled: boolean }
   | { id?: string; type: "abort" }
@@ -123,7 +139,7 @@ export type PiRpcCommand =
   | { id?: string; type: "set_model"; provider: string; modelId: string }
   | { id?: string; type: "set_thinking_level"; level: PiThinkingLevel }
   | { id?: string; type: "get_session_stats" }
-  | { id?: string; type: PiCommandsRpcType };
+  | { id?: string; type: string };
 
 export interface PiRpcResponse {
   id?: string;
@@ -146,7 +162,9 @@ export type PiAgentSessionEvent =
   | { type: "message_end"; message: PiAgentMessage }
   | {
       type: "message_update";
-      message: PiAgentMessage;
+      // COMPAT(piCumulativeMessageUpdate): added in v0.3.0, remove after 2027-02-07 once the pi
+      // floor is >=0.84. pi <=0.83 repeats the cumulative assistant message on every update.
+      message?: PiAgentMessage;
       assistantMessageEvent: PiAssistantMessageEvent;
     }
   | {
@@ -171,7 +189,16 @@ export type PiAgentSessionEvent =
     }
   | { type: "compaction_start"; reason?: "manual" | "threshold" | "overflow" | string }
   | { type: "compaction_end"; reason?: string; errorMessage?: string; aborted?: boolean }
-  | { type: "agent_end"; messages?: PiAgentMessage[] };
+  | { type: "agent_end"; messages?: PiAgentMessage[]; willRetry?: boolean }
+  | { type: "agent_settled" }
+  | {
+      type: "auto_retry_start";
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      errorMessage: string;
+    }
+  | { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
 
 export type PiRuntimeEvent =
   | PiAgentSessionEvent
@@ -182,6 +209,14 @@ export type PiRuntimeEvent =
       [key: string]: unknown;
     }
   | {
+      type: "command_output";
+      text?: string;
+    }
+  | {
       type: "process_exit";
       error: string;
+    }
+  | {
+      type: string;
+      [key: string]: unknown;
     };

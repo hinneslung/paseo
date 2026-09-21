@@ -24,7 +24,7 @@ describe("opencode agent commands E2E", () => {
     expect(agent.provider).toBe("opencode");
     expect(agent.status).toBe("idle");
 
-    const result = await ctx.client.listCommands(agent.id);
+    const result = await ctx.client.listCommands({ agentId: agent.id });
 
     expect(result.error).toBeNull();
     expect(result.commands.length).toBeGreaterThan(0);
@@ -35,6 +35,23 @@ describe("opencode agent commands E2E", () => {
       expect(typeof cmd.argumentHint).toBe("string");
       expect(cmd.name.startsWith("/")).toBe(false);
     }
+  }, 60_000);
+
+  test("listing commands resumes an explicitly closed agent", async () => {
+    const agent = await ctx.client.createAgent({
+      ...getFullAccessConfig("opencode"),
+      cwd: "/tmp",
+      title: "Closed OpenCode Commands Test Agent",
+    });
+
+    await ctx.daemon.daemon.agentManager.closeAgent(agent.id);
+    expect(ctx.daemon.daemon.agentManager.getAgent(agent.id)).toBeNull();
+
+    const result = await ctx.client.listCommands({ agentId: agent.id });
+
+    expect(result.error).toBeNull();
+    expect(result.commands.length).toBeGreaterThan(0);
+    expect(ctx.daemon.daemon.agentManager.getAgent(agent.id)?.id).toBe(agent.id);
   }, 60_000);
 
   test("sendMessage executes a slash command without arguments", async () => {
@@ -87,7 +104,7 @@ describe("opencode agent commands E2E", () => {
   }, 30_000);
 
   test("returns error for non-existent agent", async () => {
-    const result = await ctx.client.listCommands("non-existent-agent-id");
+    const result = await ctx.client.listCommands({ agentId: "non-existent-agent-id" });
 
     expect(result.error).toBeTruthy();
     expect(result.error).toContain("Agent not found");

@@ -13,11 +13,14 @@ import { addAttachOptions, runAttachCommand } from "./attach.js";
 import { addReloadOptions, runReloadCommand } from "./reload.js";
 import { addImportOptions, runImportCommand } from "./import.js";
 import { runUpdateCommand } from "./update.js";
+import { runDetachCommand } from "./detach.js";
+import { addOpenOptions, runOpenCommand } from "./open.js";
 import { withOutput } from "../../output/index.js";
 import {
   addDaemonHostOption,
   addJsonAndDaemonHostOptions,
   collectMultiple,
+  withGlobalOptions,
 } from "../../utils/command-options.js";
 
 export function createAgentCommand(): Command {
@@ -34,9 +37,17 @@ export function createAgentCommand(): Command {
     withOutput(runImportCommand),
   );
 
-  addDaemonHostOption(addAttachOptions(agent.command("attach"))).action(runAttachCommand);
+  addDaemonHostOption(addAttachOptions(agent.command("attach"))).action(
+    withGlobalOptions(runAttachCommand),
+  );
 
-  addDaemonHostOption(addLogsOptions(agent.command("logs"))).action(runLogsCommand);
+  addDaemonHostOption(addLogsOptions(agent.command("logs"))).action(
+    withGlobalOptions(runLogsCommand),
+  );
+
+  addJsonAndDaemonHostOptions(addOpenOptions(agent.command("open"))).action(
+    withOutput(runOpenCommand),
+  );
 
   addJsonAndDaemonHostOptions(addStopOptions(agent.command("stop"))).action(
     withOutput(runStopCommand),
@@ -78,10 +89,18 @@ export function createAgentCommand(): Command {
 
   addJsonAndDaemonHostOptions(
     agent
+      .command("detach")
+      .description("Make a subagent independent without stopping or moving it")
+      .argument("<id>", "Agent ID, prefix, or name"),
+  ).action(withOutput(runDetachCommand));
+
+  addJsonAndDaemonHostOptions(
+    agent
       .command("update")
-      .description("Update an agent's metadata")
+      .description("Update an agent's settings or metadata")
       .argument("<id>", "Agent ID (or prefix)")
       .option("--name <name>", "Update the agent's display name")
+      .option("--thinking <id>", "Update the agent's thinking option ID")
       .option(
         "--label <label>",
         "Add/set label(s) on the agent (can be used multiple times or comma-separated)",

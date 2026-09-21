@@ -1,0 +1,45 @@
+## R5 — bounded review, `13f4ff373..98e31c321`
+
+**No actionable defects.** Single test-only commit, one file, no runtime delta. Plan untouched; `2429fbc0f` remains source of truth.
+
+### The correction strengthens the gate rather than relaxing it
+
+The previous form was two sequential waits — labels, then a separate `waitFor` on Stop — which could pass even if the turn ended in between. `assertDiagramWhileAgentRuns` (`vscode-e2e.mjs:283-296`) samples both in one `Promise.all` and requires `running && labels.every(...)` to hold **within a single probe iteration**. That is a genuine near-simultaneity check and is strictly stronger than what it replaces. The two CDP round-trips are concurrent rather than atomic, so the samples can skew by a few milliseconds; against the window computed below that is immaterial.
+
+Failure diagnostics are preserved — the probe returns `running` and `text`, so a future failure distinguishes "never rendered" from "rendered after the turn ended."
+
+### What the evidence proves, stated precisely
+
+At one sampled instant, the inline Mermaid SVG contained `Bridge` and `Runtime` while the Stop control was visible. That establishes **a rendered diagram displayed in the transcript while the turn was still streaming** — which is the plan's Rich transcript gate ("Inline Mermaid preview/code/fullscreen, streaming and reload", plan:108).
+
+It does **not** establish progressive or partial Mermaid rendering, and should not be described that way. The fence closes early in the stream; everything after it is trailing prose outside the fence. So the diagram is complete when it first renders, and "streaming" here means the turn is still producing output — not that the diagram itself is mid-construction. I'm flagging this explicitly because it is the same overclaim I made in R3, and the honest framing is "renders during an active streaming turn."
+
+### The hold window is justified, and the derivation checks out
+
+`tokenize` (`mock-load-test-agent.ts:469-472`, regex `/(\s*)(\S+)|(\s+)/g`) emits one token per whitespace-delimited word, and `scheduleStreamingAssistantTurn` (`:1212-1231`) emits exactly one token per `streamingAssistantIntervalMs`. So:
+
+- Fence block: ~10 tokens → diagram available at **~1.0 s**
+- `streamingHoldSuffix`: `hold-01 … hold-80`, each a single `\S+` run → **exactly 80 tokens → 8.0 s**
+- Trailing link line: ~1 token
+- Total turn ≈ **9.1 s**, leaving an **~8 s observation window** after the diagram can first render, sampled by `waitForProbe` every 200 ms (~40 opportunities).
+
+This reconciles with the CI failure exactly: at the old 75 ms × ~27 tokens the whole turn ran ≈ 2.0 s, matching the "Worked for 2s" in the failure screenshot. The window is now ~4× the previously-observed *total* turn duration.
+
+The structurally important point is that the hold is **server-paced**. The observation window is produced by daemon-side timers and is therefore independent of CI iframe/Mermaid render latency, which was the actual failure variable. That is the right shape of fix — it extends the window deterministically instead of weakening the assertion or padding a client-side timeout. The interval also stays within the provider's `Math.min(…, 1_000)` cap (`:755`).
+
+Bounds remain coherent: the unchanged 30 s probe bound and the subsequent `waitForFinish(…, 30_000)` both comfortably exceed the ~9.1 s turn.
+
+### Scope and security
+
+Test-only, one file. `streamingHoldSuffix` is a deterministic generated constant with no network, filesystem, secret, or path handling. No new dependencies. I checked for collateral effects on the later assertions: `getByText(linkedFileTarget, { exact: true })` cannot match `hold-NN` tokens, and the post-finish label check, fullscreen flow, drop probe, and CSP console check are all unaffected by text outside the fence.
+
+### Deferred as noncritical
+
+The comment explains the *intent* of the suffix but not the arithmetic, so a future reader cannot tell why 80 rather than 20 or 200, or that the value is coupled to the 100 ms interval. One line recording `80 × 100 ms ≈ 8 s` would make the constant self-justifying. Not actionable now.
+
+### Not verified
+
+I did not re-run the e2e, the build, or the smoke jobs, and did not open the CI artifact or `/tmp/paseo-vscode-stream-window.log` — those are Fattie's report and your gate. I reasoned about the window from the provider's tokenizer and emit loop rather than from a measured run.
+
+One bounded residual worth stating plainly, not as a defect: local success plus this derivation establishes that the window is now ~8 s wide and CI-speed-independent, but it does not establish CI's actual Mermaid render latency. The evidence supports the fix comfortably if that latency is under ~8 s; the prior failure only proves it exceeded ~2 s. A green CI run on `98e31c321` is what closes that, and it's the same run you already need for the gate.
+[User] PIC R5 adjudication: accept no-material-defect conclusion and precise active-turn-only claim; defer explanatory polish. Your tokenizer arithmetic is factually wrong because inspection stopped at regex: read complete tokenize469-492. It splits words longer than5 into4-char chunks. Each hold-NN has7chars =>2chunks, 80*2=160 =>16s suffix, not8s. Local screenshot Worked for19s is consistent. I also initially gave Coco an incorrect whitespace-token explanation before reading full function; corrected it promptly. Bounds still valid30s. Record exact correction, no implementation/new investigation needed. Original plan unchanged; hold for CI.

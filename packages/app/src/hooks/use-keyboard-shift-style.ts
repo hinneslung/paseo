@@ -1,40 +1,42 @@
-import {
-  createContext,
-  createElement,
-  useContext,
-  useEffect,
-  useMemo,
-  type ReactNode,
-} from "react";
+import { createElement, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Platform } from "react-native";
 import type { ViewStyle } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useReanimatedKeyboardAnimation } from "react-native-keyboard-controller";
+import {
+  useGenericKeyboardHandler,
+  useReanimatedKeyboardAnimation,
+} from "react-native-keyboard-controller";
 import {
   useAnimatedStyle,
+  useAnimatedReaction,
   useDerivedValue,
   useSharedValue,
   type SharedValue,
 } from "react-native-reanimated";
+import { scheduleOnRN } from "react-native-worklets";
 import {
   DEFAULT_IOS_KEYBOARD_INSET_MIN_HEIGHT,
   resolveKeyboardShift,
+  shouldReconcileHiddenKeyboardEnd,
 } from "@/hooks/keyboard-shift-policy";
+import {
+  KeyboardShiftContext,
+  SettledKeyboardShiftContext,
+  useKeyboardShift,
+} from "@/hooks/keyboard-shift-context";
 
 type KeyboardShiftMode = "translate" | "padding";
-
-interface KeyboardShiftContextValue {
-  shift: SharedValue<number>;
-  bottomInset: SharedValue<number>;
-}
-
-const KeyboardShiftContext = createContext<KeyboardShiftContextValue | null>(null);
 
 export function KeyboardShiftProvider({ children }: { children: ReactNode }) {
   const insets = useSafeAreaInsets();
   const { height: keyboardHeight, progress: keyboardProgress } = useReanimatedKeyboardAnimation();
   const bottomInset = useSharedValue(insets.bottom);
   const isIos = Platform.OS === "ios";
+  const isMoving = useSharedValue(false);
+  const [settledShift, setSettledShift] = useState(0);
+  const publishSettledShift = useCallback((nextShift: number) => {
+    setSettledShift((currentShift) => (currentShift === nextShift ? currentShift : nextShift));
+  }, []);
 
   useEffect(() => {
     bottomInset.value = insets.bottom;
@@ -51,23 +53,48 @@ export function KeyboardShiftProvider({ children }: { children: ReactNode }) {
     });
   });
 
+  useGenericKeyboardHandler(
+    {
+      onStart: () => {
+        "worklet";
+        isMoving.value = true;
+      },
+      onEnd: (event) => {
+        "worklet";
+        if (isIos && shouldReconcileHiddenKeyboardEnd(event)) {
+          keyboardHeight.value = 0;
+          keyboardProgress.value = 0;
+        }
+        isMoving.value = false;
+      },
+    },
+    [isIos, isMoving, keyboardHeight, keyboardProgress],
+  );
+
+  useAnimatedReaction(
+    () => ({ moving: isMoving.value, shift: shift.value }),
+    (current, previous) => {
+      if (!current.moving && (previous === null || previous.moving)) {
+        scheduleOnRN(publishSettledShift, current.shift);
+      }
+    },
+    [isMoving, publishSettledShift, shift],
+  );
+
   const value = useMemo(
     () => ({
       shift,
+      isMoving,
       bottomInset,
     }),
-    [bottomInset, shift],
+    [bottomInset, isMoving, shift],
   );
 
-  return createElement(KeyboardShiftContext.Provider, { value }, children);
-}
-
-export function useKeyboardShift(): KeyboardShiftContextValue {
-  const context = useContext(KeyboardShiftContext);
-  if (!context) {
-    throw new Error("useKeyboardShift must be used inside KeyboardShiftProvider");
-  }
-  return context;
+  return createElement(
+    KeyboardShiftContext.Provider,
+    { value },
+    createElement(SettledKeyboardShiftContext.Provider, { value: settledShift }, children),
+  );
 }
 
 export function useKeyboardShiftStyle(input: { mode: KeyboardShiftMode; enabled?: boolean }): {

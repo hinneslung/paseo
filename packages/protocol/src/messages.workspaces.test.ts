@@ -10,6 +10,88 @@ import {
 } from "./messages.js";
 
 describe("workspace message schemas", () => {
+  test("parses mark-unread request and response", () => {
+    expect(
+      SessionInboundMessageSchema.parse({
+        type: "workspace.mark_unread.request",
+        workspaceId: "workspace-1",
+        requestId: "req-mark-unread",
+      }),
+    ).toEqual({
+      type: "workspace.mark_unread.request",
+      workspaceId: "workspace-1",
+      requestId: "req-mark-unread",
+    });
+
+    expect(
+      SessionOutboundMessageSchema.parse({
+        type: "workspace.mark_unread.response",
+        payload: {
+          requestId: "req-mark-unread",
+          workspaceId: "workspace-1",
+          markedAgentId: "agent-1",
+          success: true,
+          error: null,
+        },
+      }),
+    ).toEqual({
+      type: "workspace.mark_unread.response",
+      payload: {
+        requestId: "req-mark-unread",
+        workspaceId: "workspace-1",
+        markedAgentId: "agent-1",
+        success: true,
+        error: null,
+      },
+    });
+  });
+
+  test("parses blocked setup status and the explicit setup run RPC", () => {
+    expect(
+      SessionInboundMessageSchema.parse({
+        type: "workspace.setup.run.request",
+        workspaceId: "workspace-fork",
+        requestId: "run-setup",
+      }),
+    ).toMatchObject({ type: "workspace.setup.run.request", workspaceId: "workspace-fork" });
+
+    expect(
+      SessionOutboundMessageSchema.parse({
+        type: "workspace_setup_progress",
+        payload: {
+          workspaceId: "workspace-fork",
+          status: "blocked",
+          detail: {
+            type: "worktree_setup",
+            worktreePath: "/repo/fork",
+            branchName: "fork",
+            log: "",
+            commands: [],
+          },
+          error: null,
+          blockedSource: {
+            kind: "change_request",
+            forge: "github",
+            number: 42,
+            headRepository: "contributor/paseo",
+          },
+        },
+      }),
+    ).toMatchObject({ payload: { status: "blocked", blockedSource: { number: 42 } } });
+
+    expect(
+      SessionOutboundMessageSchema.parse({
+        type: "workspace.setup.run.response",
+        payload: {
+          requestId: "run-setup",
+          workspaceId: "workspace-fork",
+          started: true,
+          error: null,
+        },
+      }),
+    ).toMatchObject({ type: "workspace.setup.run.response", payload: { started: true } });
+  });
+
   test("parses fetch_workspaces_request", () => {
     const parsed = SessionInboundMessageSchema.parse({
       type: "fetch_workspaces_request",
@@ -91,6 +173,59 @@ describe("workspace message schemas", () => {
       throw new Error("Expected fetch_agents_request");
     }
     expect(activeScoped.scope).toBe("active");
+  });
+
+  test("parses optional sequenced directory requests and responses", () => {
+    expect(
+      SessionInboundMessageSchema.parse({
+        type: "project.list.request",
+        requestId: "projects-sync",
+        sync: { generation: "daemon-generation", afterSeq: 7 },
+      }),
+    ).toMatchObject({ sync: { generation: "daemon-generation", afterSeq: 7 } });
+    expect(
+      SessionInboundMessageSchema.parse({
+        type: "fetch_workspaces_request",
+        requestId: "workspaces-sync",
+        sync: { generation: "daemon-generation", afterSeq: 11 },
+      }),
+    ).toMatchObject({ sync: { generation: "daemon-generation", afterSeq: 11 } });
+    expect(
+      SessionInboundMessageSchema.parse({
+        type: "fetch_agents_request",
+        requestId: "agents-sync",
+        scope: "active",
+        sync: { generation: "daemon-generation", afterSeq: 13 },
+      }),
+    ).toMatchObject({ sync: { generation: "daemon-generation", afterSeq: 13 } });
+
+    const response = SessionOutboundMessageSchema.parse({
+      type: "project.list.response",
+      payload: {
+        requestId: "projects-sync",
+        projects: [
+          {
+            projectId: "project-1",
+            projectDisplayName: "Project",
+            projectRootPath: "/repo",
+            projectKind: "git",
+            syncSeq: 12,
+          },
+        ],
+        sync: {
+          generation: "daemon-generation",
+          headSeq: 12,
+          mode: "changes",
+          removals: [{ id: "project-removed", seq: 10 }],
+        },
+      },
+    });
+    expect(response).toMatchObject({
+      payload: {
+        projects: [{ projectId: "project-1", syncSeq: 12 }],
+        sync: { headSeq: 12, removals: [{ id: "project-removed", seq: 10 }] },
+      },
+    });
   });
 
   test("parses agent_update without project placement", () => {
@@ -211,6 +346,7 @@ describe("workspace message schemas", () => {
 
     expect(request.type).toBe("fetch_recent_provider_sessions_request");
     expect(request.providers).toEqual(["my-claude"]);
+    expect(request.query).toBeUndefined();
     expect(response.payload).toEqual({
       requestId: "req-recent-provider-sessions",
       entries: [
@@ -226,6 +362,30 @@ describe("workspace message schemas", () => {
         },
       ],
     });
+  });
+
+  test("parses session import search requests and per-provider errors", () => {
+    const request = SessionInboundMessageSchema.parse({
+      type: "fetch_recent_provider_sessions_request",
+      requestId: "req-search-provider-sessions",
+      query: "invoice",
+    });
+    const response = SessionOutboundMessageSchema.parse({
+      type: "fetch_recent_provider_sessions_response",
+      payload: {
+        requestId: "req-search-provider-sessions",
+        entries: [],
+        providerErrors: [{ provider: "codex", message: "Codex listing timed out" }],
+      },
+    });
+
+    expect(request.query).toBe("invoice");
+    if (response.type !== "fetch_recent_provider_sessions_response") {
+      throw new Error("expected fetch_recent_provider_sessions_response");
+    }
+    expect(response.payload.providerErrors).toEqual([
+      { provider: "codex", message: "Codex listing timed out" },
+    ]);
   });
 
   test("parses fetch_recent_provider_sessions response with filteredAlreadyImportedCount", () => {
@@ -284,6 +444,76 @@ describe("workspace message schemas", () => {
     });
 
     expect(parsed.type).toBe("open_project_request");
+  });
+
+  test("parses a GitHub clone response that registers a project without a workspace", () => {
+    const request = SessionInboundMessageSchema.parse({
+      type: "project.github.clone.request",
+      repo: "a/b",
+      cloneProtocol: "https",
+      targetDirectory: "~/workspace",
+      requestId: "req-clone",
+    });
+    const response = SessionOutboundMessageSchema.parse({
+      type: "project.github.clone.response",
+      payload: {
+        requestId: "req-clone",
+        repo: "a/b",
+        checkoutPath: "/tmp/b",
+        project: {
+          projectId: "project-b",
+          projectDisplayName: "b",
+          projectRootPath: "/tmp/b",
+          projectKind: "git",
+        },
+        error: null,
+      },
+    });
+
+    expect(request.type).toBe("project.github.clone.request");
+    if (request.type !== "project.github.clone.request") {
+      throw new Error("expected project.github.clone.request");
+    }
+    expect(request.cloneProtocol).toBe("https");
+    expect(response.type).toBe("project.github.clone.response");
+    if (response.type !== "project.github.clone.response") {
+      throw new Error("expected project.github.clone.response");
+    }
+    expect(response.payload.project?.projectId).toBe("project-b");
+  });
+
+  test("rejects invalid project GitHub clone protocols", () => {
+    const request = SessionInboundMessageSchema.safeParse({
+      type: "project.github.clone.request",
+      repo: "a/b",
+      cloneProtocol: "ftp",
+      targetDirectory: "~/workspace",
+      requestId: "req-clone",
+    });
+
+    expect(request.success).toBe(false);
+  });
+
+  test("rejects project GitHub clone repo paths shorter than owner slash repo", () => {
+    const request = SessionInboundMessageSchema.safeParse({
+      type: "project.github.clone.request",
+      repo: "ab",
+      targetDirectory: "~/workspace",
+      requestId: "req-clone",
+    });
+    const response = SessionOutboundMessageSchema.safeParse({
+      type: "project.github.clone.response",
+      payload: {
+        requestId: "req-clone",
+        repo: "ab",
+        checkoutPath: null,
+        project: null,
+        error: "failed",
+      },
+    });
+
+    expect(request.success).toBe(false);
+    expect(response.success).toBe(false);
   });
 
   test("parses legacy editor RPC messages for compatibility", () => {
@@ -429,6 +659,26 @@ describe("workspace message schemas", () => {
       throw new Error("Expected workspace_update upsert payload");
     }
     expect(parsed.payload.workspace.workspaceDirectory).toBe("/repo");
+    expect(parsed.payload.workspace.worktreeSlug).toBeUndefined();
+  });
+
+  test("preserves a Paseo-owned worktree slug", () => {
+    const parsed = WorkspaceDescriptorPayloadSchema.parse({
+      id: "owned-worktree",
+      projectId: "project",
+      projectDisplayName: "repo",
+      projectRootPath: "/repo",
+      workspaceDirectory: "/paseo/worktrees/project/feature/packages/app",
+      worktreeSlug: "feature",
+      projectKind: "git",
+      workspaceKind: "worktree",
+      name: "feature",
+      status: "done",
+      activityAt: null,
+      scripts: [],
+    });
+
+    expect(parsed.worktreeSlug).toBe("feature");
   });
 
   test("defaults omitted workspace archiving state and preserves present timestamps", () => {
@@ -550,6 +800,42 @@ describe("workspace message schemas", () => {
     }
     expect(parsed.payload.workspace.projectKind).toBe("non_git");
     expect(parsed.payload.workspace.workspaceKind).toBe("directory");
+  });
+
+  test("parses workspace script management request and response payloads", () => {
+    expect(
+      SessionInboundMessageSchema.parse({
+        type: "workspace.script.stop.request",
+        requestId: "req-script-stop",
+        workspaceId: "ws-repo",
+        scriptName: "web",
+      }),
+    ).toMatchObject({ type: "workspace.script.stop.request", scriptName: "web" });
+
+    expect(
+      SessionOutboundMessageSchema.parse({
+        type: "workspace.script.start.response",
+        payload: {
+          requestId: "req-script-start",
+          workspaceId: "ws-repo",
+          scriptName: "web",
+          script: {
+            scriptName: "web",
+            type: "service",
+            hostname: "web--repo.localhost",
+            port: 3000,
+            proxyUrl: "http://web--repo.localhost:6767",
+            lifecycle: "running",
+            health: "healthy",
+            terminalId: "terminal-1",
+          },
+          error: null,
+        },
+      }),
+    ).toMatchObject({
+      type: "workspace.script.start.response",
+      payload: { script: { terminalId: "terminal-1", lifecycle: "running" } },
+    });
   });
 
   test("parses script_status_update payload", () => {
@@ -689,6 +975,15 @@ describe("workspace message schemas", () => {
   });
 
   test("parses fetch_workspaces_response with optional runtime fields", () => {
+    const checks = [
+      { name: "legacy", status: "success", url: null },
+      {
+        name: "deploy",
+        status: "pending",
+        url: null,
+        traits: ["manual", "action_required", "future-forge-trait"],
+      },
+    ];
     const parsed = SessionOutboundMessageSchema.parse({
       type: "fetch_workspaces_response",
       payload: {
@@ -730,6 +1025,7 @@ describe("workspace message schemas", () => {
                 baseRefName: "main",
                 headRefName: "workspace-git-service",
                 isMerged: false,
+                checks,
               },
               error: null,
               refreshedAt: "2026-04-12T00:00:00.000Z",
@@ -751,6 +1047,7 @@ describe("workspace message schemas", () => {
       aheadOfOrigin: 2,
     });
     expect(parsed.payload.entries[0]?.githubRuntime?.pullRequest?.title).toBe("Runtime payloads");
+    expect(parsed.payload.entries[0]?.githubRuntime?.pullRequest?.checks).toEqual(checks);
   });
 
   test("older workspace parsers ignore additive runtime fields", () => {
@@ -912,6 +1209,30 @@ describe("workspace message schemas", () => {
     expect(checkout?.worktreeRoot).toBe("C:\\repo");
   });
 
+  test("workspace summary parses without forge and round-trips forge when present", () => {
+    const baseWorkspace = {
+      id: "ws-forge",
+      projectId: "proj",
+      projectDisplayName: "repo",
+      projectRootPath: "/repo",
+      workspaceDirectory: "/repo",
+      projectKind: "git",
+      workspaceKind: "worktree",
+      name: "feature",
+      status: "done",
+      activityAt: null,
+      scripts: [],
+    } as const;
+
+    // Old daemon: forge omitted -> parses, field absent (client falls back to github).
+    expect(WorkspaceDescriptorPayloadSchema.parse(baseWorkspace).forge).toBeUndefined();
+
+    // New daemon: forge present -> round-trips (open string, like the PR-status forge).
+    expect(
+      WorkspaceDescriptorPayloadSchema.parse({ ...baseWorkspace, forge: "gitlab" }).forge,
+    ).toBe("gitlab");
+  });
+
   test("workspace.create.request rejects old flat backing shape and accepts new source envelope", () => {
     // Old flat shape with backing enum must be rejected.
     const oldFlat = WorkspaceCreateRequestSchema.safeParse({
@@ -936,6 +1257,25 @@ describe("workspace message schemas", () => {
     });
     expect(newWorktree.type).toBe("workspace.create.request");
     expect(newWorktree.source.kind).toBe("worktree");
+
+    const branchOff = WorkspaceCreateRequestSchema.parse({
+      type: "workspace.create.request",
+      requestId: "req-branch-off",
+      source: {
+        kind: "worktree",
+        cwd: "/tmp/repo",
+        action: "branch-off",
+        branchName: "feature/auth",
+        worktreeSlug: "feature-auth",
+      },
+    });
+    expect(branchOff.source).toEqual({
+      kind: "worktree",
+      cwd: "/tmp/repo",
+      action: "branch-off",
+      branchName: "feature/auth",
+      worktreeSlug: "feature-auth",
+    });
 
     // Directory source must also be accepted.
     const newDirectory = WorkspaceCreateRequestSchema.parse({

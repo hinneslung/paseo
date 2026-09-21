@@ -22,12 +22,26 @@ function assistant(id: string, timestamp: Date): StreamItem {
 }
 
 describe("deriveStreamTurnTiming", () => {
+  it("starts elapsed time from the submitted prompt", () => {
+    const submittedAt = new Date("2026-05-15T00:00:00.000Z");
+
+    const timing = deriveStreamTurnTiming({
+      isTurnActive: true,
+      activeTurnStartedAt: submittedAt,
+      tail: [],
+      head: [user("submitted", submittedAt)],
+    });
+
+    assert.equal(timing.runningStartedAt, submittedAt);
+  });
+
   it("uses the last user message as the running turn start", () => {
     const firstUserAt = new Date("2026-05-15T00:00:00.000Z");
     const secondUserAt = new Date("2026-05-15T00:01:00.000Z");
 
     const timing = deriveStreamTurnTiming({
-      agentStatus: "running",
+      isTurnActive: true,
+      activeTurnStartedAt: secondUserAt,
       tail: [
         user("u1", firstUserAt),
         assistant("a1", new Date("2026-05-15T00:00:05.000Z")),
@@ -45,7 +59,8 @@ describe("deriveStreamTurnTiming", () => {
     const assistantAt = new Date("2026-05-15T00:00:07.000Z");
 
     const timing = deriveStreamTurnTiming({
-      agentStatus: "idle",
+      isTurnActive: false,
+      activeTurnStartedAt: null,
       tail: [
         user("u1", userAt),
         assistant("a1", assistantAt),
@@ -55,7 +70,6 @@ describe("deriveStreamTurnTiming", () => {
     });
 
     assert.deepEqual(timing.byAssistantId.get("a1"), {
-      startedAt: userAt,
       completedAt: assistantAt,
       durationMs: 7000,
     });
@@ -67,7 +81,8 @@ describe("deriveStreamTurnTiming", () => {
     const lastAssistantAt = new Date("2026-05-15T00:00:07.000Z");
 
     const timing = deriveStreamTurnTiming({
-      agentStatus: "idle",
+      isTurnActive: false,
+      activeTurnStartedAt: null,
       tail: [
         user("u1", userAt),
         assistant("a1", firstAssistantAt),
@@ -77,11 +92,37 @@ describe("deriveStreamTurnTiming", () => {
     });
 
     const expected = {
-      startedAt: userAt,
       completedAt: lastAssistantAt,
       durationMs: 7000,
     };
     assert.deepEqual(timing.byAssistantId.get("a1"), expected);
     assert.deepEqual(timing.byAssistantId.get("a2"), expected);
+  });
+
+  it("preserves the completion timestamp when a canonical turn has no visible prompt", () => {
+    const firstTurnAt = new Date("2026-05-15T00:00:00.000Z");
+    const hiddenPromptTurnAt = new Date("2026-05-15T00:01:07.000Z");
+    const timing = deriveStreamTurnTiming({
+      isTurnActive: false,
+      activeTurnStartedAt: null,
+      tail: [
+        { ...user("u1", firstTurnAt), turnId: "turn-1" },
+        {
+          ...assistant("a1", new Date("2026-05-15T00:00:07.000Z")),
+          turnId: "turn-1",
+        },
+        {
+          ...assistant("hidden-prompt-a1", new Date("2026-05-15T00:01:03.000Z")),
+          turnId: "turn-2",
+        },
+        { ...assistant("hidden-prompt-a2", hiddenPromptTurnAt), turnId: "turn-2" },
+      ],
+      head: [],
+    });
+
+    assert.deepEqual(timing.byAssistantId.get("hidden-prompt-a2"), {
+      completedAt: hiddenPromptTurnAt,
+      durationMs: null,
+    });
   });
 });

@@ -56,10 +56,14 @@ async function createRewindHarness(options: { historyGate?: RewindHistoryGate } 
     logger: createTestLogger(),
     idFactory: () => "00000000-0000-4000-8000-000000000901",
   });
-  const agent = await manager.createAgent({
-    provider: "claude",
-    cwd: process.cwd(),
-  });
+  const agent = await manager.createAgent(
+    {
+      provider: "claude",
+      cwd: process.cwd(),
+    },
+    undefined,
+    { workspaceId: undefined },
+  );
   return { manager, session, agentId: agent.id };
 }
 
@@ -74,6 +78,27 @@ describe("AgentManager rewind", () => {
     expect(manager.fetchTimeline(agentId, { limit: 0 }).rows.map((row) => row.item)).toEqual([
       { type: "user_message", text: "before", messageId: "message-1" },
     ]);
+  });
+
+  test("replaces the canonical epoch without replaying reconstructed parent rows", async () => {
+    const { manager, session, agentId } = await createRewindHarness();
+    session.history = Array.from({ length: 250 }, (_, index) => ({
+      type: "assistant_message" as const,
+      text: `rewound ${index}`,
+    }));
+    const epochBefore = manager.fetchTimeline(agentId, { limit: 0 }).epoch;
+    const events: string[] = [];
+    const unsubscribe = manager.subscribe((event) => events.push(event.type), {
+      replayState: false,
+    });
+
+    await manager.rewind(agentId, "message-1", "conversation");
+    unsubscribe();
+
+    const replacement = manager.fetchTimeline(agentId, { limit: 0 });
+    expect(replacement.epoch).not.toBe(epochBefore);
+    expect(replacement.rows).toHaveLength(250);
+    expect(events.filter((type) => type === "agent_stream")).toEqual([]);
   });
 
   test("rewinds files without rehydrating the conversation timeline", async () => {
@@ -94,6 +119,35 @@ describe("AgentManager rewind", () => {
 
     expect(session.aborted).toBe(true);
     expect(session.recordedRewinds).toEqual([{ mode: "files", messageId: "message-1" }]);
+  });
+
+  test("does not rewind when the in-flight turn rejects cancellation", async () => {
+    class RejectingInterruptSession extends FakeRewindSession {
+      override async interrupt(): Promise<void> {
+        throw new Error("provider still owns the active turn");
+      }
+    }
+
+    const session = new RejectingInterruptSession();
+    const manager = new AgentManager({
+      clients: { claude: new FakeRewindClient(session) },
+      logger: createTestLogger(),
+      idFactory: () => "00000000-0000-4000-8000-000000000902",
+    });
+    const agent = await manager.createAgent({ provider: "claude", cwd: process.cwd() }, undefined, {
+      workspaceId: undefined,
+    });
+    const run = manager.streamAgent(agent.id, "keep working");
+    await run.next();
+
+    await expect(manager.rewind(agent.id, "message-1", "files")).rejects.toThrow(
+      `Cannot rewind agent ${agent.id} because its active run cancellation was not acknowledged`,
+    );
+    expect(session.recordedRewinds).toEqual([]);
+    expect(manager.getAgent(agent.id)).toMatchObject({
+      lifecycle: "running",
+      activeForegroundTurnId: "turn-1",
+    });
   });
 
   test("blocks new prompts until the rehydrate epoch broadcasts", async () => {

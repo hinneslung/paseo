@@ -1,0 +1,36 @@
+Raw Fattie completion report received 2026-09-14. Duplicate notifications omitted.
+
+Implemented and committed the native file-link blocker and deterministic CDP coverage.
+
+Commit: `46f3385a3` — `fix(vscode): restore native transcript file links`
+
+Key changes:
+
+- Restored VS Code native file opening before in-app dispositions in workspace-screen.tsx:2302.
+- Preserved resolved `filePath`, `line`, and `lineEnd` in vscode-file-open.ts:17.
+- Added three focused unit cases, including dot-path/range preservation.
+- Added real password-auth mock-agent CDP coverage for streamed inline/fullscreen Mermaid, fullscreen close, native dot-path link at line 3, CSP violations, workspace open, and clipboard shortcuts.
+- Updated vscode-ci.md:108.
+- Original plan and PIC screenshots/scratchpad were untouched.
+
+Validation:
+
+- RED against `0507f261`: native link timed out with only the Paseo tab open.
+  - `/tmp/paseo-vscode-cdp-red-0507.log`
+- GREEN after rebuild: native tab `paseo-vscode-cdp.ts`, active line `3`, status `Ln 3, Col 1`.
+  - `/tmp/paseo-vscode-cdp-green.log`
+  - Screenshots: `/tmp/paseo-vscode-v080-e2e-green/`
+- Focused Vitest: 1 file, 3 tests passed.
+- `npm run lint`: zero errors/warnings.
+- `npm run typecheck`: all workspaces passed.
+- `npm run format`: passed; no unrelated churn.
+- `npm run build:vscode`: passed.
+- Worktree is clean; nothing pushed.
+
+Rebuilt artifact: /home/hinnes/projects/paseo-vscode-v0.8.0-impl/packages/vscode/paseo.vsix
+
+- Version: `0.8.0`
+- Size: `5,571,755` bytes
+- SHA-256: `94250b984801dfe7bf9d35e146d7be577b7eaeef23b7e74c0fae55bb408fe3f8`
+
+Remaining validation is PIC’s independent real-provider/CDP R3 and optional Windows Layer 3 coverage.

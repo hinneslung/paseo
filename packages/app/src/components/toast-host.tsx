@@ -6,7 +6,7 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isWeb } from "@/constants/platform";
-import { AlertTriangle, CheckCircle2 } from "lucide-react-native";
+import { AlertTriangle, CheckCircle2, Info } from "lucide-react-native";
 import { getOverlayRoot, OVERLAY_Z } from "@/lib/overlay-root";
 import {
   HEADER_INNER_HEIGHT,
@@ -14,7 +14,7 @@ import {
   HEADER_TOP_PADDING_MOBILE,
 } from "@/constants/layout";
 
-export type ToastVariant = "default" | "success" | "error";
+export type ToastVariant = "default" | "info" | "success" | "warning" | "error";
 
 export interface ToastShowOptions {
   icon?: ReactNode;
@@ -43,6 +43,7 @@ export interface ToastApi {
 type ToastViewportPlacement = "app-shell" | "panel";
 
 const DEFAULT_DURATION_MS = 2200;
+const TOAST_MAX_WIDTH = 480;
 
 export function useToastHost(): {
   api: ToastApi;
@@ -230,7 +231,9 @@ export function ToastViewport({
   const toastAnimatedStyle = useMemo(
     () => [
       styles.toast,
+      toastVariant === "info" ? styles.toastInfo : null,
       toastVariant === "success" ? styles.toastSuccess : null,
+      toastVariant === "warning" ? styles.toastWarning : null,
       toastVariant === "error" ? styles.toastError : null,
       {
         marginTop: topOffset,
@@ -250,8 +253,12 @@ export function ToastViewport({
   }
 
   let defaultIcon: ReactNode = null;
-  if (toast.variant === "success") {
+  if (toast.variant === "info") {
+    defaultIcon = <Info size={18} color={theme.colors.palette.blue[300]} />;
+  } else if (toast.variant === "success") {
     defaultIcon = <CheckCircle2 size={18} color={theme.colors.primary} />;
+  } else if (toast.variant === "warning") {
+    defaultIcon = <AlertTriangle size={18} color={theme.colors.palette.amber[500]} />;
   } else if (toast.variant === "error") {
     defaultIcon = <AlertTriangle size={18} color={theme.colors.destructive} />;
   }
@@ -259,24 +266,26 @@ export function ToastViewport({
 
   const content = (
     <View style={styles.container} pointerEvents="box-none">
-      <Animated.View
-        testID={toast.testID ?? "app-toast"}
-        onPointerEnter={isWeb ? pauseDismiss : undefined}
-        onPointerLeave={isWeb ? resumeDismiss : undefined}
-        style={toastAnimatedStyle}
-        accessibilityRole="alert"
-      >
-        {icon ? <View style={styles.iconSlot}>{icon}</View> : null}
-        {typeof toast.content === "string" ? (
-          <Text testID="app-toast-message" style={toastMessageStyle}>
-            {toast.content}
-          </Text>
-        ) : (
-          <View testID="app-toast-message" style={styles.contentSlot}>
-            {toast.content}
-          </View>
-        )}
-      </Animated.View>
+      <View style={styles.widthBoundary} pointerEvents="box-none">
+        <Animated.View
+          testID={toast.testID ?? "app-toast"}
+          onPointerEnter={isWeb ? pauseDismiss : undefined}
+          onPointerLeave={isWeb ? resumeDismiss : undefined}
+          style={toastAnimatedStyle}
+          accessibilityRole="alert"
+        >
+          {icon ? <View style={styles.iconSlot}>{icon}</View> : null}
+          {typeof toast.content === "string" ? (
+            <Text testID="app-toast-message" style={toastMessageStyle}>
+              {toast.content}
+            </Text>
+          ) : (
+            <View testID="app-toast-message" style={styles.contentSlot}>
+              {toast.content}
+            </View>
+          )}
+        </Animated.View>
+      </View>
     </View>
   );
 
@@ -296,9 +305,14 @@ const styles = StyleSheet.create((theme) => ({
     zIndex: OVERLAY_Z.toast,
     alignItems: "center",
   },
+  widthBoundary: {
+    width: "92%",
+    maxWidth: TOAST_MAX_WIDTH,
+    alignItems: "center",
+  },
   toast: {
     alignSelf: "center",
-    maxWidth: "92%",
+    maxWidth: "100%",
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[2],
@@ -312,6 +326,12 @@ const styles = StyleSheet.create((theme) => ({
   },
   toastSuccess: {
     borderColor: theme.colors.border,
+  },
+  toastInfo: {
+    borderColor: theme.colors.palette.blue[300],
+  },
+  toastWarning: {
+    borderColor: theme.colors.palette.amber[500],
   },
   toastError: {
     borderColor: theme.colors.destructive,
@@ -327,7 +347,7 @@ const styles = StyleSheet.create((theme) => ({
   message: {
     flexShrink: 1,
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.normal,
   },
   messageError: {

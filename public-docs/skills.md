@@ -1,74 +1,55 @@
 ---
 title: Orchestration skills
-description: "Paseo orchestration skills: teach coding agents to spawn, coordinate, and manage other agents using slash commands."
+description: Reusable workflows for handing off tasks, getting a second opinion, and planning with multiple agents.
 nav: Skills
-order: 32
-category: Automation
+order: 33
+category: Orchestration
 ---
 
 # Orchestration skills
 
-Paseo ships orchestration skills that teach coding agents (Claude Code, Codex) how to use the Paseo CLI to spawn, coordinate, and manage other agents. Skills are slash commands your agent can invoke, they provide the prompts, context, and workflows so agents know how to orchestrate without you writing boilerplate. Install them from the desktop app's Integrations settings or via the CLI.
+Skills give your agents reusable instructions for delegation, handoffs, and reviews. You can also [ask for these workflows directly](/docs/orchestration-workflows) without installing skills.
+
+| Skill              | Use it to                                                            |
+| ------------------ | -------------------------------------------------------------------- |
+| `/paseo`           | Look up how to manage agents, workspaces, schedules, and heartbeats. |
+| `/paseo-handoff`   | Transfer a task and its context to another agent.                    |
+| `/paseo-committee` | Get two independent analyses of a difficult problem.                 |
+| `/paseo-advisor`   | Get a second opinion on your current work.                           |
 
 ## Installation
 
-Two ways to install:
+- **In Paseo:** Open **Settings → your host → Agents → Orchestration skills** and choose which skills to install on that host.
+- **From the terminal:** Run `npx skills add getpaseo/paseo` on the machine where your agents run.
 
-- **Desktop app:** Settings → Integrations → Install
-- **Manual:** `npx skills add getpaseo/paseo`, this installs to `~/.agents/skills/` and sets up symlinks for each agent.
-
-When the desktop app finds installed Paseo skills, it keeps the bundled skills up to date on startup. If automatic update fails, use Settings → Integrations → Update or the manual command above.
+Use the same settings card to update or uninstall skills. The host also refreshes selected installed Paseo skills on startup.
 
 ## `/paseo`, Paseo Reference
 
-The foundational skill. Paseo reference for managing agents and worktrees. Load it when an agent needs to create agents, send them prompts, or manage worktrees.
+The foundational reference used by the other skills. It teaches agents to check your [agent profiles and their notes](/docs/agent-profiles#guide-delegation-with-notes) before delegating, then apply the selected launch settings. If no profile fits, it directs them to discover available providers and models and tell you about the fallback.
 
-Not typically invoked directly by users, it's a reference that other skills depend on.
-
-```
-/paseo show me the Paseo CLI surface for creating an agent in a worktree
-```
+> /paseo show me how to create an agent in a workspace with worktree isolation
 
 ## `/paseo-handoff`, Task Handoff
 
-Hands off the current task to another agent with full context. Use it when you say "handoff", "hand off", "hand this to", or want to pass work to another agent.
+Transfer the current task with a briefing: relevant files, progress, decisions, constraints, and acceptance criteria. The skill checks profiles before choosing the receiving agent; you can name the profile you want.
 
-The receiving agent gets a self-contained briefing with the task, context, relevant files, current state, what's been tried, decisions, acceptance criteria, and constraints. Provider comes from orchestration preferences unless you name one. Supports worktrees when you ask for one.
+> /paseo-handoff hand off the auth fix to an implementation agent in its own worktree
 
-```
-/paseo-handoff hand off the auth fix to codex in a worktree
-/paseo-handoff hand this to claude opus for review
-```
-
-## `/paseo-loop`, Iterative Loops
-
-Runs an agent loop until an exit condition is met. Use it when you say "loop", "babysit", "keep trying until", "check every X", "watch", or want iterative autonomous execution.
-
-A loop is a worker/verifier cycle: launch a worker, check verification, repeat until done or limits hit. It can use a shell check, a verifier prompt, or both. Set a sensible `--max-iterations` or `--max-time`.
-
-```
-/paseo-loop keep trying until the changed test file passes, max 5 iterations
-/paseo-loop babysit PR 123 until checks are green, check every 2m, max-time 1h
-```
+The receiving agent gets the context it needs to continue. Ask for a separate worktree when it should edit independently.
 
 ## `/paseo-committee`, Committee Planning
 
-Forms a committee of two high-reasoning agents to step back, do root cause analysis, and produce a plan. Use it when stuck, looping, tunnel-visioning, or facing a hard planning problem.
+Get two agents to analyze a difficult problem independently. The skill checks profile notes for planning and analysis, preferring different provider families when possible.
 
-Committee members do analysis only. They do not edit, create, or delete files. The orchestrating agent synthesizes their plans, implements, then sends the diff back for review.
+> /paseo-committee why are the websocket connections dropping under load?
 
-```
-/paseo-committee why are the websocket connections dropping under load?
-/paseo-committee plan the auth system migration
-```
+Committee members return analyses without editing files. The main agent synthesizes their plans, implements the solution, and sends the diff back for review.
 
 ## `/paseo-advisor`, Advisor
 
-Spins up a single agent as an advisor, a second opinion on the current task. Use it when you say "advisor", "second opinion", "what does X think", or want an outside take without delegating the work itself.
+Get another agent's judgment on a design, diff, or question. The skill chooses a profile whose notes fit the work, or uses the profile you name.
 
-The advisor gives a judgment. You decide what to do. The advisor prompt is analysis-only and ends with a no-edits instruction.
+> /paseo-advisor did I miss anything in this migration plan?
 
-```
-/paseo-advisor did I miss anything in this migration plan?
-/paseo-advisor --provider claude/opus what is the UX risk in this flow?
-```
+The advisor returns a second opinion without editing files.

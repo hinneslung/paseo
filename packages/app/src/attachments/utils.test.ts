@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { createImageSourceCacheKey, parseDataUrl, parseImageDataUrl, pathToFileUri } from "./utils";
+import {
+  createImageSourceCacheKey,
+  createPreviewAttachmentId,
+  fileUriToPath,
+  localFileSourceToPath,
+  parseDataUrl,
+  parseImageDataUrl,
+  pathToFileUri,
+} from "./utils";
 
 describe("pathToFileUri", () => {
   it("converts POSIX absolute paths to file URIs", () => {
@@ -20,6 +28,28 @@ describe("pathToFileUri", () => {
 
   it("passes through relative paths unchanged", () => {
     expect(pathToFileUri("relative/path")).toBe("relative/path");
+  });
+});
+
+describe("fileUriToPath", () => {
+  it("converts Windows drive-letter file URIs back to paths", () => {
+    expect(fileUriToPath("file:///C:/Users/file.txt")).toBe("C:/Users/file.txt");
+  });
+
+  it("converts host-based file URIs back to UNC paths", () => {
+    expect(fileUriToPath("file://server/share/shot%231.png")).toBe("\\\\server\\share\\shot#1.png");
+  });
+});
+
+describe("localFileSourceToPath", () => {
+  it("decodes markdown-encoded Windows drive-letter paths", () => {
+    expect(localFileSourceToPath("C:%5CUsers%5Cfile.txt")).toBe("C:/Users/file.txt");
+  });
+
+  it("preserves literal percent sequences in plain local paths", () => {
+    expect(localFileSourceToPath("/tmp/image%20with%20literal%20percent.png")).toBe(
+      "/tmp/image%20with%20literal%20percent.png",
+    );
   });
 });
 
@@ -56,5 +86,30 @@ describe("parseImageDataUrl", () => {
 
   it("ignores SVG data URLs", () => {
     expect(parseImageDataUrl("data:image/svg+xml;base64,PHN2ZyAvPg==")).toBeNull();
+  });
+
+  it("distinguishes image data that differs only in the middle", () => {
+    const prefix = "a".repeat(64);
+    const suffix = "z".repeat(64);
+    const first = `data:image/png;base64,${prefix}${"b".repeat(256)}${suffix}`;
+    const second = `data:image/png;base64,${prefix}${"c".repeat(256)}${suffix}`;
+
+    expect(createImageSourceCacheKey(first)).not.toBe(createImageSourceCacheKey(second));
+  });
+
+  it("gives equal-length preview content distinct attachment identities", () => {
+    expect(
+      createPreviewAttachmentId({
+        mimeType: "image/png",
+        contentLength: 512,
+        contentKey: "first-content",
+      }),
+    ).not.toBe(
+      createPreviewAttachmentId({
+        mimeType: "image/png",
+        contentLength: 512,
+        contentKey: "second-content",
+      }),
+    );
   });
 });

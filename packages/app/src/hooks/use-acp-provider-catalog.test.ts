@@ -34,6 +34,10 @@ describe("ACP provider catalog", () => {
     }
   });
 
+  it("does not offer Pi's unsupported ACP adapter", () => {
+    expect(ACP_PROVIDER_CATALOG.some((entry) => entry.id === "pi-acp")).toBe(false);
+  });
+
   it("uses PATH commands for entries that were binary distributions upstream", () => {
     expect(findProvider("amp-acp").command).toEqual(["amp-acp"]);
     expect(findProvider("cursor").command).toEqual(["cursor-agent", "acp"]);
@@ -43,6 +47,16 @@ describe("ACP provider catalog", () => {
     expect(findProvider("junie").command).toEqual(["junie", "--acp", "true"]);
     expect(findProvider("kiro").command).toEqual(["kiro-cli", "acp"]);
     expect(findProvider("poolside").command).toEqual(["pool", "acp"]);
+    expect(findProvider("traecli").command).toEqual(["traecli", "acp", "serve"]);
+  });
+
+  it("offers MiniMax Code through its pinned public ACP package", () => {
+    expect(findProvider("minimax-code")).toMatchObject({
+      title: "MiniMax Code",
+      version: "0.1.2",
+      command: ["npx", "-y", "@minimax-ai/code@0.1.2", "acp"],
+    });
+    expect(findProvider("minimax-code").iconSvg).toContain("<svg");
   });
 
   it("maps a catalog entry to the daemon provider config patch", () => {
@@ -65,6 +79,13 @@ describe("ACP provider catalog", () => {
     expect(patch.providers?.auggie?.env).toEqual({
       AUGMENT_DISABLE_AUTO_UPDATE: "1",
     });
+  });
+
+  it("registers Gajae Code with its ACP command and permission-prompt env", () => {
+    const patch = buildAcpProviderConfigPatch(findProvider("gjc"));
+
+    expect(patch.providers?.gjc?.command).toEqual(["gjc", "acp"]);
+    expect(patch.providers?.gjc?.env).toEqual({ GJC_ACP_PERMISSION_MODE: "prompt" });
   });
 
   it("preserves provider params in the daemon config patch", () => {

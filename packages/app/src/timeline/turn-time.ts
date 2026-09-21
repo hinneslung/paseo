@@ -1,9 +1,9 @@
 import type { StreamItem } from "@/types/stream";
+import { startsNewTurn } from "@/agent-stream/turn-membership";
 
 export interface TurnTiming {
-  startedAt: Date;
   completedAt: Date;
-  durationMs: number;
+  durationMs: number | null;
 }
 
 export interface StreamTurnTiming {
@@ -12,7 +12,8 @@ export interface StreamTurnTiming {
 }
 
 export function deriveStreamTurnTiming(params: {
-  agentStatus: string;
+  isTurnActive: boolean;
+  activeTurnStartedAt: Date | null;
   tail: StreamItem[];
   head: StreamItem[];
 }): StreamTurnTiming {
@@ -20,15 +21,17 @@ export function deriveStreamTurnTiming(params: {
   let currentUserAt: Date | null = null;
   let currentLastItemAt: Date | null = null;
   let currentAssistantIds: string[] = [];
+  let previousItem: StreamItem | null = null;
 
   const flushCompletedTurn = () => {
-    if (!currentUserAt || !currentLastItemAt || currentAssistantIds.length === 0) {
+    if (!currentLastItemAt || currentAssistantIds.length === 0) {
       return;
     }
     const timing: TurnTiming = {
-      startedAt: currentUserAt,
       completedAt: currentLastItemAt,
-      durationMs: Math.max(0, currentLastItemAt.getTime() - currentUserAt.getTime()),
+      durationMs: currentUserAt
+        ? Math.max(0, currentLastItemAt.getTime() - currentUserAt.getTime())
+        : null,
     };
     for (const id of currentAssistantIds) {
       byAssistantId.set(id, timing);
@@ -36,20 +39,17 @@ export function deriveStreamTurnTiming(params: {
   };
 
   const visitItem = (item: StreamItem) => {
-    if (item.kind === "user_message") {
+    if (startsNewTurn(item, previousItem)) {
       flushCompletedTurn();
-      currentUserAt = item.timestamp;
+      currentUserAt = item.kind === "user_message" ? item.timestamp : null;
       currentLastItemAt = null;
       currentAssistantIds = [];
-      return;
-    }
-    if (!currentUserAt) {
-      return;
     }
     currentLastItemAt = item.timestamp;
     if (item.kind === "assistant_message") {
       currentAssistantIds.push(item.id);
     }
+    previousItem = item;
   };
 
   for (const item of params.tail) {
@@ -59,11 +59,8 @@ export function deriveStreamTurnTiming(params: {
     visitItem(item);
   }
 
-  const runningStartedAt =
-    params.agentStatus === "running"
-      ? (findLastUserMessageTimestamp(params.head) ?? currentUserAt)
-      : null;
-  if (params.agentStatus !== "running") {
+  const runningStartedAt = params.isTurnActive ? params.activeTurnStartedAt : null;
+  if (!params.isTurnActive) {
     flushCompletedTurn();
   }
 
@@ -71,14 +68,4 @@ export function deriveStreamTurnTiming(params: {
     byAssistantId,
     runningStartedAt,
   };
-}
-
-function findLastUserMessageTimestamp(items: StreamItem[]): Date | null {
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    const item = items[i];
-    if (item?.kind === "user_message") {
-      return item.timestamp;
-    }
-  }
-  return null;
 }

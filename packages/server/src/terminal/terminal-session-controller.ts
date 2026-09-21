@@ -33,6 +33,7 @@ import {
 } from "./terminal-restore.js";
 import type { TerminalSession } from "./terminal.js";
 import type { TerminalManager, TerminalsChangedEvent } from "./terminal-manager.js";
+import { applyTerminalSize } from "./terminal-size-ownership.js";
 import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
 import { terminalSubscriptionKey } from "@getpaseo/protocol/terminal-subscription-key";
 
@@ -130,6 +131,7 @@ export class TerminalSessionController {
   private readonly listTerminalWorkspaceRoots: () => Promise<readonly string[]>;
   private readonly clientSupportsWrapReflow: () => boolean;
   private readonly getClientBufferedAmount: () => number | null;
+  private readonly terminalSizeOwner = {};
 
   // A subscription is scoped to a (cwd, workspaceId) pair, keyed by
   // terminalSubscriptionKey: two workspaces sharing a cwd subscribe and unsub
@@ -174,6 +176,19 @@ export class TerminalSessionController {
       directorySubscriptionCount: this.subscribedDirectories.size,
       streamSubscriptionCount: this.activeStreams.size,
     };
+  }
+
+  async hasDirectorySubscription(input: { cwd: string; workspaceId?: string }): Promise<boolean> {
+    const workspaceRoots = await this.listTerminalWorkspaceRoots();
+    return Array.from(this.subscribedDirectories.values()).some((subscription) => {
+      if (
+        subscription.workspaceId !== undefined &&
+        subscription.workspaceId !== input.workspaceId
+      ) {
+        return false;
+      }
+      return this.terminalBelongsToRoot(subscription.cwd, input.cwd, workspaceRoots);
+    });
   }
 
   dispatch(msg: SessionInboundMessage): Promise<void> | undefined {
@@ -239,7 +254,7 @@ export class TerminalSessionController {
         if (!resize) {
           return;
         }
-        terminal.send({ type: "resize", rows: resize.rows, cols: resize.cols });
+        applyTerminalSize(terminal, this.terminalSizeOwner, resize);
         return;
       }
 
@@ -411,10 +426,16 @@ export class TerminalSessionController {
     }
 
     try {
-      const terminals =
-        typeof msg.cwd === "string"
-          ? await this.getTerminalsForWorkspaceRoot(msg.cwd, msg.workspaceId)
-          : await this.getAllTerminalSessions();
+      let terminals: TerminalSession[];
+      if (msg.workspaceId !== undefined) {
+        terminals = (await this.getAllTerminalSessions()).filter(
+          (terminal) => terminal.workspaceId === msg.workspaceId,
+        );
+      } else if (typeof msg.cwd === "string") {
+        terminals = await this.getTerminalsForWorkspaceRoot(msg.cwd);
+      } else {
+        terminals = await this.getAllTerminalSessions();
+      }
       for (const terminal of terminals) {
         this.ensureExitSubscription(terminal);
       }
@@ -422,7 +443,9 @@ export class TerminalSessionController {
         type: "list_terminals_response",
         payload: {
           ...(msg.cwd ? { cwd: msg.cwd } : {}),
-          terminals: terminals.map((terminal) => this.toTerminalInfo(terminal)),
+          terminals: terminals.map((terminal) =>
+            Object.assign(this.toTerminalInfo(terminal), { cwd: terminal.cwd }),
+          ),
           requestId: msg.requestId,
         },
       });
@@ -448,7 +471,9 @@ export class TerminalSessionController {
     const terminalsByDirectory = await Promise.all(
       directories.map((cwd) => manager.getTerminals(cwd)),
     );
-    return terminalsByDirectory.flat();
+    return [
+      ...new Map(terminalsByDirectory.flat().map((terminal) => [terminal.id, terminal])).values(),
+    ];
   }
 
   private async getTerminalsForWorkspaceRoot(
@@ -543,12 +568,19 @@ export class TerminalSessionController {
         return;
       }
 
+      const workspaces = await this.listTerminalWorkspaceRefs();
+      if (!workspaces.some((workspace) => workspace.workspaceId === workspaceId)) {
+        throw new Error(`Workspace ${workspaceId} is not active or does not exist`);
+      }
+
       const session = await this.terminalManager.createTerminal({
         cwd: msg.cwd,
         workspaceId,
         name: msg.name,
         command: msg.command,
         args: msg.args,
+        rows: msg.size?.rows,
+        cols: msg.size?.cols,
       });
       this.ensureExitSubscription(session);
       this.emit({
@@ -658,17 +690,10 @@ export class TerminalSessionController {
     this.ensureExitSubscription(session);
 
     if (msg.restore?.size) {
-      const currentSize = session.getSize();
-      if (
-        currentSize.rows !== msg.restore.size.rows ||
-        currentSize.cols !== msg.restore.size.cols
-      ) {
-        session.send({
-          type: "resize",
-          rows: msg.restore.size.rows,
-          cols: msg.restore.size.cols,
-        });
-      }
+      applyTerminalSize(session, this.terminalSizeOwner, {
+        ...msg.restore.size,
+        intent: "claim",
+      });
     }
 
     const slot = this.bindActiveStream(session, { restore: msg.restore });
@@ -723,10 +748,8 @@ export class TerminalSessionController {
     this.ensureExitSubscription(session);
 
     if (msg.message.type === "resize") {
-      const currentSize = session.getSize();
-      if (currentSize.rows === msg.message.rows && currentSize.cols === msg.message.cols) {
-        return;
-      }
+      applyTerminalSize(session, this.terminalSizeOwner, msg.message);
+      return;
     }
 
     session.send(msg.message);
@@ -738,12 +761,24 @@ export class TerminalSessionController {
   }
 
   private async handleKillTerminalRequest(msg: KillTerminalRequest): Promise<void> {
-    const result = this.killTerminalForClose(msg.terminalId);
+    let success = false;
+    if (this.terminalManager) {
+      try {
+        this.detachStream(msg.terminalId, { emitExit: true });
+        await this.terminalManager.killTerminalAndWait(msg.terminalId);
+        success = true;
+      } catch (error) {
+        this.sessionLogger.error(
+          { err: error, terminalId: msg.terminalId },
+          "Failed to kill terminal",
+        );
+      }
+    }
     this.emit({
       type: "kill_terminal_response",
       payload: {
-        terminalId: result.terminalId,
-        success: result.success,
+        terminalId: msg.terminalId,
+        success,
         requestId: msg.requestId,
       },
     });

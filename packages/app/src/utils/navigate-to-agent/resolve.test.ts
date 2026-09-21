@@ -4,7 +4,7 @@ import {
   type AgentNavTarget,
   type NavigateToAgentDeps,
 } from "@/utils/navigate-to-agent/resolve";
-import type { NavigateToPreparedWorkspaceTabInput } from "@/utils/prepare-workspace-tab";
+import type { NavigateToWorkspaceInput } from "@/stores/navigation-active-workspace-store";
 
 const SERVER_ID = "server-1";
 const WORKSPACE_ID = "workspace-1";
@@ -14,38 +14,26 @@ interface RecordedHostNav {
   route: string;
 }
 
-interface RecordedTabNav extends NavigateToPreparedWorkspaceTabInput {}
-
-interface RecordedRestore {
-  serverId: string;
-  agentId: string;
-  workspaceId: string;
-}
+interface RecordedTabNav extends NavigateToWorkspaceInput {}
 
 function createFakeNavigators(target: AgentNavTarget): {
   deps: NavigateToAgentDeps;
   hostNavigations: RecordedHostNav[];
   tabNavigations: RecordedTabNav[];
-  restores: RecordedRestore[];
 } {
   const hostNavigations: RecordedHostNav[] = [];
   const tabNavigations: RecordedTabNav[] = [];
-  const restores: RecordedRestore[] = [];
   return {
     hostNavigations,
     tabNavigations,
-    restores,
     deps: {
       readAgentNavTarget: () => target,
       navigateToHostAgent: (route) => {
         hostNavigations.push({ route });
       },
-      navigateToPreparedWorkspaceTab: (input) => {
+      navigateToWorkspace: (input) => {
         tabNavigations.push(input);
         return `/h/${input.serverId}/workspace/${input.workspaceId}`;
-      },
-      restoreArchivedWorkspace: (input) => {
-        restores.push(input);
       },
     },
   };
@@ -69,23 +57,9 @@ describe("resolveNavigateToAgent", () => {
         serverId: SERVER_ID,
         workspaceId: WORKSPACE_ID,
         target: { kind: "agent", agentId: AGENT_ID },
-        currentPathname: undefined,
         pin: true,
       },
     ]);
-  });
-
-  it("delegates a restore attempt whenever a workspaceId resolves", () => {
-    const { deps, restores, tabNavigations } = createFakeNavigators({
-      agentWorkspaceId: WORKSPACE_ID,
-    });
-
-    resolveNavigateToAgent({ serverId: SERVER_ID, agentId: AGENT_ID, pin: true }, deps);
-
-    expect(restores).toEqual([
-      { serverId: SERVER_ID, agentId: AGENT_ID, workspaceId: WORKSPACE_ID },
-    ]);
-    expect(tabNavigations).toHaveLength(1);
   });
 
   it("uses the input workspaceId without reading the nav target", () => {
@@ -107,21 +81,9 @@ describe("resolveNavigateToAgent", () => {
         serverId: SERVER_ID,
         workspaceId: WORKSPACE_ID,
         target: { kind: "agent", agentId: AGENT_ID },
-        currentPathname: undefined,
         pin: undefined,
       },
     ]);
-  });
-
-  it("does not trigger a restore when no workspaceId resolves", () => {
-    const { deps, restores, hostNavigations } = createFakeNavigators({
-      agentWorkspaceId: null,
-    });
-
-    resolveNavigateToAgent({ serverId: SERVER_ID, agentId: AGENT_ID }, deps);
-
-    expect(restores).toEqual([]);
-    expect(hostNavigations).toHaveLength(1);
   });
 
   it("falls back to the host agent route when the agent has no workspaceId", () => {

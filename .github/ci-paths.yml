@@ -1,0 +1,86 @@
+# Pull-request checks are routed by the behavior they prove. Package consumers
+# do not inherit their dependencies' test suites; main and manual runs execute
+# every contract regardless of these paths.
+routing:
+  - ".github/ci-paths.yml"
+
+workspace:
+  - ".mise.toml"
+  - ".tool-versions"
+  - "package.json"
+  - "package-lock.json"
+  - "patches/**"
+  - "scripts/**"
+  - "tsconfig.json"
+  - "tsconfig.base.json"
+  - "vitest.config.ts"
+
+ci:
+  - ".github/actions/**"
+  - ".github/workflows/ci.yml"
+
+format:
+  - ".agents/**/*.{cjs,css,html,js,json,jsonc,jsx,md,mjs,ts,tsx,yaml,yml}"
+  - ".github/**/*.{cjs,css,html,js,json,jsonc,jsx,md,mjs,ts,tsx,yaml,yml}"
+  - "**/*.{cjs,css,html,js,json,jsonc,jsx,md,mjs,ts,tsx,yaml,yml}"
+  - "packages/expo-two-way-audio/**"
+
+quality:
+  - "**/*.{cjs,js,json,jsx,mjs,ts,tsx}"
+  - "packages/expo-two-way-audio/**"
+
+hub:
+  - "packages/cli/src/commands/hub/**"
+  - "packages/server/src/server/hub/**"
+
+server:
+  - "packages/server/**"
+  - "packages/app/e2e/support/fixtures/recording.*"
+
+desktop:
+  - "packages/desktop/**"
+  - "packages/app/src/desktop/**"
+  - "packages/server/src/server/browser-tools/**"
+  - "packages/app/e2e/support/**"
+  - "packages/app/*config.{cjs,js,ts}"
+  - "packages/app/package.json"
+
+app:
+  - "packages/app/**"
+  - "packages/expo-two-way-audio/**"
+
+sdk:
+  - "packages/plugin/**"
+  - "plugin-examples/**"
+  - "public-docs/plugins/v0.8/**"
+  - "packages/client/**"
+  - "packages/highlight/**"
+  - "packages/protocol/**"
+
+browser:
+  - "packages/server/src/server/agent/provider-snapshot-manager.ts"
+  - "packages/server/src/server/session/provider/provider-catalog-session.ts"
+  - "packages/client/src/compat/normalize-provider-models.ts"
+  - "packages/protocol/src/client-capabilities.ts"
+  - "packages/server/src/server/agent/provider-registry.ts"
+  - "packages/server/src/server/agent/agent-sdk-types.ts"
+  - "packages/server/src/server/agent/providers/codex-app-server-agent.ts"
+  - "packages/server/src/server/agent/providers/claude/agent.ts"
+  - "packages/server/src/server/agent/plugin-provider.ts"
+  - "packages/server/src/server/plugins/{index,plugin-process,plugin-process-protocol,runtime}.ts"
+  - "packages/server/src/executable-resolution/**"
+  - "packages/plugin/src/server/provider.ts"
+  - "packages/app/src/!(desktop)/**"
+  - "packages/app/e2e/browser/**"
+  - "packages/app/e2e/support/**"
+  - "packages/app/assets/**"
+  - "packages/app/public/**"
+  - "packages/app/index.ts"
+  - "packages/app/*config.{cjs,js,ts}"
+  - "packages/app/package.json"
+
+relay:
+  - "packages/relay/**"
+
+cli:
+  - "packages/cli/**"

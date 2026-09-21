@@ -1,22 +1,32 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import type { Logger } from "pino";
+import pLimit, { type LimitFunction } from "p-limit";
 
 import { expandTilde } from "../../utils/path.js";
 import { withTimeout } from "../../utils/promise-timeout.js";
-import type {
-  AgentClient,
-  AgentCreateConfigParent,
-  AgentMode,
-  AgentModelDefinition,
-  AgentProvider,
-  ProviderSnapshotEntry,
+import {
+  filterSelectableAgentModels,
+  type AgentClient,
+  type AgentCreateConfigParent,
+  type AgentMode,
+  type AgentModelDefinition,
+  type AgentProvider,
+  type FetchCatalogOptions,
+  type ProviderSnapshotEntry,
 } from "./agent-sdk-types.js";
+import {
+  raceProviderRefreshAbort,
+  runProviderRefreshWithDeadline,
+} from "./provider-refresh-deadline.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { WorkspaceGitService } from "../workspace-git-service.js";
 import type { ManagedProcessRegistry } from "../managed-processes/managed-processes.js";
+import type { OpenCodeBridge } from "./providers/opencode/bridge.js";
 import type {
   AgentProviderRuntimeSettingsMap,
   ProviderOverride,
@@ -26,32 +36,79 @@ import {
   shutdownAgentClients,
   type ProviderDefinition,
 } from "./provider-registry.js";
+import { BUILTIN_PROVIDER_IDS } from "@getpaseo/protocol/provider-manifest";
 import { applyMutableProviderConfigToOverrides } from "../daemon-config-store.js";
-import { formatProviderDiagnostic } from "./providers/diagnostic-utils.js";
+import {
+  formatProviderDiagnostic,
+  formatProviderDiagnosticError,
+} from "./providers/diagnostic-utils.js";
 import type { MutableDaemonConfig } from "../daemon-config-store.js";
+import type { HubExecutionAgentValidationIssue } from "@getpaseo/protocol/messages";
+import {
+  type AgentConfigurationValidationInput,
+  validateAgentConfigurationAgainstProvider,
+} from "./agent-configuration-validator.js";
+import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
+import { PluginAgentClientRegistry } from "./plugin-provider.js";
 
-const DEFAULT_REFRESH_TIMEOUT_MS = 30_000;
-const REFRESH_TIMEOUT_ENV_VAR = "PASEO_PROVIDER_REFRESH_TIMEOUT_MS";
+const DEFAULT_REFRESH_TIMEOUT_MS = 120_000;
+const MAX_REFRESH_TIMEOUT_MS = 2_147_483_647;
+const DEFAULT_DIAGNOSTIC_TIMEOUT_MS = 120_000;
+const PROVIDER_REFRESH_DEADLINE_ENV = "PASEO_PROVIDER_REFRESH_TIMEOUT_MS";
+export const GLOBAL_PROVIDER_SNAPSHOT_KEY = "paseo:global";
 
-// Provider refresh probes can be slow on cold starts (e.g. Copilot's first
-// `copilot --acp` invocation, OpenCode workspace probes with many MCP servers).
-// Allow operators to bump the ceiling via env var without rebuilding.
-function resolveRefreshTimeoutMs(option: number | undefined): number {
+function validRefreshDeadline(value: unknown): number | undefined {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= MAX_REFRESH_TIMEOUT_MS
+    ? value
+    : undefined;
+}
+
+function providerRefreshDeadline(configured: number | undefined): number {
+  const explicit = validRefreshDeadline(configured);
+  if (explicit !== undefined) return explicit;
+  return (
+    validRefreshDeadline(Number(process.env[PROVIDER_REFRESH_DEADLINE_ENV])) ??
+    DEFAULT_REFRESH_TIMEOUT_MS
+  );
+}
+
+function resolveDiagnosticTimeoutMs(option: number | undefined, refreshTimeoutMs: number): number {
   if (typeof option === "number" && Number.isFinite(option) && option > 0) {
     return option;
   }
-  const fromEnv = process.env[REFRESH_TIMEOUT_ENV_VAR];
-  if (fromEnv) {
-    // Number() handles scientific notation (e.g. "6e4") which parseInt would silently truncate.
-    const parsed = Number(fromEnv);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return parsed;
-    }
-  }
-  return DEFAULT_REFRESH_TIMEOUT_MS;
+  return Math.max(refreshTimeoutMs, DEFAULT_DIAGNOSTIC_TIMEOUT_MS);
 }
 
-type ProviderSnapshotChangeListener = (entries: ProviderSnapshotEntry[], cwd: string) => void;
+function omitProviderOverrides(
+  overrides: Record<string, ProviderOverride> | undefined,
+  providers: readonly string[],
+): Record<string, ProviderOverride> | undefined {
+  if (!overrides || providers.length === 0) return overrides;
+  const nextOverrides = { ...overrides };
+  for (const provider of providers) delete nextOverrides[provider];
+  return Object.keys(nextOverrides).length > 0 ? nextOverrides : undefined;
+}
+
+/** Published values are shared read-only; provider-owned data is detached at publication. */
+export interface ProviderSnapshotRecord {
+  readonly entry: ProviderSnapshotEntry;
+  readonly contentHash: string;
+}
+
+export interface ProviderSnapshot {
+  readonly cwd: string;
+  readonly records: readonly ProviderSnapshotRecord[];
+}
+
+export interface ProviderSnapshotTransition {
+  readonly previous: ProviderSnapshot;
+  readonly current: ProviderSnapshot;
+}
+
+type ProviderSnapshotChangeListener = (transition: ProviderSnapshotTransition) => void;
 
 export interface ProviderSnapshotManagerOptions {
   logger: Logger;
@@ -62,6 +119,8 @@ export interface ProviderSnapshotManagerOptions {
   isDev?: boolean;
   extraClients?: Partial<Record<AgentProvider, AgentClient>>;
   refreshTimeoutMs?: number;
+  diagnosticTimeoutMs?: number;
+  openCodeBridge?: OpenCodeBridge;
 }
 
 interface ProviderSnapshotRefreshOptions {
@@ -69,10 +128,25 @@ interface ProviderSnapshotRefreshOptions {
   providers?: AgentProvider[];
 }
 
+interface ProviderSnapshotWarmUpOptions {
+  cwd?: string | null;
+  providers?: AgentProvider[];
+}
+
 interface ProviderSnapshotReadOptions {
   cwd?: string | null;
   providers?: AgentProvider[];
   wait?: boolean;
+}
+
+interface ApplyMutableProviderConfigOptions {
+  removeProviders?: readonly string[];
+  replace?: boolean;
+}
+
+export interface PreparedMutableProviderConfig {
+  agentManagerState: AgentManagerProviderState;
+  commit(): void;
 }
 
 interface ProviderSnapshotProviderOptions {
@@ -108,83 +182,150 @@ export interface ProviderDiagnosticResult {
 
 export interface AgentManagerProviderState {
   providerDefinitions: Partial<
-    Record<AgentProvider, { enabled: boolean; derivedFromProviderId: string | null }>
+    Record<
+      AgentProvider,
+      Pick<
+        ProviderDefinition,
+        "enabled" | "derivedFromProviderId" | "validateOptions" | "applyOptions" | "applyToolPolicy"
+      >
+    >
   >;
   clients: Partial<Record<AgentProvider, AgentClient>>;
+  retiredProviders?: readonly AgentProvider[];
 }
 
 interface ProviderLoadOptions {
-  cwd: string;
+  snapshotCwd: string;
   providers: AgentProvider[];
+  catalogScope: ProviderCatalogScope;
   force: boolean;
 }
-interface ProviderLoad {
+interface CatalogBinding {
+  key?: string;
+  failure?: ProviderSnapshotRecord;
+  /** Refresh intent survives reads that supersede an unfinished key lookup. */
+  force: boolean;
   promise: Promise<void>;
 }
 
+interface ProviderCatalog {
+  result?: ProviderSnapshotRecord;
+  stale?: boolean;
+  load?: Promise<void>;
+}
+
+interface RegistryGeneration {
+  definitions: Record<AgentProvider, ProviderDefinition>;
+  order: readonly AgentProvider[];
+  providerStates: ReadonlyMap<
+    AgentProvider,
+    { initial: ProviderSnapshotRecord; discoveryLimit: LimitFunction }
+  >;
+}
+
+interface Target {
+  bindings: Map<AgentProvider, CatalogBinding>;
+  snapshot: ProviderSnapshot;
+}
+
+type ProviderCatalogScope = { scope: "global" } | { scope: "workspace"; cwd: string };
+
+interface ProviderSnapshotTarget {
+  snapshotCwd: string;
+  catalogScope: ProviderCatalogScope;
+}
+
 export class ProviderSnapshotManager {
-  private readonly snapshots = new Map<string, Map<AgentProvider, ProviderSnapshotEntry>>();
-  private readonly providerLoads = new Map<string, Map<AgentProvider, ProviderLoad>>();
+  private readonly catalogs = new Map<string, Map<AgentProvider, ProviderCatalog>>();
+  private readonly targets = new Map<string, Target>();
   private readonly events = new EventEmitter();
   private destroyed = false;
-  private readonly refreshTimeoutMs: number;
+  private refreshTimeoutMs: number;
+  private diagnosticTimeoutMs: number;
   private readonly logger: Logger;
   private readonly workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   private readonly managedProcesses?: ManagedProcessRegistry;
+  private readonly openCodeBridge?: OpenCodeBridge;
   private readonly isDev: boolean;
   private readonly extraClients: Partial<Record<AgentProvider, AgentClient>>;
   private runtimeSettings: AgentProviderRuntimeSettingsMap | undefined;
   private providerOverrides: Record<string, ProviderOverride> | undefined;
-  private readonly baseProviderOverrides: Record<string, ProviderOverride> | undefined;
-  private providerRegistry: Record<AgentProvider, ProviderDefinition>;
+  private baseProviderOverrides: Record<string, ProviderOverride> | undefined;
+  private generation: RegistryGeneration;
   private providerClients: Record<AgentProvider, AgentClient>;
+  private readonly ownedClients = new Set<AgentClient>();
+  private readonly pluginProviders: PluginAgentClientRegistry;
 
   constructor(options: ProviderSnapshotManagerOptions) {
     this.logger = options.logger;
+    this.pluginProviders = new PluginAgentClientRegistry(
+      options.logger.child({ module: "plugin-providers" }),
+    );
     this.workspaceGitService = options.workspaceGitService;
     this.managedProcesses = options.managedProcesses;
+    this.openCodeBridge = options.openCodeBridge;
     this.isDev = options.isDev === true;
     this.extraClients = options.extraClients ?? {};
     this.runtimeSettings = options.runtimeSettings;
     this.providerOverrides = options.providerOverrides;
     this.baseProviderOverrides = options.providerOverrides;
-    this.refreshTimeoutMs = resolveRefreshTimeoutMs(options.refreshTimeoutMs);
-    this.providerRegistry = this.buildRegistry();
-    this.providerClients = { ...this.extraClients } as Record<AgentProvider, AgentClient>;
+    this.refreshTimeoutMs = providerRefreshDeadline(options.refreshTimeoutMs);
+    this.diagnosticTimeoutMs = resolveDiagnosticTimeoutMs(
+      options.diagnosticTimeoutMs,
+      this.refreshTimeoutMs,
+    );
+    this.generation = this.createGeneration(
+      this.buildRegistry(this.runtimeSettings, this.providerOverrides),
+      this.providerOverrides,
+    );
+    this.providerClients = {
+      ...this.extraClients,
+      ...this.pluginProviders.clients(),
+    } as Record<AgentProvider, AgentClient>;
+    for (const client of Object.values(this.providerClients)) this.ownedClients.add(client);
   }
 
-  getSnapshot(cwd?: string): ProviderSnapshotEntry[] {
-    const resolvedCwd = resolveSnapshotCwd(cwd);
-    const providersToWarm = this.resolveProvidersToWarm(resolvedCwd);
-    if (providersToWarm.length > 0) {
-      void this.warmUp(resolvedCwd, providersToWarm);
-    }
-    return entriesToArray(this.getOrCreateSnapshot(resolvedCwd));
+  getSnapshot(cwd?: string): ProviderSnapshot {
+    const target = resolveProviderSnapshotTarget(cwd);
+    return this.getSnapshotForTarget(target);
   }
 
   async refreshSnapshotForCwd(options: ProviderSnapshotRefreshOptions): Promise<void> {
     const snapshotCwd = resolveSnapshotCwd(options.cwd);
+    const target = createWorkspaceSnapshotTarget(snapshotCwd);
     const providers = this.resolveRefreshProviders(options.providers);
-    this.resetSnapshotToLoading(snapshotCwd, providers, { preserveExisting: false });
-    this.emitChange(snapshotCwd);
-    await this.refreshProviders(snapshotCwd, providers ?? this.getProviderIds());
+    const providersToRefresh = providers ?? this.getProviderIds();
+    await this.refreshProviders(target, providersToRefresh);
   }
 
   async refreshSettingsSnapshot(
     options: Omit<ProviderSnapshotRefreshOptions, "cwd"> = {},
   ): Promise<void> {
-    const homeCwd = resolveSnapshotCwd();
+    const target = createGlobalSnapshotTarget();
+    const homeCwd = target.snapshotCwd;
     const providers = this.resolveRefreshProviders(options.providers);
     const providersToRefresh = providers ?? this.getProviderIds();
 
-    this.clearCachedProviders(providers);
-    this.resetSnapshotToLoading(homeCwd, providers, { preserveExisting: false });
-    this.emitChange(homeCwd);
-    await this.refreshProviders(homeCwd, providersToRefresh);
+    this.getOrCreateTarget(homeCwd);
+    for (const catalogs of this.catalogs.values()) {
+      for (const provider of providersToRefresh) {
+        const catalog = catalogs.get(provider);
+        if (catalog) catalogs.set(provider, { result: catalog.result, stale: true });
+      }
+    }
+    // Refresh each known target: provider keys coalesce reads, while target-scoped
+    // providers must discover again in their own execution context.
+    await this.refreshProviders(target, providersToRefresh);
+    await Promise.all(
+      [...this.targets.keys()]
+        .filter((cwd) => cwd !== homeCwd)
+        .map((cwd) => this.warmUp(createWorkspaceSnapshotTarget(cwd), providersToRefresh)),
+    );
   }
 
-  async warmUpSnapshotForCwd(options: ProviderSnapshotRefreshOptions): Promise<void> {
-    const snapshotCwd = resolveSnapshotCwd(options.cwd);
+  async warmUpSnapshotForCwd(options: ProviderSnapshotWarmUpOptions): Promise<void> {
+    const target = resolveProviderSnapshotTarget(options.cwd);
+    const snapshotCwd = target.snapshotCwd;
     const providers = this.resolveRefreshProviders(options.providers);
     if (options.providers && providers?.length === 0) {
       return;
@@ -194,7 +335,7 @@ export class ProviderSnapshotManager {
     if (providersToWarm.length === 0) {
       return;
     }
-    await this.warmUp(snapshotCwd, providersToWarm);
+    await this.warmUp(target, providersToWarm);
   }
 
   async refresh(options: ProviderSnapshotRefreshOptions): Promise<void> {
@@ -206,23 +347,33 @@ export class ProviderSnapshotManager {
   }
 
   hasProvider(provider: AgentProvider): boolean {
-    return Object.prototype.hasOwnProperty.call(this.providerRegistry, provider);
+    return Object.prototype.hasOwnProperty.call(this.generation.definitions, provider);
   }
 
   getProviderLabel(provider: AgentProvider): string {
-    return this.providerRegistry[provider]?.label ?? provider;
+    return this.generation.definitions[provider]?.label ?? provider;
   }
 
   getAgentManagerProviderState(): AgentManagerProviderState {
+    return this.createAgentManagerState(this.generation.definitions, this.providerClients);
+  }
+
+  private createAgentManagerState(
+    definitions: Record<AgentProvider, ProviderDefinition>,
+    providerClients: Record<AgentProvider, AgentClient>,
+  ): AgentManagerProviderState {
     const providerDefinitions: AgentManagerProviderState["providerDefinitions"] = {};
     const clients: AgentManagerProviderState["clients"] = {};
-    for (const [provider, definition] of Object.entries(this.providerRegistry)) {
+    for (const [provider, definition] of Object.entries(definitions)) {
       providerDefinitions[provider] = {
         enabled: definition.enabled,
         derivedFromProviderId: definition.derivedFromProviderId,
+        validateOptions: definition.validateOptions,
+        applyOptions: definition.applyOptions,
+        applyToolPolicy: definition.applyToolPolicy,
       };
       if (definition.enabled) {
-        clients[provider] = this.ensureClient(provider, definition);
+        clients[provider] = this.ensureClient(provider, definition, providerClients);
       }
     }
     for (const [provider, client] of Object.entries(this.extraClients)) {
@@ -233,23 +384,69 @@ export class ProviderSnapshotManager {
     return { providerDefinitions, clients };
   }
 
-  private ensureClient(provider: AgentProvider, definition: ProviderDefinition): AgentClient {
-    const existing = this.providerClients[provider];
+  replacePluginProviders(
+    registrations: readonly ProviderRegistration[],
+  ): AgentManagerProviderState {
+    for (const registration of registrations) {
+      if (
+        (this.generation.definitions[registration.id] || this.extraClients[registration.id]) &&
+        !this.pluginProviders.has(registration.id)
+      ) {
+        throw new Error(
+          `Plugin provider '${registration.id}' conflicts with a configured provider`,
+        );
+      }
+    }
+    const previousPlugins = this.pluginProviders.definitions();
+    const clients = { ...this.providerClients };
+    // Materialize fallible installed clients before retiring any plugin runtime.
+    this.createAgentManagerState(this.generation.definitions, clients);
+    this.pluginProviders.replace(registrations);
+    const plugins = this.pluginProviders.definitions();
+    const retiredProviders = Object.keys(previousPlugins).filter(
+      (provider) => previousPlugins[provider] !== plugins[provider],
+    );
+    const definitions = { ...this.generation.definitions };
+    const changed = new Set<AgentProvider>();
+    for (const provider of new Set([...Object.keys(previousPlugins), ...Object.keys(plugins)])) {
+      if (previousPlugins[provider] !== plugins[provider]) changed.add(provider);
+      delete definitions[provider];
+      delete clients[provider];
+    }
+    Object.assign(definitions, plugins);
+    Object.assign(clients, this.pluginProviders.clients());
+    for (const client of Object.values(clients)) this.ownedClients.add(client);
+    const generation = this.createGeneration(definitions, this.providerOverrides);
+    const state = this.createAgentManagerState(definitions, clients);
+    this.installGeneration(generation, clients, changed);
+    return { ...state, retiredProviders };
+  }
+
+  private ensureClient(
+    provider: AgentProvider,
+    definition: ProviderDefinition,
+    clients = this.providerClients,
+  ): AgentClient {
+    const existing = clients[provider];
     if (existing) {
       return existing;
     }
     const client = definition.createClient(this.logger);
-    this.providerClients[provider] = client;
+    clients[provider] = client;
+    this.ownedClients.add(client);
     return client;
   }
 
   async listProviders(input: ProviderSnapshotReadOptions = {}): Promise<ProviderSnapshotEntry[]> {
-    const cwd = resolveSnapshotCwd(input.cwd);
+    const target = resolveProviderSnapshotTarget(input.cwd);
     if (input.wait) {
-      await this.warmUpSnapshotForCwd({ cwd, providers: input.providers });
+      await this.warmUpSnapshotForCwd({ cwd: input.cwd, providers: input.providers });
     }
     const providerFilter = input.providers ? new Set(input.providers) : null;
-    const entries = this.getSnapshot(cwd);
+    const snapshot = input.wait
+      ? this.getOrCreateTarget(target.snapshotCwd).snapshot
+      : this.getSnapshotForTarget(target, input.providers);
+    const entries = snapshot.records.map(({ entry }) => entry);
     return providerFilter ? entries.filter((entry) => providerFilter.has(entry.provider)) : entries;
   }
 
@@ -263,9 +460,48 @@ export class ProviderSnapshotManager {
     return entry;
   }
 
+  async validateAgentConfiguration(
+    input: AgentConfigurationValidationInput,
+  ): Promise<HubExecutionAgentValidationIssue[]> {
+    if (!this.hasProvider(input.provider)) {
+      return [
+        {
+          path: ["provider"],
+          message: `Provider '${input.provider}' is not configured`,
+        },
+      ];
+    }
+
+    const provider = await this.getProvider({
+      provider: input.provider,
+      wait: true,
+    });
+    if (!provider.enabled) {
+      return [{ path: ["provider"], message: `Provider '${input.provider}' is disabled` }];
+    }
+    if (provider.status !== "ready") {
+      return [
+        {
+          path: ["provider"],
+          message:
+            provider.status === "error" && provider.error
+              ? provider.error
+              : `Provider '${input.provider}' is not available`,
+        },
+      ];
+    }
+
+    const definition = this.requireProvider(input.provider);
+    return validateAgentConfigurationAgainstProvider({
+      input,
+      provider,
+      validateOptions: definition.validateOptions,
+    });
+  }
+
   async listModels(input: ProviderSnapshotProviderOptions): Promise<AgentModelDefinition[]> {
     const entry = await this.getReadyProvider(input);
-    return entry.models ?? [];
+    return filterSelectableAgentModels(entry.models);
   }
 
   async listModes(input: ProviderSnapshotProviderOptions): Promise<AgentMode[]> {
@@ -313,43 +549,108 @@ export class ProviderSnapshotManager {
   }
 
   async getProviderDiagnostic(provider: AgentProvider): Promise<ProviderDiagnosticResult> {
-    const definition = this.requireProvider(provider);
-    const client = this.ensureClient(provider, definition);
+    const definition = this.generation.definitions[provider];
+    if (!definition) {
+      return {
+        provider,
+        diagnostic: formatProviderDiagnostic(provider, [
+          { label: "Error", value: `Provider ${provider} is not configured` },
+        ]),
+      };
+    }
 
-    // Force-refresh the snapshot so Models/Status come from the single catalog authority.
-    await this.refreshSnapshotForCwd({ cwd: homedir(), providers: [provider] });
-    const entry = await this.getProvider({ cwd: homedir(), provider, wait: true });
+    const baseDiagnosticPromise = this.getBaseProviderDiagnostic(provider, definition);
+    const snapshotEntryPromise = this.refreshDiagnosticSnapshotEntry(provider);
+    const [baseDiagnostic, entry] = await Promise.all([
+      baseDiagnosticPromise,
+      snapshotEntryPromise,
+    ]);
 
     const modelCount = entry.status === "ready" ? String(entry.models?.length ?? 0) : "—";
     const status = formatProviderStatus(entry);
-
-    const baseDiagnostic = client.getDiagnostic
-      ? (await client.getDiagnostic()).diagnostic
-      : formatProviderDiagnostic(definition.label ?? provider, [
-          { label: "Diagnostic", value: "No diagnostic available" },
-        ]);
-
     const diagnostic = `${baseDiagnostic}\n  Models: ${modelCount}\n  Status: ${status}`;
     return { provider, diagnostic };
   }
 
   applyMutableProviderConfig(
     mutableProviders: MutableDaemonConfig["providers"] | undefined,
+    options: ApplyMutableProviderConfigOptions = {},
   ): AgentManagerProviderState {
-    this.providerOverrides = applyMutableProviderConfigToOverrides(
-      this.baseProviderOverrides,
+    const prepared = this.prepareMutableProviderConfig(mutableProviders, options);
+    prepared.commit();
+    return prepared.agentManagerState;
+  }
+
+  prepareMutableProviderConfig(
+    mutableProviders: MutableDaemonConfig["providers"] | undefined,
+    options: ApplyMutableProviderConfigOptions = {},
+  ): PreparedMutableProviderConfig {
+    const baseProviderOverrides = options.replace
+      ? undefined
+      : omitProviderOverrides(this.baseProviderOverrides, options.removeProviders ?? []);
+    const runtimeSettings = options.replace ? undefined : this.runtimeSettings;
+    const providerOverrides = applyMutableProviderConfigToOverrides(
+      baseProviderOverrides,
       mutableProviders,
     );
-    this.providerRegistry = this.buildRegistry();
-    this.providerClients = { ...this.extraClients } as Record<AgentProvider, AgentClient>;
-
-    for (const cwd of this.snapshots.keys()) {
-      this.providerLoads.delete(cwd);
-      this.snapshots.set(cwd, this.reconcileSnapshotForRegistry(cwd));
-      this.emitChange(cwd);
+    const definitions = this.buildRegistry(runtimeSettings, providerOverrides);
+    const changed = new Set<AgentProvider>();
+    const clients = { ...this.providerClients };
+    for (const provider of new Set([...this.generation.order, ...Object.keys(definitions)])) {
+      const before = this.generation.definitions[provider];
+      const after = definitions[provider];
+      if (!before || !after || !isDeepStrictEqual(before.configuration, after.configuration)) {
+        changed.add(provider);
+        delete clients[provider];
+      } else {
+        definitions[provider] = before;
+      }
     }
+    Object.assign(clients, this.extraClients, this.pluginProviders.clients());
+    const generation = this.createGeneration(definitions, providerOverrides);
+    const agentManagerState = this.createAgentManagerState(definitions, clients);
+    return {
+      agentManagerState,
+      commit: () => {
+        this.baseProviderOverrides = baseProviderOverrides;
+        this.runtimeSettings = runtimeSettings;
+        this.providerOverrides = providerOverrides;
+        this.installGeneration(generation, clients, changed);
+      },
+    };
+  }
 
-    return this.getAgentManagerProviderState();
+  private installGeneration(
+    generation: RegistryGeneration,
+    clients: Record<AgentProvider, AgentClient>,
+    changed: ReadonlySet<AgentProvider>,
+  ): void {
+    for (const provider of changed) {
+      this.generation.providerStates.get(provider)?.discoveryLimit.clearQueue();
+    }
+    this.generation = generation;
+    this.providerClients = clients;
+    for (const [key, catalogs] of this.catalogs) {
+      for (const provider of changed) catalogs.delete(provider);
+      if (catalogs.size === 0) this.catalogs.delete(key);
+    }
+    for (const target of this.targets.values()) {
+      for (const provider of changed) target.bindings.delete(provider);
+    }
+    this.publishTargets(this.targets.keys());
+    const providers = [...changed].filter((provider) => generation.definitions[provider]);
+    if (providers.length === 0) return;
+    for (const cwd of this.targets.keys()) {
+      void this.warmUp(
+        resolveProviderSnapshotTarget(cwd === GLOBAL_PROVIDER_SNAPSHOT_KEY ? undefined : cwd),
+        providers,
+      );
+    }
+  }
+
+  setRefreshTimeoutMs(refreshTimeoutMs: number | undefined): void {
+    this.refreshTimeoutMs = providerRefreshDeadline(refreshTimeoutMs);
+    this.diagnosticTimeoutMs = resolveDiagnosticTimeoutMs(undefined, this.refreshTimeoutMs);
   }
 
   on(event: "change", listener: ProviderSnapshotChangeListener): this {
@@ -363,31 +664,42 @@ export class ProviderSnapshotManager {
   }
 
   async shutdown(): Promise<void> {
+    this.destroyed = true;
+    for (const state of this.generation.providerStates.values()) state.discoveryLimit.clearQueue();
     // Materialize a client per enabled provider so provider-owned resources
     // (background processes, sockets, etc.) get a chance to release even when
     // a given provider hasn't been touched yet during this daemon's lifetime.
-    const state = this.getAgentManagerProviderState();
-    const clients = Object.values(state.clients).filter(
-      (client): client is AgentClient => client !== undefined,
-    );
-    await shutdownAgentClients(clients, this.logger);
+    this.getAgentManagerProviderState();
+    await shutdownAgentClients(this.ownedClients, this.logger);
   }
 
   destroy(): void {
     this.destroyed = true;
+    for (const state of this.generation.providerStates.values()) state.discoveryLimit.clearQueue();
+    this.catalogs.clear();
+    this.targets.clear();
     this.events.removeAllListeners();
-    this.snapshots.clear();
-    this.providerLoads.clear();
   }
 
-  private buildRegistry(): Record<AgentProvider, ProviderDefinition> {
+  private buildRegistry(
+    runtimeSettings: AgentProviderRuntimeSettingsMap | undefined,
+    providerOverrides: Record<string, ProviderOverride> | undefined,
+  ): Record<AgentProvider, ProviderDefinition> {
     const registry = buildProviderRegistry(this.logger, {
-      runtimeSettings: this.runtimeSettings,
-      providerOverrides: this.providerOverrides,
+      runtimeSettings,
+      providerOverrides,
       workspaceGitService: this.workspaceGitService,
       managedProcesses: this.managedProcesses,
+      openCodeBridge: this.openCodeBridge,
       isDev: this.isDev,
     });
+
+    for (const [provider, definition] of Object.entries(this.pluginProviders.definitions())) {
+      if (registry[provider]) {
+        throw new Error(`Plugin provider '${provider}' conflicts with a configured provider`);
+      }
+      registry[provider] = definition;
+    }
 
     for (const [provider, client] of Object.entries(this.extraClients) as Array<
       [AgentProvider, AgentClient]
@@ -401,7 +713,7 @@ export class ProviderSnapshotManager {
           client.resolveCreateConfig?.bind(client) ?? definition.resolveCreateConfig,
         isCreateConfigUnattended:
           client.isCreateConfigUnattended?.bind(client) ?? definition.isCreateConfigUnattended,
-        fetchCatalog: client.fetchCatalog.bind(client),
+        fetchCatalog: (options, _client, context) => client.fetchCatalog(options, context),
       };
     }
 
@@ -422,6 +734,17 @@ export class ProviderSnapshotManager {
     };
   }
 
+  private getSnapshotForTarget(
+    target: ProviderSnapshotTarget,
+    providers?: AgentProvider[],
+  ): ProviderSnapshot {
+    const providersToWarm = this.resolveProvidersToWarm(target.snapshotCwd, providers);
+    if (providersToWarm.length > 0) {
+      void this.warmUp(target, providersToWarm);
+    }
+    return this.getOrCreateTarget(target.snapshotCwd).snapshot;
+  }
+
   private async getReadyProvider(
     input: ProviderSnapshotProviderOptions,
   ): Promise<ProviderSnapshotEntry> {
@@ -439,131 +762,117 @@ export class ProviderSnapshotManager {
   }
 
   private requireProvider(provider: AgentProvider): ProviderDefinition {
-    const definition = this.providerRegistry[provider];
+    const definition = this.generation.definitions[provider];
     if (!definition) {
       throw new Error(`Provider ${provider} is not configured`);
     }
     return definition;
   }
 
-  private createLoadingEntries(): Map<AgentProvider, ProviderSnapshotEntry> {
-    const entries = new Map<AgentProvider, ProviderSnapshotEntry>();
-    for (const provider of this.getProviderIds()) {
-      const definition = this.providerRegistry[provider];
-      entries.set(provider, {
-        provider,
-        status: "loading",
-        enabled: definition?.enabled ?? true,
-        label: definition?.label,
-        description: definition?.description,
-        defaultModeId: definition?.defaultModeId ?? null,
-      });
+  private async refreshDiagnosticSnapshotEntry(
+    provider: AgentProvider,
+  ): Promise<ProviderSnapshotEntry> {
+    try {
+      const target = createGlobalSnapshotTarget();
+      await this.refreshProviders(target, [provider]);
+      return await this.getProvider({ provider, wait: false });
+    } catch (error) {
+      return {
+        ...this.generation.providerStates.get(provider)!.initial.entry,
+        status: "error",
+        error: toErrorMessage(error),
+      };
     }
-    return entries;
   }
 
-  private reconcileSnapshotForRegistry(cwd: string): Map<AgentProvider, ProviderSnapshotEntry> {
-    const existing = this.snapshots.get(cwd);
-    const entries = new Map<AgentProvider, ProviderSnapshotEntry>();
+  private async getBaseProviderDiagnostic(
+    provider: AgentProvider,
+    definition: ProviderDefinition,
+  ): Promise<string> {
+    try {
+      const client = this.ensureClient(provider, definition);
+      if (client.getDiagnostic) {
+        return (
+          await withTimeout(
+            client.getDiagnostic(),
+            this.diagnosticTimeoutMs,
+            `Timed out collecting ${definition.label ?? provider} diagnostic after ${
+              this.diagnosticTimeoutMs
+            }ms`,
+          )
+        ).diagnostic;
+      }
+      return formatProviderDiagnostic(definition.label ?? provider, [
+        { label: "Diagnostic", value: "No diagnostic available" },
+      ]);
+    } catch (error) {
+      return formatProviderDiagnosticError(definition.label ?? provider, error);
+    }
+  }
 
-    for (const provider of this.getProviderIds()) {
-      const definition = this.providerRegistry[provider];
-      const current = existing?.get(provider);
-      const metadata = {
-        provider,
-        enabled: definition?.enabled ?? true,
-        label: definition?.label,
-        description: definition?.description,
-        defaultModeId: definition?.defaultModeId ?? null,
-      };
-
-      if (!definition?.enabled || !current || current.status === "loading") {
-        entries.set(provider, {
-          ...metadata,
-          status: "unavailable",
-          enabled: definition?.enabled ?? true,
-        });
+  private createGeneration(
+    definitions: Record<AgentProvider, ProviderDefinition>,
+    overrides: Record<string, ProviderOverride> | undefined,
+  ): RegistryGeneration {
+    const order = Object.keys(definitions);
+    const providerStates = new Map<
+      AgentProvider,
+      { initial: ProviderSnapshotRecord; discoveryLimit: LimitFunction }
+    >();
+    for (const provider of order) {
+      const definition = definitions[provider]!;
+      const previous = this.generation?.providerStates.get(provider);
+      if (this.generation?.definitions[provider] === definition) {
+        providerStates.set(provider, previous!);
         continue;
       }
-
-      entries.set(provider, {
-        ...current,
-        ...metadata,
+      const custom =
+        this.pluginProviders.has(provider) ||
+        (!BUILTIN_PROVIDER_IDS.includes(provider) && !!overrides?.[provider]?.extends);
+      providerStates.set(provider, {
+        discoveryLimit: previous?.discoveryLimit ?? pLimit({ concurrency: 4, rejectOnClear: true }),
+        initial: identifyEntry({
+          provider,
+          status: definition.enabled ? "loading" : "unavailable",
+          enabled: definition.enabled,
+          source: custom ? "custom" : "builtin",
+          label: definition.label,
+          description: definition.description,
+          iconSvg: definition.iconSvg,
+          defaultModeId: definition.defaultModeId ?? null,
+        }),
       });
     }
-
-    return entries;
+    return { definitions, order, providerStates };
   }
 
-  private async warmUp(cwd: string, providers?: AgentProvider[]): Promise<void> {
+  private async warmUp(target: ProviderSnapshotTarget, providers?: AgentProvider[]): Promise<void> {
     const providersToRefresh = providers ?? this.getProviderIds();
 
     await this.loadProviders({
-      cwd,
+      snapshotCwd: target.snapshotCwd,
+      catalogScope: target.catalogScope,
       providers: providersToRefresh,
       force: false,
     });
   }
 
-  private async refreshProviders(cwd: string, providers: AgentProvider[]): Promise<void> {
-    await this.loadProviders({ cwd, providers, force: true });
+  private async refreshProviders(
+    target: ProviderSnapshotTarget,
+    providers: AgentProvider[],
+  ): Promise<void> {
+    await this.loadProviders({
+      snapshotCwd: target.snapshotCwd,
+      catalogScope: target.catalogScope,
+      providers,
+      force: true,
+    });
   }
 
   private resolveProvidersToWarm(cwd: string, providers?: AgentProvider[]): AgentProvider[] {
-    const providersToInspect = providers ?? this.getProviderIds();
-    const snapshot = this.snapshots.get(cwd);
-    if (!snapshot) {
-      this.resetSnapshotToLoading(cwd, providers);
-      return providersToInspect;
-    }
-
-    const missingProviders = providersToInspect.filter((provider) => !snapshot.has(provider));
-    if (missingProviders.length > 0) {
-      this.resetSnapshotToLoading(cwd, missingProviders);
-    }
-
-    return providersToInspect.filter((provider) => snapshot.get(provider)?.status === "loading");
-  }
-
-  private clearCachedProviders(providers?: AgentProvider[]): void {
-    const providerSet = providers ? new Set(providers) : null;
-    const loadingEntries = this.createLoadingEntries();
-
-    for (const [cwd, providerLoads] of Array.from(this.providerLoads.entries())) {
-      if (!providerSet) {
-        this.providerLoads.delete(cwd);
-        continue;
-      }
-
-      for (const provider of providerSet) {
-        providerLoads.delete(provider);
-      }
-      if (providerLoads.size === 0) {
-        this.providerLoads.delete(cwd);
-      }
-    }
-
-    for (const [cwd, snapshot] of this.snapshots.entries()) {
-      if (!providerSet) {
-        snapshot.clear();
-        for (const [provider, entry] of loadingEntries) {
-          snapshot.set(provider, entry);
-        }
-        this.emitChange(cwd);
-        continue;
-      }
-
-      let changed = false;
-      for (const provider of providerSet) {
-        const loadingEntry = loadingEntries.get(provider);
-        if (!loadingEntry) continue;
-        snapshot.set(provider, loadingEntry);
-        changed = true;
-      }
-      if (changed) {
-        this.emitChange(cwd);
-      }
-    }
+    this.getOrCreateTarget(cwd);
+    // Identity is provider-owned and may change without a daemon config reload.
+    return providers ?? this.getProviderIds();
   }
 
   private async loadProviders(options: ProviderLoadOptions): Promise<void> {
@@ -573,95 +882,149 @@ export class ProviderSnapshotManager {
   }
 
   private loadProvider(options: ProviderLoadOptions & { provider: AgentProvider }): Promise<void> {
-    const definition = this.providerRegistry[options.provider];
-    if (!definition) {
-      return Promise.resolve();
-    }
-
-    const existingLoad = this.getProviderLoad(options.cwd, options.provider);
-    if (existingLoad && !options.force) {
-      return existingLoad.promise;
-    }
-    const existingEntry = this.snapshots.get(options.cwd)?.get(options.provider);
-    if (existingEntry && existingEntry.status !== "loading" && !options.force) {
-      return Promise.resolve();
-    }
-
-    const load: ProviderLoad = {
+    if (this.destroyed || !this.generation.definitions[options.provider]) return Promise.resolve();
+    const { bindings } = this.getOrCreateTarget(options.snapshotCwd);
+    const binding: CatalogBinding = {
+      key: bindings.get(options.provider)?.key,
+      failure: bindings.get(options.provider)?.failure,
+      force: options.force || bindings.get(options.provider)?.force === true,
       promise: Promise.resolve(),
     };
-    this.setProviderLoad(options.cwd, options.provider, load);
-    load.promise = Promise.resolve()
-      .then(() =>
-        this.refreshProvider({
-          cwd: options.cwd,
-          provider: options.provider,
-          definition,
-          load,
-          force: options.force,
-        }),
-      )
-      .finally(() => {
-        const providerLoads = this.providerLoads.get(options.cwd);
-        if (providerLoads?.get(options.provider) === load) {
-          providerLoads.delete(options.provider);
-        }
-        if (providerLoads?.size === 0) {
-          this.providerLoads.delete(options.cwd);
-        }
+    bindings.set(options.provider, binding);
+    binding.promise = this.resolveCatalog({ ...options, force: binding.force }, binding);
+    return binding.promise;
+  }
+
+  private async resolveCatalog(
+    options: ProviderLoadOptions & { provider: AgentProvider },
+    binding: CatalogBinding,
+  ): Promise<void> {
+    const { provider, snapshotCwd, force } = options;
+    const definition = this.generation.definitions[provider]!;
+    const initial = this.generation.providerStates.get(provider)!.initial.entry;
+    this.getOrCreateTarget(snapshotCwd);
+    if (!definition.enabled) return;
+    const currentBinding = () => this.targets.get(snapshotCwd)?.bindings.get(provider);
+    const client = this.ensureClient(provider, definition);
+    const catalogOptions = createFetchCatalogOptions(options.catalogScope, force);
+    let key: string;
+    try {
+      const sharedKey = client.getCatalogCacheKey
+        ? await withTimeout(
+            client.getCatalogCacheKey(catalogOptions),
+            this.refreshTimeoutMs,
+            `Timed out resolving ${provider} catalogue key`,
+          )
+        : await Promise.resolve(undefined);
+      key = JSON.stringify(
+        sharedKey === undefined ? ["target", snapshotCwd] : ["provider", sharedKey],
+      );
+    } catch (error) {
+      if (currentBinding() !== binding) return currentBinding()?.promise;
+      binding.force = false;
+      binding.key = undefined;
+      binding.failure = identifyEntry({
+        ...this.generation.providerStates.get(provider)!.initial.entry,
+        status: "error",
+        error: toErrorMessage(error),
       });
-    return load.promise;
+      this.publishTargets([snapshotCwd]);
+      return;
+    }
+    // Only the latest key resolution for this target may bind it to a catalogue.
+    if (currentBinding() !== binding) return currentBinding()?.promise;
+    binding.force = false;
+    binding.key = key;
+    binding.failure = undefined;
+    let catalogs = this.catalogs.get(key);
+    if (!catalogs) {
+      catalogs = new Map();
+      this.catalogs.set(key, catalogs);
+    }
+    let catalog = catalogs.get(provider);
+    if (!catalog) {
+      catalog = {};
+      catalogs.set(provider, catalog);
+    }
+    this.publishTargets([snapshotCwd]);
+    if (!force && (catalog.load || (catalog.result && !catalog.stale))) return catalog.load;
+    catalog.stale = false;
+
+    const current = catalog;
+    const isCurrent = (): boolean =>
+      !this.destroyed && this.catalogs.get(key)?.get(provider) === current && current.load === load;
+    const load = this.generation.providerStates
+      .get(provider)!
+      .discoveryLimit(() => {
+        if (!isCurrent()) return;
+        return this.refreshProvider({
+          catalogOptions,
+          provider,
+          definition,
+          initial,
+          client,
+          publish: (entry) => {
+            if (!isCurrent()) return false;
+            current.result = identifyEntry(structuredClone(entry));
+            const boundTargets = [...this.targets].flatMap(([cwd, target]) =>
+              target.bindings.get(provider)?.key === key ? [cwd] : [],
+            );
+            this.publishTargets(boundTargets);
+            return true;
+          },
+        });
+      })
+      .finally(() => {
+        if (current.load === load) current.load = undefined;
+      });
+    current.load = load;
+    return load;
   }
 
   private async refreshProvider(options: {
-    cwd: string;
+    catalogOptions: FetchCatalogOptions;
     provider: AgentProvider;
     definition: ProviderDefinition;
-    load: ProviderLoad;
-    force: boolean;
+    initial: ProviderSnapshotEntry;
+    client: AgentClient;
+    publish: (entry: ProviderSnapshotEntry) => boolean;
   }): Promise<void> {
-    const { cwd, provider, definition, load, force } = options;
-    const snapshot = this.getOrCreateSnapshot(options.cwd);
-    const base = {
+    const {
+      catalogOptions,
       provider,
-      label: definition.label,
-      description: definition.description,
-      defaultModeId: definition.defaultModeId,
-    };
-    const setEntry = (entry: ProviderSnapshotEntry) => {
-      if (!this.isCurrentProviderLoad(cwd, provider, load)) {
-        return false;
-      }
-      snapshot.set(provider, entry);
-      this.emitChange(cwd);
-      return true;
-    };
+      definition,
+      initial: base,
+      client,
+      publish: setEntry,
+    } = options;
 
     try {
-      if (!definition.enabled) {
-        setEntry({ ...base, status: "unavailable", enabled: false });
-        return;
-      }
+      const catalog = await runProviderRefreshWithDeadline({
+        label: definition.label,
+        timeoutMs: this.refreshTimeoutMs,
+        operation: async (context) => {
+          const available = await context.runActivity("availability", () =>
+            raceProviderRefreshAbort(
+              context.signal,
+              client.isAvailable(context.signal, catalogOptions),
+            ),
+          );
+          if (!available) {
+            return null;
+          }
 
-      const client = this.ensureClient(provider, definition);
-      const available = await withTimeout(
-        client.isAvailable(),
-        this.refreshTimeoutMs,
-        `Timed out checking ${definition.label} availability after ${this.refreshTimeoutMs}ms`,
-      );
-      if (!available) {
+          return await definition.fetchCatalog(catalogOptions, client, context);
+        },
+      });
+      if (!catalog) {
         setEntry({ ...base, status: "unavailable", enabled: true });
         return;
       }
 
-      const catalog = await withTimeout(
-        definition.fetchCatalog({ cwd, force }, client),
-        this.refreshTimeoutMs,
-        `Timed out refreshing ${definition.label} after ${this.refreshTimeoutMs}ms`,
-      );
-
       setEntry({
         ...base,
+        defaultModeId:
+          catalog.defaultModeId === undefined ? base.defaultModeId : catalog.defaultModeId,
         status: "ready",
         enabled: true,
         models: catalog.models,
@@ -676,91 +1039,65 @@ export class ProviderSnapshotManager {
         error: toErrorMessage(error),
       });
       if (emitted) {
-        this.logger.warn({ err: error, provider, cwd }, "Failed to refresh provider snapshot");
+        this.logger.warn(
+          { err: error, provider, target: catalogOptions },
+          "Failed to refresh provider snapshot",
+        );
       }
     }
   }
 
-  private getProviderLoad(cwdKey: string, provider: AgentProvider): ProviderLoad | undefined {
-    return this.providerLoads.get(cwdKey)?.get(provider);
-  }
-
-  private setProviderLoad(cwdKey: string, provider: AgentProvider, load: ProviderLoad): void {
-    let providerLoads = this.providerLoads.get(cwdKey);
-    if (!providerLoads) {
-      providerLoads = new Map<AgentProvider, ProviderLoad>();
-      this.providerLoads.set(cwdKey, providerLoads);
-    }
-    providerLoads.set(provider, load);
-  }
-
-  private isCurrentProviderLoad(
-    cwdKey: string,
-    provider: AgentProvider,
-    load: ProviderLoad,
-  ): boolean {
-    return this.providerLoads.get(cwdKey)?.get(provider) === load;
-  }
-
-  private emitChange(cwdKey: string): void {
-    if (this.destroyed) {
-      return;
-    }
-    const snapshot = this.snapshots.get(cwdKey);
-    if (!snapshot) {
-      return;
-    }
-    this.events.emit("change", entriesToArray(snapshot), cwdKey);
-  }
-
-  private getOrCreateSnapshot(cwdKey: string): Map<AgentProvider, ProviderSnapshotEntry> {
-    const existing = this.snapshots.get(cwdKey);
-    if (existing) {
-      return existing;
-    }
-
-    const created = this.createLoadingEntries();
-    this.snapshots.set(cwdKey, created);
-    return created;
-  }
-
-  private resetSnapshotToLoading(
-    cwdKey: string,
-    providers?: AgentProvider[],
-    options: { preserveExisting?: boolean } = {},
-  ): Map<AgentProvider, ProviderSnapshotEntry> {
-    const snapshot = this.getOrCreateSnapshot(cwdKey);
-    const loadingEntries = this.createLoadingEntries();
-    const preserveExisting = options.preserveExisting ?? true;
-
-    if (!providers) {
-      snapshot.clear();
-      for (const [provider, entry] of loadingEntries) {
-        snapshot.set(provider, entry);
-      }
-      return snapshot;
-    }
-
-    for (const provider of providers) {
-      const loadingEntry = loadingEntries.get(provider);
-      if (!loadingEntry) continue;
-      const existing = snapshot.get(provider);
-      snapshot.set(provider, {
-        ...loadingEntry,
-        ...(preserveExisting
-          ? {
-              models: existing?.models,
-              modes: existing?.modes,
-              fetchedAt: existing?.fetchedAt,
-            }
-          : {}),
+  private publishTargets(cwds: Iterable<string>): void {
+    if (this.destroyed) return;
+    const transitions: ProviderSnapshotTransition[] = [];
+    for (const cwd of cwds) {
+      const target = this.targets.get(cwd)!;
+      const records = this.generation.order.map((provider) => {
+        const binding = target.bindings.get(provider);
+        const result = binding?.key
+          ? this.catalogs.get(binding.key)?.get(provider)?.result
+          : undefined;
+        return binding?.failure ?? result ?? this.generation.providerStates.get(provider)!.initial;
       });
+      const previous = target.snapshot;
+      if (sameSnapshotRecords(previous.records, records)) continue;
+      const current = { cwd, records };
+      target.snapshot = current;
+      transitions.push({ previous, current });
     }
-    return snapshot;
+    for (const transition of transitions) {
+      for (const listener of this.events.listeners("change")) {
+        try {
+          listener(transition);
+        } catch (error) {
+          this.logger.error(
+            { err: error, cwd: transition.current.cwd },
+            "Provider snapshot subscriber failed",
+          );
+        }
+      }
+    }
+  }
+
+  private getOrCreateTarget(cwd: string): Target {
+    let target = this.targets.get(cwd);
+    if (!target) {
+      target = {
+        bindings: new Map(),
+        snapshot: {
+          cwd,
+          records: this.generation.order.map(
+            (provider) => this.generation.providerStates.get(provider)!.initial,
+          ),
+        },
+      };
+      this.targets.set(cwd, target);
+    }
+    return target;
   }
 
   private getProviderIds(): AgentProvider[] {
-    return Object.keys(this.providerRegistry);
+    return [...this.generation.order];
   }
 
   private resolveRefreshProviders(providers?: AgentProvider[]): AgentProvider[] | undefined {
@@ -790,18 +1127,48 @@ export function resolveSnapshotCwd(cwd?: string | null): string {
   return resolved;
 }
 
-function entriesToArray(
-  entries: Map<AgentProvider, ProviderSnapshotEntry>,
-): ProviderSnapshotEntry[] {
-  return Array.from(entries.values(), cloneEntry);
+function resolveProviderSnapshotTarget(cwd?: string | null): ProviderSnapshotTarget {
+  const trimmed = cwd?.trim();
+  if (!trimmed) {
+    return createGlobalSnapshotTarget();
+  }
+  return createWorkspaceSnapshotTarget(resolveSnapshotCwd(trimmed));
 }
 
-function cloneEntry(entry: ProviderSnapshotEntry): ProviderSnapshotEntry {
+function createGlobalSnapshotTarget(): ProviderSnapshotTarget {
   return {
-    ...entry,
-    models: entry.models?.map((model) => ({ ...model })),
-    modes: entry.modes?.map((mode) => ({ ...mode })),
+    snapshotCwd: GLOBAL_PROVIDER_SNAPSHOT_KEY,
+    catalogScope: { scope: "global" },
   };
+}
+
+function createWorkspaceSnapshotTarget(cwd: string): ProviderSnapshotTarget {
+  const snapshotCwd = resolveSnapshotCwd(cwd);
+  return {
+    snapshotCwd,
+    catalogScope: { scope: "workspace", cwd: snapshotCwd },
+  };
+}
+
+function createFetchCatalogOptions(
+  scope: ProviderCatalogScope,
+  force: boolean,
+): FetchCatalogOptions {
+  return scope.scope === "global"
+    ? { scope: "global", force }
+    : { scope: "workspace", cwd: scope.cwd, force };
+}
+
+export function isGlobalProviderSnapshotKey(cwd: string): boolean {
+  return cwd === GLOBAL_PROVIDER_SNAPSHOT_KEY;
+}
+
+function identifyEntry(entry: ProviderSnapshotEntry): ProviderSnapshotRecord {
+  const { fetchedAt: _fetchedAt, ...content } = entry;
+  const contentHash = createHash("sha256")
+    .update(JSON.stringify(["paseo.provider-result/1", content]))
+    .digest("base64url");
+  return { entry, contentHash };
 }
 
 function toErrorMessage(error: unknown): string {
@@ -819,4 +1186,22 @@ function formatProviderStatus(entry: ProviderSnapshotEntry): string {
   if (entry.status === "error") return `Error: ${entry.error ?? "Unknown error"}`;
   if (entry.status === "unavailable") return "Unavailable";
   return "Loading";
+}
+
+export function sameSnapshotRecords(
+  previous: readonly ProviderSnapshotRecord[],
+  current: readonly ProviderSnapshotRecord[],
+): boolean {
+  return (
+    previous.length === current.length &&
+    previous.every((before, index) => {
+      const after = current[index]!;
+      return (
+        before === after ||
+        (before.entry.provider === after.entry.provider &&
+          before.contentHash === after.contentHash &&
+          before.entry.fetchedAt === after.entry.fetchedAt)
+      );
+    })
+  );
 }

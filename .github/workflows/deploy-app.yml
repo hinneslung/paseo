@@ -7,6 +7,7 @@ on:
       - "!v*-beta.*"
       - "app-v*"
       - "!app-v*-beta.*"
+      - "!vscode-v*"
   workflow_dispatch:
 
 jobs:
@@ -24,10 +25,9 @@ jobs:
           scope: "@boudra"
 
       - name: Install dependencies
-        run: npm ci
+        run: node scripts/npm-retry.mjs ci
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build app dependencies
         run: npm run build:app-deps
 

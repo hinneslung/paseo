@@ -46,6 +46,18 @@ describe("PersistedConfigSchema daemon append system prompt config", () => {
   });
 });
 
+describe("PersistedConfigSchema daemon browser tools config", () => {
+  test("accepts optional browser tools opt-in", () => {
+    const parsed = PersistedConfigSchema.parse({
+      daemon: {
+        browserTools: { enabled: true },
+      },
+    });
+
+    expect(parsed.daemon?.browserTools?.enabled).toBe(true);
+  });
+});
+
 describe("PersistedConfigSchema daemon relay config", () => {
   test("accepts optional relay TLS setting", () => {
     const parsed = PersistedConfigSchema.parse({
@@ -63,6 +75,46 @@ describe("PersistedConfigSchema daemon relay config", () => {
   });
 });
 
+describe("PersistedConfigSchema daemon trusted proxy config", () => {
+  test("accepts optional trusted proxy ranges", () => {
+    const parsed = PersistedConfigSchema.parse({
+      daemon: {
+        trustedProxies: ["loopback", "172.16.0.0/12"],
+      },
+    });
+
+    expect(parsed.daemon?.trustedProxies).toEqual(["loopback", "172.16.0.0/12"]);
+  });
+
+  test("accepts explicit trust-all proxy config", () => {
+    const parsed = PersistedConfigSchema.parse({
+      daemon: {
+        trustedProxies: true,
+      },
+    });
+
+    expect(parsed.daemon?.trustedProxies).toBe(true);
+  });
+});
+
+describe("PersistedConfigSchema daemon web UI feature config", () => {
+  test("accepts optional web UI enable flag and dist dir", () => {
+    const parsed = PersistedConfigSchema.parse({
+      features: {
+        webUi: {
+          enabled: true,
+          distDir: "web-ui-dist",
+        },
+      },
+    });
+
+    expect(parsed.features?.webUi).toEqual({
+      enabled: true,
+      distDir: "web-ui-dist",
+    });
+  });
+});
+
 describe("PersistedConfigSchema worktrees config", () => {
   test("accepts optional worktree root", () => {
     const parsed = PersistedConfigSchema.parse({
@@ -72,6 +124,40 @@ describe("PersistedConfigSchema worktrees config", () => {
     });
 
     expect(parsed.worktrees?.root).toBe("/mnt/fast/paseo-worktrees");
+  });
+
+  test("accepts service port allocation", () => {
+    const parsed = PersistedConfigSchema.parse({
+      worktrees: {
+        servicePorts: { range: "3000-4000" },
+      },
+    });
+
+    expect(parsed.worktrees?.servicePorts).toEqual({ range: "3000-4000" });
+  });
+});
+
+describe("PersistedConfigSchema provider credentials", () => {
+  test("accepts separate OpenAI STT and TTS credentials", () => {
+    const parsed = PersistedConfigSchema.parse({
+      providers: {
+        openai: {
+          stt: {
+            apiKey: " stt-secret ",
+            baseUrl: " https://stt.example.com/v1 ",
+          },
+          tts: {
+            apiKey: " tts-secret ",
+            baseUrl: " https://tts.example.com/v1 ",
+          },
+        },
+      },
+    });
+
+    expect(parsed.providers?.openai?.stt?.apiKey).toBe("stt-secret");
+    expect(parsed.providers?.openai?.stt?.baseUrl).toBe("https://stt.example.com/v1");
+    expect(parsed.providers?.openai?.tts?.apiKey).toBe("tts-secret");
+    expect(parsed.providers?.openai?.tts?.baseUrl).toBe("https://tts.example.com/v1");
   });
 });
 
@@ -164,6 +250,20 @@ describe("PersistedConfigSchema agent provider runtime settings", () => {
         { provider: "codex", model: "gpt-5.4-mini", thinkingOptionId: "low" },
       ],
     });
+  });
+
+  test("accepts a custom provider catalog refresh timeout", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: { catalogRefreshTimeoutMs: 180_000 },
+    });
+
+    expect(parsed.agents?.catalogRefreshTimeoutMs).toBe(180_000);
+  });
+
+  test("rejects provider catalog refresh timeouts that overflow Node timers", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({ agents: { catalogRefreshTimeoutMs: 2_147_483_648 } }),
+    ).toThrow();
   });
 });
 
@@ -562,6 +662,16 @@ describe("PersistedConfigSchema voice mode config", () => {
 });
 
 describe("loadPersistedConfig", () => {
+  test("materializes relay disabled for a new Paseo home", () => {
+    const home = createTempHome();
+    try {
+      const config = loadPersistedConfig(home);
+      expect(config.daemon?.relay?.enabled).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("accepts the documented config schema marker", () => {
     const home = createTempHome();
     const configPath = path.join(home, "config.json");
@@ -588,6 +698,38 @@ describe("loadPersistedConfig", () => {
       expect(config.daemon?.listen).toBe("127.0.0.1:6767");
       expect(config.daemon?.hostnames).toEqual(["localhost", ".localhost"]);
       expect(config.daemon?.mcp?.enabled).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("loads a config that still uses the removed providers.openai.voice block", () => {
+    const home = createTempHome();
+    const configPath = path.join(home, "config.json");
+    try {
+      writeFileSync(
+        configPath,
+        `${JSON.stringify(
+          {
+            version: 1,
+            providers: {
+              openai: {
+                apiKey: "global-key",
+                voice: { apiKey: "voice-key", baseUrl: "https://voice.example.com/v1" },
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const config = loadPersistedConfig(home);
+
+      expect(config.providers?.openai?.apiKey).toBe("global-key");
+      expect((config.providers?.openai as Record<string, unknown>)?.voice).toBeUndefined();
+      expect(config.providers?.openai?.stt).toBeUndefined();
+      expect(config.providers?.openai?.tts).toBeUndefined();
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
