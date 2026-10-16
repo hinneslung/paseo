@@ -41,6 +41,7 @@ tsconfig.tsbuildinfo
 
 # Testing
 coverage/
+.vscode-test/
 
 # Playwright
 test-results/
