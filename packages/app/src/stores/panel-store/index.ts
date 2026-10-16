@@ -21,6 +21,7 @@ import {
   MIN_SIDEBAR_WIDTH,
   migratePanelState,
   PanelPersistedStateSchema,
+  resolveDefaultAgentListOpen,
   selectIsAgentListOpen,
   selectIsCompactFileExplorerOpen,
   setMobilePanelTarget,
@@ -30,7 +31,7 @@ import {
   type PanelLayoutInput,
   type SortOption,
 } from "./state";
-import { isWeb } from "@/constants/platform";
+import { getIsVscode, isWeb } from "@/constants/platform";
 import { createValidatedPersistStorage } from "@/storage/validated-persist-storage";
 export type { ExplorerTab } from "../explorer-tab-memory";
 export type { ExplorerCheckoutContext } from "../explorer-checkout-context";
@@ -109,8 +110,6 @@ export interface PanelState {
   toggleFileTreeVisible: () => void;
 }
 
-const DEFAULT_DESKTOP_OPEN = isWeb;
-
 function setMobilePanelTargetPatch(
   state: PanelState,
   target: MobilePanelView,
@@ -127,7 +126,7 @@ export const usePanelStore = create<PanelState>()(
 
       // Desktop defaults based on platform
       desktop: {
-        agentListOpen: DEFAULT_DESKTOP_OPEN,
+        agentListOpen: resolveDefaultAgentListOpen({ isWeb, isVscode: getIsVscode() }),
         focusModeEnabled: false,
       },
 

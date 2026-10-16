@@ -2,6 +2,7 @@ import { i18n } from "@/i18n/i18next";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
 import { invokeDesktopCommand } from "@/desktop/electron/invoke";
+import { isVscodeRuntime } from "@/desktop/vscode/host";
 import type { AgentSkillSelection } from "@getpaseo/protocol/messages";
 
 export type DesktopDaemonState = "starting" | "running" | "stopped" | "errored";
@@ -180,6 +181,10 @@ function parseDesktopUpdaterDiagnostics(raw: unknown): DesktopUpdaterDiagnostics
 
 export function shouldUseDesktopDaemon(): boolean {
   return isElectronRuntime();
+}
+
+export function shouldUseVscodeDaemon(): boolean {
+  return isVscodeRuntime();
 }
 
 export async function getDesktopDaemonStatus(): Promise<DesktopDaemonStatus> {
