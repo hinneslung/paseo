@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useMemo, useState, useSyncExternalStore }
 import { Pressable, Text, View, type PointerEvent as RNPointerEvent } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { useReducedMotion } from "react-native-reanimated";
-import { useContainerWidthBelow } from "@/hooks/use-container-width";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { createChatOutlineHoverIntent } from "./hover-intent";
 import { promptTickMagnification } from "./model";
@@ -12,7 +11,6 @@ import type { ChatOutlineRailProps } from "./rail";
 // magnifying a slot must not move the box the pointer is resting on. See docs/hover.md.
 const RAIL_WIDTH = 36;
 const SLOT_HEIGHT = 8;
-const MIN_PANEL_WIDTH = 918;
 const RESTING_PILL_HEIGHT = 2;
 const MAGNIFIED_PILL_HEIGHT = 4;
 const RESTING_PILL_WIDTH = 10;
@@ -31,7 +29,6 @@ export const ChatOutlineRail = memo(function ChatOutlineRail({
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const activeSeq = useSyncExternalStore(activePrompt.subscribe, activePrompt.getActiveSeq);
   const prefersReducedMotion = useReducedMotion();
-  const { onLayout, isBelow: isPanelNarrow } = useContainerWidthBelow(MIN_PANEL_WIDTH);
 
   const hoverIntent = useMemo(
     () =>
@@ -60,9 +57,6 @@ export const ChatOutlineRail = memo(function ChatOutlineRail({
   );
   const handlePointerLeaveRail = useCallback(() => hoverIntent.leave(), [hoverIntent]);
   useEffect(() => () => hoverIntent.dispose(), [hoverIntent]);
-  useEffect(() => {
-    if (isPanelNarrow) hoverIntent.leave();
-  }, [hoverIntent, isPanelNarrow]);
   const handleFocusChange = useCallback((index: number, focused: boolean) => {
     setFocusedIndex((current) => {
       if (focused) return index;
@@ -77,37 +71,35 @@ export const ChatOutlineRail = memo(function ChatOutlineRail({
   if (prompts.length < 2) return null;
 
   return (
-    <View style={styles.panelMeasure} pointerEvents="box-none" onLayout={onLayout}>
-      {isPanelNarrow ? null : (
-        <View
-          style={styles.rail}
-          role="tablist"
-          testID="chat-outline-rail"
-          onPointerEnter={handlePointerEnterRail}
-          onPointerMove={handlePointerMoveRail}
-          onPointerLeave={handlePointerLeaveRail}
-        >
-          {prompts.map((prompt, index) => (
-            <ChatOutlineTick
-              key={prompt.seq}
-              index={index}
-              seq={prompt.seq}
-              preview={prompt.preview}
-              label={`${index + 1} of ${prompts.length}: ${prompt.preview}`}
-              isActive={prompt.seq === activeSeq}
-              hasAttention={index === attentionIndex}
-              magnification={
-                prefersReducedMotion || attentionIndex === null
-                  ? 0
-                  : promptTickMagnification(index - attentionIndex)
-              }
-              onHover={handlePointerEnterTick}
-              onFocusChange={handleFocusChange}
-              onJumpToPrompt={onJumpToPrompt}
-            />
-          ))}
-        </View>
-      )}
+    <View style={styles.panelMeasure} pointerEvents="box-none">
+      <View
+        style={styles.rail}
+        role="tablist"
+        testID="chat-outline-rail"
+        onPointerEnter={handlePointerEnterRail}
+        onPointerMove={handlePointerMoveRail}
+        onPointerLeave={handlePointerLeaveRail}
+      >
+        {prompts.map((prompt, index) => (
+          <ChatOutlineTick
+            key={prompt.seq}
+            index={index}
+            seq={prompt.seq}
+            preview={prompt.preview}
+            label={`${index + 1} of ${prompts.length}: ${prompt.preview}`}
+            isActive={prompt.seq === activeSeq}
+            hasAttention={index === attentionIndex}
+            magnification={
+              prefersReducedMotion || attentionIndex === null
+                ? 0
+                : promptTickMagnification(index - attentionIndex)
+            }
+            onHover={handlePointerEnterTick}
+            onFocusChange={handleFocusChange}
+            onJumpToPrompt={onJumpToPrompt}
+          />
+        ))}
+      </View>
     </View>
   );
 });
@@ -191,7 +183,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   rail: {
     position: "absolute",
-    left: theme.spacing[2],
+    left: 0,
     top: "10%",
     bottom: "10%",
     width: RAIL_WIDTH,
@@ -215,7 +207,7 @@ const styles = StyleSheet.create((theme) => ({
     height: "100%",
     alignItems: "flex-start",
     justifyContent: "center",
-    paddingLeft: theme.spacing[1],
+    paddingLeft: 0,
     borderRadius: theme.borderRadius.base,
   },
   // At rest the pills use low-emphasis chrome so the column stays readable peripherally

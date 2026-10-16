@@ -240,7 +240,7 @@ test.describe("desktop chat outline", () => {
     });
   });
 
-  test("hides the rail when a split makes its panel narrow", async ({ page }) => {
+  test("keeps the rail visible when a split makes its panel narrow", async ({ page }) => {
     const agent = await seedLongMockAgentTimeline({ turns: 2 });
     try {
       await page.setViewportSize(WIDE_VIEWPORT);
@@ -248,7 +248,7 @@ test.describe("desktop chat outline", () => {
 
       await splitCurrentPanelRight(page);
 
-      await expectNoChatOutline(page);
+      await expectChatOutlinePrompts(page, 2);
     } finally {
       await agent.cleanup();
     }
