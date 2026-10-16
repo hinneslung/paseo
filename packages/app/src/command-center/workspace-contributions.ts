@@ -112,6 +112,7 @@ export interface WorkspaceCommandCenterSource {
   capabilities: {
     canSplitPanes: boolean;
     canOpenBrowserTabs: boolean;
+    canOpenExplorerPanels: boolean;
     isGit: boolean;
     /** Host supports the `workspacePinning` feature. */
     canPin: boolean;
@@ -217,6 +218,12 @@ function buildPanelContributions(
     },
   ];
   for (const [index, panel] of panelTargets.entries()) {
+    if (
+      !source.capabilities.canOpenExplorerPanels &&
+      (panel.target === "files" || panel.target === "changes")
+    ) {
+      continue;
+    }
     if (panel.target !== "files" && !source.capabilities.isGit) continue;
     contributions.push(
       buildQueryAction(source, {
@@ -662,19 +669,21 @@ export function buildWorkspaceCommandCenterContributions(
   // global registration would list two entries that silently no-op on /settings, /sessions,
   // /schedules and Home. Toggle sidebar (left) is global and stays in the root set — that is why
   // the three toggles render in two non-adjacent sections. Don't "tidy" them back together.
-  contributions.push(
-    buildWorkspaceAction({
-      source,
-      id: "workspace:toggle-explorer-sidebar",
-      rank: 25,
-      title: source.labels.toggleExplorerSidebar,
-      keywords: ["toggle", "sidebar", "explorer", "files", "changes"],
-      icon: source.icons.explorerSidebar,
-      shortcutKeys: source.shortcuts.toggleExplorerSidebar,
-      action: { id: "sidebar.toggle.right", scope: "sidebar" },
-      visibility: "query",
-    }),
-  );
+  if (source.capabilities.canOpenExplorerPanels) {
+    contributions.push(
+      buildWorkspaceAction({
+        source,
+        id: "workspace:toggle-explorer-sidebar",
+        rank: 25,
+        title: source.labels.toggleExplorerSidebar,
+        keywords: ["toggle", "sidebar", "explorer", "files", "changes"],
+        icon: source.icons.explorerSidebar,
+        shortcutKeys: source.shortcuts.toggleExplorerSidebar,
+        action: { id: "sidebar.toggle.right", scope: "sidebar" },
+        visibility: "query",
+      }),
+    );
+  }
 
   // `buildPaneContributions` already dispatches this same `workspace.focus.toggle` action as
   // `pane:focus-mode-toggle` once split panes are available, so only add the standalone entry

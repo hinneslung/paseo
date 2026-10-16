@@ -5,6 +5,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { useHostFeature } from "@/runtime/host-features";
 import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { pluginRegistry } from "./registry";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 export function PluginCatalogSync({
   serverId,
@@ -16,11 +17,12 @@ export function PluginCatalogSync({
   const audio = useVoiceAudioEngineOptional();
   const connected = useHostRuntimeIsConnected(serverId);
   const supported = useHostFeature(serverId, "plugins");
+  const clientRuntimeSupported = getWorkspaceSurfaceConfig().showPluginClientUi;
 
   useEffect(() => {
     let cancelled = false;
     let refreshQueue = Promise.resolve();
-    if (!supported || !audio) {
+    if (!clientRuntimeSupported || !supported || !audio) {
       pluginRegistry.removeHost(serverId);
       return;
     }
@@ -82,7 +84,7 @@ export function PluginCatalogSync({
         .release()
         .catch((error) => console.warn("[Plugins] Failed to release catalog", error));
     };
-  }, [audio, client, connected, serverId, supported]);
+  }, [audio, client, clientRuntimeSupported, connected, serverId, supported]);
 
   useEffect(() => () => pluginRegistry.removeHost(serverId), [serverId]);
   return null;

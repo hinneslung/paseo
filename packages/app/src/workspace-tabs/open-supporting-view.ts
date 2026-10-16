@@ -19,12 +19,17 @@ import {
   openPreferredWorkspaceTarget,
   openWorkspaceTargetAtLocation,
 } from "@/workspace-tabs/open-beside";
+import {
+  getWorkspaceSurfaceConfig,
+  type WorkspaceSurfaceConfig,
+} from "@/workspace/surface-capabilities";
 
 interface WorkspaceViewInput {
   isCompact: boolean;
   workspaceKey: string | null;
   checkout: ExplorerCheckoutContext | null;
   supportsPaneSplits?: boolean;
+  surfaceConfig?: WorkspaceSurfaceConfig;
 }
 
 interface OpenWorkspaceChangesInput extends WorkspaceViewInput {
@@ -65,6 +70,15 @@ export function openComposerChanges(input: OpenWorkspaceChangesInput): string | 
 
 /** Opens the workspace pull request at its semantic destination. */
 export function openWorkspacePullRequest(input: OpenWorkspacePullRequestInput): string | null {
+  const surface = input.surfaceConfig ?? getWorkspaceSurfaceConfig();
+  if (!surface.showFileExplorer && !surface.showGitChanges) {
+    return openWorkspaceTargetAtLocation({
+      isCompact: input.isCompact,
+      workspaceKey: input.workspaceKey,
+      target: { kind: "pull_request" },
+      location: "main",
+    });
+  }
   if (usesCompactExplorerSidebar(input) || input.destination === "explorer") {
     openExplorerView(input, "pr");
     return null;
@@ -81,7 +95,10 @@ export function openWorkspacePullRequest(input: OpenWorkspacePullRequestInput): 
 export function autoOpenWorkspacePullRequest(input: {
   workspaceKey: string | null;
   destination: PullRequestOpenLocation;
+  surfaceConfig?: WorkspaceSurfaceConfig;
 }): string | null {
+  const surface = input.surfaceConfig ?? getWorkspaceSurfaceConfig();
+  if (!surface.showFileExplorer && !surface.showGitChanges) return null;
   if (!input.workspaceKey) return null;
   const workspaceKey = input.workspaceKey;
   const store = useWorkspaceLayoutStore.getState();

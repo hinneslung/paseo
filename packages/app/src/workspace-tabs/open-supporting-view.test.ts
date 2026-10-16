@@ -24,6 +24,14 @@ import {
 
 const WORKSPACE_KEY = "server-1:workspace-1";
 const CHECKOUT = { serverId: "server-1", cwd: "/tmp/repo", isGit: true };
+const VSCODE_SURFACE = {
+  showFileExplorer: false,
+  showDiff: false,
+  showGitChanges: false,
+  showBrowser: false,
+  showVoice: false,
+  showPluginClientUi: false,
+};
 
 beforeEach(() => {
   usePanelStore.setState({
@@ -166,6 +174,24 @@ describe("openWorkspacePullRequest", () => {
     expect(state.sidePaneIdByWorkspace[WORKSPACE_KEY]).toBeUndefined();
   });
 
+  it("opens a user-requested PR in the main pane when Explorer is unavailable", () => {
+    openWorkspacePullRequest({
+      ...input,
+      isCompact: true,
+      destination: "explorer",
+      surfaceConfig: VSCODE_SURFACE,
+    });
+
+    const state = useWorkspaceLayoutStore.getState();
+    const layout = state.layoutByWorkspace[WORKSPACE_KEY];
+    const mainPane = layout ? findPaneById(layout.root, layout.focusedPaneId) : null;
+    const pullRequestTab = layout
+      ? collectAllTabs(layout.root).find((tab) => tab.target.kind === "pull_request")
+      : null;
+    expect(mainPane?.tabIds).toContain(pullRequestTab?.tabId);
+    expect(usePanelStore.getState().mobilePanel.target).toBe("agent");
+  });
+
   it("opens PRs in the side panel when configured", () => {
     openWorkspacePullRequest({ ...input, destination: "side" });
 
@@ -182,6 +208,17 @@ describe("openWorkspacePullRequest", () => {
 });
 
 describe("autoOpenWorkspacePullRequest", () => {
+  it("does not add an automatic PR tab when Explorer is unavailable", () => {
+    expect(
+      autoOpenWorkspacePullRequest({
+        workspaceKey: WORKSPACE_KEY,
+        destination: "explorer",
+        surfaceConfig: VSCODE_SURFACE,
+      }),
+    ).toBeNull();
+    expect(useWorkspaceLayoutStore.getState().layoutByWorkspace[WORKSPACE_KEY]).toBeUndefined();
+  });
+
   it("silently adds the PR after Changes once, and never restores it after closing", () => {
     const store = useWorkspaceLayoutStore.getState();
     store.openTab({

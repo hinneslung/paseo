@@ -151,6 +151,7 @@ import { useComposerForgeAutoAttach } from "./forge-auto-attach";
 import { readClipboardImage } from "./clipboard-image";
 import { normalizeNativePastedImages, type NativePastedFile } from "./native-pasted-image";
 import { PluginResourceAttachmentPill, usePluginAttachmentPicker } from "@/plugins";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 import { resolveClientSlashCommand, type ClientSlashCommand } from "@/client-slash-commands";
 import {
   appendWorkspaceFileAttachment,
@@ -481,6 +482,7 @@ function resolveErrorMessage(error: unknown): string | null {
 interface AttemptStartRealtimeVoiceArgs {
   voice: ReturnType<typeof useVoiceOptional>;
   isConnected: boolean;
+  showVoice: boolean;
   hasAgent: boolean;
   serverId: string;
   agentId: string;
@@ -488,8 +490,8 @@ interface AttemptStartRealtimeVoiceArgs {
 }
 
 function attemptStartRealtimeVoice(args: AttemptStartRealtimeVoiceArgs): void {
-  const { voice, isConnected, hasAgent, serverId, agentId, toastErrorRef } = args;
-  if (!voice || !isConnected || !hasAgent) return;
+  const { voice, isConnected, showVoice, hasAgent, serverId, agentId, toastErrorRef } = args;
+  if (!showVoice || !voice || !isConnected || !hasAgent) return;
   if (voice.isVoiceSwitching) return;
   if (voice.isVoiceModeForAgent(serverId, agentId)) return;
   void voice.startVoice(serverId, agentId).catch((error) => {
@@ -525,6 +527,7 @@ interface DispatchComposerKeyboardActionArgs {
   isAgentRunning: boolean;
   isCancellingAgent: boolean;
   isConnected: boolean;
+  showVoice: boolean;
   handleCancelAgent: () => void;
   focusMessageInputForKeyboardAction: () => void;
 }
@@ -537,10 +540,13 @@ function dispatchComposerKeyboardAction(args: DispatchComposerKeyboardActionArgs
     isAgentRunning,
     isCancellingAgent,
     isConnected,
+    showVoice,
     handleCancelAgent,
     focusMessageInputForKeyboardAction,
   } = args;
   if (!isPaneFocused) return false;
+  if (!showVoice && action.id.startsWith("message-input.dictation")) return false;
+  if (!showVoice && action.id.startsWith("message-input.voice")) return false;
 
   if (action.id === "agent.interrupt") {
     if (messageInputRef.current?.runKeyboardAction("dictation-cancel")) return true;
@@ -568,6 +574,7 @@ function ComposerKeyboardRegistration({
   isAgentRunning,
   isCancellingAgent,
   isConnected,
+  showVoice,
   handleCancelAgent,
   focusMessageInputForKeyboardAction,
   isMessageInputFocused,
@@ -586,6 +593,7 @@ function ComposerKeyboardRegistration({
         isAgentRunning,
         isCancellingAgent,
         isConnected,
+        showVoice,
         handleCancelAgent,
         focusMessageInputForKeyboardAction,
       }),
@@ -596,6 +604,7 @@ function ComposerKeyboardRegistration({
       isAgentRunning,
       isCancellingAgent,
       isConnected,
+      showVoice,
       messageInputRef,
     ],
   );
@@ -1236,6 +1245,7 @@ function ComposerContentImpl({
   placeholder,
 }: ComposerContentProps) {
   const mode = resolveComposerInputMode(inputMode);
+  const showVoice = getWorkspaceSurfaceConfig().showVoice;
   const { t } = useTranslation();
   const buttonIconSize = resolveComposerButtonIconSize();
   const client = useHostRuntimeClient(serverId);
@@ -1878,12 +1888,13 @@ function ComposerContentImpl({
     attemptStartRealtimeVoice({
       voice,
       isConnected,
+      showVoice,
       hasAgent,
       serverId,
       agentId,
       toastErrorRef,
     });
-  }, [agentId, hasAgent, isConnected, serverId, voice]);
+  }, [agentId, hasAgent, isConnected, serverId, showVoice, voice]);
 
   const handleEditQueuedMessage = useCallback(
     (id: string) => {
@@ -1998,7 +2009,7 @@ function ComposerContentImpl({
         isAgentRunning={isAgentRunning}
         hasSendableContent={hasSendableContent}
         isCompact={isCompactLayout}
-        showVoice={mode.showVoice}
+        showVoice={showVoice && mode.showVoice}
         buttonIconSize={buttonIconSize}
         handleToggleRealtimeVoice={handleToggleRealtimeVoice}
         isConnected={isConnected}
@@ -2019,6 +2030,7 @@ function ComposerContentImpl({
       isVoiceModeForAgent,
       isVoiceSwitching,
       mode.showVoice,
+      showVoice,
       realtimeVoiceButtonStyle,
       t,
       voiceToggleKeys,
@@ -2354,6 +2366,7 @@ function ComposerContentImpl({
         isAgentRunning={isAgentRunning}
         isCancellingAgent={isCancellingAgent}
         isConnected={isConnected}
+        showVoice={showVoice}
         handleCancelAgent={handleCancelAgent}
         focusMessageInputForKeyboardAction={focusMessageInputForKeyboardAction}
         isMessageInputFocused={isMessageInputFocused}
@@ -2406,6 +2419,7 @@ function ComposerContentImpl({
                   onPasteImages={handleNativePasteImages}
                   client={client}
                   isReadyForDictation={isDictationReady}
+                  showVoice={showVoice}
                   placeholder={messagePlaceholder}
                   autoFocus={messageInputAutoFocus}
                   autoFocusKey={`${serverId}:${agentId}:${autoFocusKey ?? ""}`}

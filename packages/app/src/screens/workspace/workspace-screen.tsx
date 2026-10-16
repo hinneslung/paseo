@@ -79,6 +79,12 @@ import {
   type WorkspaceTab,
   type WorkspaceTabTarget,
 } from "@/workspace-tabs/model";
+import {
+  isWorkspaceTabTargetSupported,
+  shouldAutoOpenWorkspacePullRequest,
+  useWorkspaceSurface,
+  WorkspaceExplorerSurface,
+} from "@/workspace/surface-capabilities";
 import { useSettings } from "@/hooks/use-settings";
 import { useKeyboardActionHandler } from "@/hooks/use-keyboard-action-handler";
 import { buildWorkspaceKeyboardHandlerId } from "@/keyboard/handler-id";
@@ -1760,6 +1766,13 @@ function WorkspaceScreenContent({
     workspace: workspaceDescriptor,
     checkoutState: workspaceHeaderCheckoutState,
   });
+  const {
+    config: surfaceConfig,
+    showExplorer: showExplorerSurface,
+    showBrowserLauncher: showCreateBrowserTab,
+    showChangesLauncher,
+    autoOpenPullRequest,
+  } = useWorkspaceSurface(isGitCheckout);
   const canDetectPullRequestTab = canDetectPullRequest(isRouteFocused, isGitCheckout, isMobile);
   const hasPullRequest = useHasPullRequest({
     serverId: normalizedServerId,
@@ -1769,7 +1782,7 @@ function WorkspaceScreenContent({
   usePullRequestAutoAdd({
     workspaceKey: persistenceKey,
     hasPullRequest,
-    enabled: canDetectPullRequestTab,
+    enabled: shouldAutoOpenWorkspacePullRequest(canDetectPullRequestTab, autoOpenPullRequest),
   });
 
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
@@ -3011,6 +3024,7 @@ function WorkspaceScreenContent({
       if (!persistenceKey) return true;
 
       const target = resolveCommandCenterPanelTarget(action.target);
+      if (!isWorkspaceTabTargetSupported(target, surfaceConfig)) return true;
       if (action.placement === "supporting") {
         if (action.target === "files" || action.target === "changes") {
           openExplorerSidebarView({
@@ -3055,6 +3069,7 @@ function WorkspaceScreenContent({
       openWorkspaceTabFocused,
       persistenceKey,
       pullRequestOpenLocation,
+      surfaceConfig,
     ],
   );
 
@@ -3129,7 +3144,7 @@ function WorkspaceScreenContent({
           handleCreateTerminal();
           return true;
         case "workspace.browser.new":
-          handleCreateBrowserTab();
+          if (surfaceConfig.showBrowser) handleCreateBrowserTab();
           return true;
         case "workspace.tab.menu.open":
           handleCreateNewTab({ paneId: focusedPaneTabState.pane?.id });
@@ -3172,6 +3187,7 @@ function WorkspaceScreenContent({
       focusedPaneTabState.pane?.id,
       navigateToTabId,
       tabs,
+      surfaceConfig.showBrowser,
     ],
   );
 
@@ -3183,10 +3199,10 @@ function WorkspaceScreenContent({
           handleCreateDraftTab({ paneId });
           return true;
         case "workspace.tab.target.browser":
-          handleCreateBrowserTab({ paneId });
+          if (surfaceConfig.showBrowser) handleCreateBrowserTab({ paneId });
           return true;
         case "workspace.tab.target.changes":
-          if (persistenceKey && isGitCheckout) {
+          if (surfaceConfig.showGitChanges && persistenceKey && isGitCheckout) {
             openExplorerSidebarView({
               isCompact: isMobile,
               workspaceKey: persistenceKey,
@@ -3196,7 +3212,7 @@ function WorkspaceScreenContent({
           }
           return true;
         case "workspace.tab.target.files":
-          if (persistenceKey) {
+          if (surfaceConfig.showFileExplorer && persistenceKey) {
             openExplorerSidebarView({
               isCompact: isMobile,
               workspaceKey: persistenceKey,
@@ -3217,18 +3233,22 @@ function WorkspaceScreenContent({
       isGitCheckout,
       isMobile,
       persistenceKey,
+      surfaceConfig.showBrowser,
+      surfaceConfig.showFileExplorer,
+      surfaceConfig.showGitChanges,
     ],
   );
 
   const handleWorkspaceSidebarAction = useCallback(
     (action: KeyboardActionDefinition): boolean => {
       if (action.id === "sidebar.toggle.right") {
-        handleToggleExplorerSidebar();
+        if (showExplorerSurface) handleToggleExplorerSidebar();
         return true;
       }
       if (action.id !== "sidebar.toggle.both") {
         return false;
       }
+      if (!showExplorerSurface) return true;
       // This screen owns the layout key and the checkout, so it is the only
       // place that can read "is the explorer open" correctly.
       const panel = usePanelStore.getState();
@@ -3244,7 +3264,7 @@ function WorkspaceScreenContent({
       });
       return true;
     },
-    [handleToggleExplorerSidebar, isMobile, persistenceKey],
+    [handleToggleExplorerSidebar, isMobile, persistenceKey, showExplorerSurface],
   );
 
   const handleWorkspacePaneAction = useCallback(
@@ -3782,18 +3802,20 @@ function WorkspaceScreenContent({
         {!isMobile && workspaceDirectory ? (
           <>
             <WorkspaceActions serverId={normalizedServerId} cwd={workspaceDirectory} />
-            <WorkspaceHeaderExplorerToggle
-              owner={explorerToggleOwner}
-              onPress={handleToggleExplorerSidebar}
-              label={explorerSidebarToggleLabel}
-              tooltipLabel={t("workspace.tabs.explorerSidebar.toggle")}
-              tooltipKeys={EXPLORER_TOGGLE_KEYS}
-              style={styles.compactHeaderActionButton}
-              accessibilityState={explorerSidebarToggleAccessibilityState}
-            />
+            <WorkspaceExplorerSurface visible={showExplorerSurface}>
+              <WorkspaceHeaderExplorerToggle
+                owner={explorerToggleOwner}
+                onPress={handleToggleExplorerSidebar}
+                label={explorerSidebarToggleLabel}
+                tooltipLabel={t("workspace.tabs.explorerSidebar.toggle")}
+                tooltipKeys={EXPLORER_TOGGLE_KEYS}
+                style={styles.compactHeaderActionButton}
+                accessibilityState={explorerSidebarToggleAccessibilityState}
+              />
+            </WorkspaceExplorerSurface>
           </>
         ) : null}
-        {isMobile ? (
+        <WorkspaceExplorerSurface visible={isMobile && showExplorerSurface}>
           <WorkspaceExplorerToggle
             onPress={handleToggleExplorerSidebar}
             label={explorerSidebarToggleLabel}
@@ -3802,7 +3824,7 @@ function WorkspaceScreenContent({
             accessibilityState={explorerSidebarToggleAccessibilityState}
             mobile
           />
-        ) : null}
+        </WorkspaceExplorerSurface>
       </View>
     ),
     [
@@ -3820,6 +3842,7 @@ function WorkspaceScreenContent({
       explorerSidebarToggleLabel,
       explorerSidebarToggleAccessibilityState,
       explorerToggleOwner,
+      showExplorerSurface,
       t,
     ],
   );
@@ -3830,20 +3853,23 @@ function WorkspaceScreenContent({
   );
   const renderExplorerSidebarHeaderAction = useCallback(
     () => (
-      <WorkspaceExplorerSidebarToggle
-        owner={explorerToggleOwner}
-        onPress={handleToggleExplorerSidebar}
-        label={explorerSidebarToggleLabel}
-        tooltipLabel={t("workspace.tabs.explorerSidebar.toggle")}
-        tooltipKeys={EXPLORER_TOGGLE_KEYS}
-        accessibilityState={explorerSidebarToggleAccessibilityState}
-      />
+      <WorkspaceExplorerSurface visible={showExplorerSurface}>
+        <WorkspaceExplorerSidebarToggle
+          owner={explorerToggleOwner}
+          onPress={handleToggleExplorerSidebar}
+          label={explorerSidebarToggleLabel}
+          tooltipLabel={t("workspace.tabs.explorerSidebar.toggle")}
+          tooltipKeys={EXPLORER_TOGGLE_KEYS}
+          accessibilityState={explorerSidebarToggleAccessibilityState}
+        />
+      </WorkspaceExplorerSurface>
     ),
     [
       explorerSidebarToggleAccessibilityState,
       explorerSidebarToggleLabel,
       explorerToggleOwner,
       handleToggleExplorerSidebar,
+      showExplorerSurface,
       t,
     ],
   );
@@ -3851,10 +3877,9 @@ function WorkspaceScreenContent({
     () => createTerminalMutation.isPending || pendingTerminalCreateInput !== null,
     [createTerminalMutation.isPending, pendingTerminalCreateInput],
   );
-  const showCreateBrowserTab = getIsElectron();
   const newTabLauncher = useMemo<NewTabLauncher>(
     () => ({
-      showChanges: isGitCheckout,
+      showChanges: showChangesLauncher,
       showPullRequest: hasPullRequest,
       showBrowser: showCreateBrowserTab,
       terminalDisabled: createTerminalDisabled,
@@ -3863,7 +3888,7 @@ function WorkspaceScreenContent({
     [
       createTerminalDisabled,
       hasPullRequest,
-      isGitCheckout,
+      showChangesLauncher,
       launchWorkspaceTab,
       showCreateBrowserTab,
     ],

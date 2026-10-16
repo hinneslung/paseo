@@ -91,6 +91,10 @@ import type { WorkspaceTab } from "@/workspace-tabs/model";
 import { RenderProfile } from "@/utils/render-profiler";
 import { isNative } from "@/constants/platform";
 import { panelTargetSupportsHost } from "@/plugins/workspace-panels/locations";
+import {
+  getWorkspaceSurfaceConfig,
+  shouldRenderWorkspaceExplorer,
+} from "@/workspace/surface-capabilities";
 
 interface SplitContainerProps {
   layout: WorkspaceLayout;
@@ -427,9 +431,11 @@ export function SplitContainer({
       }),
     [requestedExplorerSidebarWidth, workspaceShellWidth],
   );
-  const renderExplorerSidebarDock = Boolean(
-    !focusModeEnabled && explorerSidebarPane && explorerSidebarPane.hidden !== true,
-  );
+  const renderExplorerSidebarDock = shouldRenderWorkspaceExplorer({
+    config: getWorkspaceSurfaceConfig(),
+    explorerPaneVisible: Boolean(explorerSidebarPane && explorerSidebarPane.hidden !== true),
+    focusModeEnabled: focusModeEnabled === true,
+  });
   const mainColumnWindowChromeCorners = renderExplorerSidebarDock
     ? removeWindowChromeCorner(inheritedWindowChromeCorners, "top-right")
     : inheritedWindowChromeCorners;

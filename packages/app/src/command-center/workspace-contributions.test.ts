@@ -81,6 +81,7 @@ function source(gitActions: GitActions): {
       capabilities: {
         canSplitPanes: true,
         canOpenBrowserTabs: true,
+        canOpenExplorerPanels: true,
         isGit: false,
         canPin: false,
         canShowSetup: false,
@@ -183,6 +184,7 @@ describe("workspace command center contributions", () => {
     fixture.value.capabilities = {
       canSplitPanes: false,
       canOpenBrowserTabs: false,
+      canOpenExplorerPanels: false,
       isGit: false,
       canPin: false,
       canShowSetup: false,
@@ -194,6 +196,10 @@ describe("workspace command center contributions", () => {
     expect(contributions.some((item) => item.id === "tab:new-terminal")).toBe(true);
     expect(contributions.some((item) => item.id === "tab:new-browser")).toBe(false);
     expect(contributions.some((item) => item.id.startsWith("pane:"))).toBe(false);
+    expect(contributions.some((item) => item.id === "tab:open:files")).toBe(false);
+    expect(contributions.some((item) => item.id === "workspace:toggle-explorer-sidebar")).toBe(
+      false,
+    );
     expect(contributions.some((item) => item.id === "workspace:rename")).toBe(true);
     expect(contributions.some((item) => item.id === "workspace:copy-path")).toBe(true);
   });

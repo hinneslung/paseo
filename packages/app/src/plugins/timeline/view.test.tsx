@@ -118,6 +118,26 @@ afterEach(() => {
 });
 
 describe("PluginTimelineItemView", () => {
+  it("keeps ordinary transcript content when no client renderer is installed", async () => {
+    const container = document.createElement("div");
+    containers.push(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () =>
+      root.render(
+        <div>
+          <span>Message before</span>
+          <PluginTimelineItemView serverId="host-1" agentId="agent-1" item={timelineItem} />
+          <span>Message after</span>
+        </div>,
+      ),
+    );
+
+    expect(container.textContent).toContain("Message before");
+    expect(container.textContent).toContain("Plugin timeline item unavailable.");
+    expect(container.textContent).toContain("Message after");
+  });
+
   it("validates and renders the matching plugin component", async () => {
     pluginRegistry.installCatalog(
       "host-1",

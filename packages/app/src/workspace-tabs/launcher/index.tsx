@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { useRouter, type Href } from "expo-router";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { Globe, SquarePen, SquareTerminal } from "lucide-react-native";
 import invariant from "tiny-invariant";
@@ -19,17 +20,18 @@ import type { NewTabSelection } from "@/workspace-tabs/new-tab";
 import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
 import type { TerminalProfile } from "@getpaseo/protocol/messages";
 import { panelCanLaunchInPane, panelSupportsHost, type PaneHost } from "@/panels/panel-manifest";
-import {
-  getPanelRegistration,
-  type PanelIconProps,
-  type PanelPresentation,
-} from "@/panels/panel-registry";
+import { type PanelIconProps } from "@/panels/panel-registry";
 import { ensurePanelsRegistered } from "@/panels/register-panels";
 import {
   getTerminalProfileIcon,
   resolveTerminalProfiles,
 } from "@getpaseo/protocol/terminal-profiles";
-import { getBuiltInLaunchOrder, type BuiltInLaunchItemId } from "./internal/catalog";
+import {
+  getBuiltInLaunchOrder,
+  resolveRegisteredLaunchPresentations,
+  type BuiltInLaunchItemId,
+} from "./internal/catalog";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 export type WorkspaceTabLaunchPurpose = "primary" | "supporting";
 
@@ -64,6 +66,7 @@ export interface WorkspaceTabLaunchGroup {
 }
 
 const EMPTY_PANE_PANEL_KINDS: readonly WorkspaceTabTarget["kind"][] = [];
+const EMPTY_PLUGINS = [] as const;
 
 const NewTabLauncherContext = createContext<NewTabLauncher | null>(null);
 
@@ -87,10 +90,85 @@ const BUILT_IN_SELECTIONS = {
   pullRequest: { kind: "target", target: { kind: "pull_request" } },
 } satisfies Record<BuiltInLaunchItemId, NewTabSelection>;
 
-function getLaunchPresentation(kind: WorkspaceTabTarget["kind"]): PanelPresentation {
-  const registration = getPanelRegistration(kind);
-  invariant(registration?.presentation, `Panel ${kind} has no launch presentation`);
-  return registration.presentation;
+function createBuiltInLaunchItems(input: {
+  t: TFunction;
+  isExplorerMenu: boolean;
+  launcher: NewTabLauncher;
+  presentations: ReturnType<typeof resolveRegisteredLaunchPresentations>;
+  launchSelection: (
+    selection: NewTabSelection,
+  ) => (destination: WorkspaceTabLaunchDestination) => void;
+}): Record<BuiltInLaunchItemId, WorkspaceTabLaunchItem & { hidden?: boolean }> {
+  const { t, isExplorerMenu, launcher, presentations, launchSelection } = input;
+  return {
+    agent: {
+      id: "agent",
+      label: t("workspace.tabs.fallback.agent"),
+      Icon: SquarePen,
+      shortcutActionId: "workspace-tab-target-agent",
+      disabled: false,
+      panelKind: "draft",
+      hidden: isExplorerMenu,
+      launch: launchSelection(BUILT_IN_SELECTIONS.agent),
+    },
+    terminal: {
+      id: "terminal",
+      label: t("workspace.tabs.fallback.terminal"),
+      Icon: SquareTerminal,
+      shortcutActionId: "workspace-terminal-new",
+      disabled: launcher.terminalDisabled,
+      panelKind: "terminal",
+      launch: launchSelection(BUILT_IN_SELECTIONS.terminal),
+    },
+    changes: {
+      id: "changes",
+      label: presentations.changes?.label(t) ?? "",
+      Icon: presentations.changes?.icon,
+      disabled: false,
+      panelKind: "changes_tree",
+      hidden: !launcher.showChanges || !presentations.changes,
+      launch: launchSelection(BUILT_IN_SELECTIONS.changes),
+    },
+    diff: {
+      id: "diff",
+      label: presentations.diff?.label(t) ?? "",
+      Icon: presentations.diff?.icon,
+      shortcutActionId: "workspace-tab-target-changes",
+      disabled: false,
+      panelKind: "working_diff",
+      hidden: !launcher.showChanges || !presentations.diff,
+      launch: launchSelection(BUILT_IN_SELECTIONS.diff),
+    },
+    files: {
+      id: "files",
+      label: presentations.files?.label(t) ?? "",
+      Icon: presentations.files?.icon,
+      shortcutActionId: "workspace-tab-target-files",
+      disabled: false,
+      panelKind: "files",
+      hidden: !presentations.files,
+      launch: launchSelection(BUILT_IN_SELECTIONS.files),
+    },
+    browser: {
+      id: "browser",
+      label: t("workspace.tabs.fallback.browser"),
+      Icon: Globe,
+      shortcutActionId: "workspace-tab-target-browser",
+      disabled: false,
+      panelKind: "browser",
+      hidden: !launcher.showBrowser,
+      launch: launchSelection(BUILT_IN_SELECTIONS.browser),
+    },
+    pullRequest: {
+      id: "pull-request",
+      label: presentations.pullRequest?.label(t) ?? "",
+      Icon: presentations.pullRequest?.icon,
+      disabled: false,
+      panelKind: "pull_request",
+      hidden: !launcher.showPullRequest || !presentations.pullRequest,
+      launch: launchSelection(BUILT_IN_SELECTIONS.pullRequest),
+    },
+  };
 }
 
 export function useWorkspaceTabLaunchCatalog(input: {
@@ -107,7 +185,10 @@ export function useWorkspaceTabLaunchCatalog(input: {
   invariant(launcher, "NewTabLauncherProvider is required");
   const { config } = useDaemonConfig(serverId);
   const plugins = useInstalledPlugins();
+  const surfaceConfig = useMemo(getWorkspaceSurfaceConfig, []);
   ensurePanelsRegistered();
+  const presentations = useMemo(resolveRegisteredLaunchPresentations, []);
+  const visiblePlugins = surfaceConfig.showPluginClientUi ? plugins : EMPTY_PLUGINS;
 
   const launchSelection = useCallback(
     (selection: NewTabSelection) => (destination: WorkspaceTabLaunchDestination) => {
@@ -121,85 +202,20 @@ export function useWorkspaceTabLaunchCatalog(input: {
 
   return useMemo(() => {
     const isExplorerMenu = host === "explorer" && surface === "menu";
-    const changesPresentation = getLaunchPresentation("changes_tree");
-    const diffPresentation = getLaunchPresentation("working_diff");
-    const filesPresentation = getLaunchPresentation("files");
-    const pullRequestPresentation = getLaunchPresentation("pull_request");
-    const builtIns: Record<BuiltInLaunchItemId, WorkspaceTabLaunchItem & { hidden?: boolean }> = {
-      agent: {
-        id: "agent",
-        label: t("workspace.tabs.fallback.agent"),
-        Icon: SquarePen,
-        shortcutActionId: "workspace-tab-target-agent",
-        disabled: false,
-        panelKind: "draft",
-        hidden: isExplorerMenu,
-        launch: launchSelection(BUILT_IN_SELECTIONS.agent),
-      },
-      terminal: {
-        id: "terminal",
-        label: t("workspace.tabs.fallback.terminal"),
-        Icon: SquareTerminal,
-        shortcutActionId: "workspace-terminal-new",
-        disabled: launcher.terminalDisabled,
-        panelKind: "terminal",
-        launch: launchSelection(BUILT_IN_SELECTIONS.terminal),
-      },
-      changes: {
-        id: "changes",
-        label: changesPresentation.label(t),
-        Icon: changesPresentation.icon,
-        disabled: false,
-        panelKind: "changes_tree",
-        hidden: !launcher.showChanges,
-        launch: launchSelection(BUILT_IN_SELECTIONS.changes),
-      },
-      diff: {
-        id: "diff",
-        label: diffPresentation.label(t),
-        Icon: diffPresentation.icon,
-        shortcutActionId: "workspace-tab-target-changes",
-        disabled: false,
-        panelKind: "working_diff",
-        hidden: !launcher.showChanges,
-        launch: launchSelection(BUILT_IN_SELECTIONS.diff),
-      },
-      files: {
-        id: "files",
-        label: filesPresentation.label(t),
-        Icon: filesPresentation.icon,
-        shortcutActionId: "workspace-tab-target-files",
-        disabled: false,
-        panelKind: "files",
-        launch: launchSelection(BUILT_IN_SELECTIONS.files),
-      },
-      browser: {
-        id: "browser",
-        label: t("workspace.tabs.fallback.browser"),
-        Icon: Globe,
-        shortcutActionId: "workspace-tab-target-browser",
-        disabled: false,
-        panelKind: "browser",
-        hidden: !launcher.showBrowser,
-        launch: launchSelection(BUILT_IN_SELECTIONS.browser),
-      },
-      pullRequest: {
-        id: "pull-request",
-        label: pullRequestPresentation.label(t),
-        Icon: pullRequestPresentation.icon,
-        disabled: false,
-        panelKind: "pull_request",
-        hidden: !launcher.showPullRequest,
-        launch: launchSelection(BUILT_IN_SELECTIONS.pullRequest),
-      },
-    };
+    const builtIns = createBuiltInLaunchItems({
+      t,
+      isExplorerMenu,
+      launcher,
+      presentations,
+      launchSelection,
+    });
     const tabItems = getBuiltInLaunchOrder(purpose).flatMap((id) => {
       const item = builtIns[id];
       return item.hidden || !panelSupportsHost(item.panelKind, host) ? [] : [item];
     });
 
     const pluginItems: WorkspaceTabLaunchItem[] = [];
-    for (const plugin of plugins) {
+    for (const plugin of visiblePlugins) {
       if (plugin.serverId !== serverId) continue;
       for (const panel of plugin.workspacePanels) {
         if (panel.context !== "workspace") continue;
@@ -256,13 +272,14 @@ export function useWorkspaceTabLaunchCatalog(input: {
     editTerminalProfiles,
     launchSelection,
     launcher,
-    plugins,
+    presentations,
     purpose,
     host,
     surface,
     panePanelKinds,
     serverId,
     t,
+    visiblePlugins,
   ]);
 }
 

@@ -20,6 +20,7 @@ import { createViewedTimelineSync } from "@/timeline/viewed-timeline-sync";
 import { buildWorkspaceTabPersistenceKey, type WorkspaceTab } from "@/workspace-tabs/model";
 import { defaultChangesState, type ChangesState } from "@/panels/changes/state";
 import { defaultFileState, type FileState } from "@/panels/file/state";
+import { shouldRenderWorkspaceExplorer } from "@/workspace/surface-capabilities";
 import {
   canDismissPaneInLayout,
   collectAllPanes,
@@ -37,6 +38,7 @@ import {
   normalizeLayout,
   removePaneFromTree,
   removeTabFromTree,
+  sanitizeWorkspaceLayoutForSurface,
   stripEphemeralTabsFromLayout,
   type SplitNode,
   type SplitPane,
@@ -74,6 +76,375 @@ function createDeterministicWorkspaceLayoutIds() {
 
 const workspaceLayoutIds = createDeterministicWorkspaceLayoutIds();
 const workspaceLayoutStore = createWorkspaceLayoutStore(workspaceLayoutIds);
+
+const VSCODE_SURFACE = {
+  showFileExplorer: false,
+  showDiff: false,
+  showGitChanges: false,
+  showBrowser: false,
+  showVoice: false,
+  showPluginClientUi: false,
+};
+
+describe("VS Code workspace surface", () => {
+  it("removes unsupported restored targets and the hidden Explorer pane", () => {
+    const seeded = createWorkspaceLayoutWithExplorerSidebar();
+    const sanitized = sanitizeWorkspaceLayoutForSurface(seeded, VSCODE_SURFACE);
+
+    expect(collectAllTabs(sanitized.root).map((tab) => tab.target.kind)).toEqual(["new_tab"]);
+    expect(collectAllPanes(sanitized.root)).toHaveLength(1);
+  });
+
+  it("removes browser, diff, and plugin targets from restored main panes", () => {
+    const layout = normalizeLayout({
+      root: {
+        kind: "pane",
+        pane: {
+          id: "main",
+          tabIds: ["draft", "browser", "diff", "plugin"],
+          tabs: [
+            { tabId: "draft", target: { kind: "draft", draftId: "draft-1" } },
+            { tabId: "browser", target: { kind: "browser", browserId: "browser-1" } },
+            { tabId: "diff", target: { kind: "working_diff" } },
+            {
+              tabId: "plugin",
+              target: {
+                kind: "plugin",
+                pluginId: "sample",
+                panelId: "panel",
+                context: "workspace",
+              },
+            },
+          ],
+          focusedTabId: "draft",
+        },
+      },
+      focusedPaneId: "main",
+    });
+
+    const sanitized = sanitizeWorkspaceLayoutForSurface(layout, VSCODE_SURFACE);
+    expect(collectAllTabs(sanitized.root).map((tab) => tab.target.kind)).toEqual(["draft"]);
+  });
+
+  it("rehydrates a supported Explorer tab into main and removes the Explorer role", async () => {
+    await AsyncStorage.setItem(
+      "workspace-layout-state",
+      JSON.stringify({
+        version: 2,
+        state: {
+          layoutByWorkspace: {
+            workspace: {
+              root: {
+                kind: "group",
+                group: {
+                  id: "root",
+                  direction: "horizontal",
+                  sizes: [0.75, 0.25],
+                  children: [
+                    createPane({ id: "main", tabIds: ["draft"] }),
+                    createPane({
+                      id: "explorer",
+                      tabIds: ["files", "changes", "pull-request"],
+                      focusedTabId: "pull-request",
+                      targetsByTabId: {
+                        files: { kind: "files" },
+                        changes: { kind: "changes_tree" },
+                        "pull-request": { kind: "pull_request" },
+                      },
+                    }),
+                  ],
+                },
+              },
+              focusedPaneId: "explorer",
+            },
+          },
+          explorerPaneIdByWorkspace: { workspace: "explorer" },
+        },
+      }),
+    );
+    const restored = createWorkspaceLayoutStore(
+      createDeterministicWorkspaceLayoutIds(),
+      () => VSCODE_SURFACE,
+    );
+
+    await restored.persist.rehydrate();
+
+    const state = restored.getState();
+    const layout = state.layoutByWorkspace.workspace;
+    expect(collectAllTabs(layout.root).map((tab) => tab.target.kind)).toEqual([
+      "draft",
+      "pull_request",
+    ]);
+    expect(findPaneContainingTab(layout.root, "pull-request")?.id).toBe("main");
+    expect(findPaneById(layout.root, "explorer")).toBeNull();
+    expect(state.explorerSidebarPaneIdByWorkspace.workspace).toBeNull();
+  });
+
+  it("preserves Explorer tabs and state when the saved main pane is hidden", async () => {
+    await AsyncStorage.setItem(
+      "workspace-layout-state",
+      JSON.stringify({
+        version: 2,
+        state: {
+          layoutByWorkspace: {
+            "hidden-main": {
+              root: {
+                kind: "group",
+                group: {
+                  id: "root",
+                  direction: "horizontal",
+                  sizes: [0.75, 0.25],
+                  children: [
+                    createPane({ id: "main", tabIds: [], hidden: true }),
+                    createPane({
+                      id: "explorer",
+                      tabIds: ["saved-pr", "saved-draft"],
+                      focusedTabId: "saved-draft",
+                      targetsByTabId: {
+                        "saved-pr": { kind: "pull_request" },
+                        "saved-draft": { kind: "draft", draftId: "draft-from-explorer" },
+                      },
+                      stateByTabId: {
+                        "saved-draft": { savedContent: "preserve explorer draft" },
+                      },
+                    }),
+                  ],
+                },
+              },
+              focusedPaneId: "explorer",
+            },
+          },
+          explorerPaneIdByWorkspace: { "hidden-main": "explorer" },
+        },
+      }),
+    );
+    const restored = createWorkspaceLayoutStore(
+      createDeterministicWorkspaceLayoutIds(),
+      () => VSCODE_SURFACE,
+    );
+
+    await restored.persist.rehydrate();
+
+    const state = restored.getState();
+    const layout = state.layoutByWorkspace["hidden-main"];
+    expect(findPaneById(layout.root, "main")?.hidden).toBeUndefined();
+    expect(findPaneContainingTab(layout.root, "saved-pr")?.id).toBe("main");
+    expect(findPaneContainingTab(layout.root, "saved-draft")?.id).toBe("main");
+    expect(collectAllTabs(layout.root).find((tab) => tab.tabId === "saved-draft")).toMatchObject({
+      tabId: "saved-draft",
+      target: { kind: "draft", draftId: "draft-from-explorer" },
+      state: { savedContent: "preserve explorer draft" },
+    });
+    expect(findPaneById(layout.root, "explorer")).toBeNull();
+    expect(state.explorerSidebarPaneIdByWorkspace["hidden-main"]).toBeNull();
+  });
+
+  it("preserves a hidden generated ordinary pane while removing Explorer", async () => {
+    await AsyncStorage.setItem(
+      "workspace-layout-state",
+      JSON.stringify({
+        version: 2,
+        state: {
+          layoutByWorkspace: {
+            "hidden-generated": {
+              root: {
+                kind: "group",
+                group: {
+                  id: "root",
+                  direction: "horizontal",
+                  sizes: [0.75, 0.25],
+                  children: [
+                    createPane({
+                      id: "pane_saved",
+                      tabIds: ["ordinary-draft"],
+                      hidden: true,
+                      targetsByTabId: {
+                        "ordinary-draft": { kind: "draft", draftId: "ordinary-draft" },
+                      },
+                      stateByTabId: {
+                        "ordinary-draft": { savedContent: "preserve ordinary draft" },
+                      },
+                    }),
+                    createPane({
+                      id: "explorer",
+                      tabIds: ["saved-pr"],
+                      targetsByTabId: { "saved-pr": { kind: "pull_request" } },
+                    }),
+                  ],
+                },
+              },
+              focusedPaneId: "explorer",
+            },
+          },
+          explorerPaneIdByWorkspace: { "hidden-generated": "explorer" },
+        },
+      }),
+    );
+    const restored = createWorkspaceLayoutStore(
+      createDeterministicWorkspaceLayoutIds(),
+      () => VSCODE_SURFACE,
+    );
+
+    await restored.persist.rehydrate();
+
+    const state = restored.getState();
+    const layout = state.layoutByWorkspace["hidden-generated"];
+    expect(findPaneById(layout.root, "pane_saved")?.hidden).toBeUndefined();
+    expect(findPaneContainingTab(layout.root, "ordinary-draft")?.id).toBe("pane_saved");
+    expect(findPaneContainingTab(layout.root, "saved-pr")?.id).toBe("pane_saved");
+    expect(collectAllTabs(layout.root).find((tab) => tab.tabId === "ordinary-draft")).toMatchObject(
+      {
+        tabId: "ordinary-draft",
+        target: { kind: "draft", draftId: "ordinary-draft" },
+        state: { savedContent: "preserve ordinary draft" },
+      },
+    );
+    expect(findPaneById(layout.root, "explorer")).toBeNull();
+    expect(state.explorerSidebarPaneIdByWorkspace["hidden-generated"]).toBeNull();
+  });
+
+  it.each([false, true])(
+    "relocates a PR to the visible ordinary pane when restored Explorer hidden=%s",
+    async (explorerHidden) => {
+      const workspaceKey = explorerHidden ? "hidden-explorer" : "visible-explorer";
+      await AsyncStorage.setItem(
+        "workspace-layout-state",
+        JSON.stringify({
+          version: 2,
+          state: {
+            layoutByWorkspace: {
+              [workspaceKey]: {
+                root: {
+                  kind: "group",
+                  group: {
+                    id: "root",
+                    direction: "horizontal",
+                    sizes: [0.3, 0.45, 0.25],
+                    children: [
+                      createPane({ id: "main", tabIds: [], hidden: true }),
+                      createPane({
+                        id: "secondary",
+                        tabIds: ["secondary-draft"],
+                        targetsByTabId: {
+                          "secondary-draft": {
+                            kind: "draft",
+                            draftId: "secondary-draft",
+                          },
+                        },
+                        stateByTabId: {
+                          "secondary-draft": { savedContent: "preserve secondary draft" },
+                        },
+                      }),
+                      createPane({
+                        id: "explorer",
+                        tabIds: ["saved-pr"],
+                        focusedTabId: "saved-pr",
+                        hidden: explorerHidden,
+                        targetsByTabId: { "saved-pr": { kind: "pull_request" } },
+                        stateByTabId: { "saved-pr": { savedContent: "preserve PR state" } },
+                      }),
+                    ],
+                  },
+                },
+                focusedPaneId: "secondary",
+              },
+            },
+            explorerPaneIdByWorkspace: { [workspaceKey]: "explorer" },
+          },
+        }),
+      );
+      const restored = createWorkspaceLayoutStore(
+        createDeterministicWorkspaceLayoutIds(),
+        () => VSCODE_SURFACE,
+      );
+
+      await restored.persist.rehydrate();
+      expect(
+        restored.getState().openTab({
+          workspaceKey,
+          target: { kind: "pull_request" },
+          intent: "reveal",
+        }),
+      ).toBe("saved-pr");
+
+      const state = restored.getState();
+      const layout = state.layoutByWorkspace[workspaceKey];
+      expect(findPaneById(layout.root, "main")?.hidden).toBe(true);
+      expect(findPaneContainingTab(layout.root, "saved-pr")?.id).toBe("secondary");
+      expect(findPaneContainingTab(layout.root, "secondary-draft")?.id).toBe("secondary");
+      expect(collectAllTabs(layout.root).find((tab) => tab.tabId === "saved-pr")).toMatchObject({
+        tabId: "saved-pr",
+        target: { kind: "pull_request" },
+        state: { savedContent: "preserve PR state" },
+      });
+      expect(
+        collectAllTabs(layout.root).find((tab) => tab.tabId === "secondary-draft"),
+      ).toMatchObject({
+        tabId: "secondary-draft",
+        state: { savedContent: "preserve secondary draft" },
+      });
+      expect(findPaneById(layout.root, "explorer")).toBeNull();
+      expect(state.explorerSidebarPaneIdByWorkspace[workspaceKey]).toBeNull();
+      expect(
+        shouldRenderWorkspaceExplorer({
+          config: VSCODE_SURFACE,
+          explorerPaneVisible: true,
+          focusModeEnabled: false,
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it("evacuates a reopened PR from a stale Explorer layout", () => {
+    const store = createWorkspaceLayoutStore(
+      createDeterministicWorkspaceLayoutIds(),
+      () => VSCODE_SURFACE,
+    );
+    store.setState({
+      layoutByWorkspace: {
+        workspace: normalizeLayout({
+          root: {
+            kind: "group",
+            group: {
+              id: "root",
+              direction: "horizontal",
+              sizes: [0.3, 0.45, 0.25],
+              children: [
+                createPane({ id: "main", tabIds: [], hidden: true }),
+                createPane({ id: "secondary", tabIds: ["secondary-draft"] }),
+                createPane({
+                  id: "explorer",
+                  tabIds: ["saved-pr"],
+                  targetsByTabId: { "saved-pr": { kind: "pull_request" } },
+                  stateByTabId: { "saved-pr": { savedContent: "preserve PR state" } },
+                }),
+              ],
+            },
+          },
+          focusedPaneId: "secondary",
+        }),
+      },
+      explorerSidebarPaneIdByWorkspace: { workspace: "explorer" },
+    });
+
+    expect(
+      store.getState().openTab({
+        workspaceKey: "workspace",
+        target: { kind: "pull_request" },
+        intent: "reveal",
+      }),
+    ).toBe("saved-pr");
+
+    const state = store.getState();
+    const layout = state.layoutByWorkspace.workspace;
+    expect(findPaneContainingTab(layout.root, "saved-pr")?.id).toBe("secondary");
+    expect(collectAllTabs(layout.root).find((tab) => tab.tabId === "saved-pr")?.state).toEqual({
+      savedContent: "preserve PR state",
+    });
+    expect(findPaneById(layout.root, "explorer")).toBeNull();
+    expect(state.explorerSidebarPaneIdByWorkspace.workspace).toBeNull();
+  });
+});
 
 it("observes open chats across unmounted workspaces until their tabs close", () => {
   const store = createWorkspaceLayoutStore(workspaceLayoutIds);

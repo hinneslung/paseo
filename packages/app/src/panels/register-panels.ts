@@ -15,6 +15,7 @@ import { providerSubagentPanelRegistration } from "@/panels/provider-subagent-pa
 import { pullRequestPanelRegistration } from "@/panels/pull-request-panel";
 import { pluginPanelRegistration } from "@/plugins/workspace-panels/panel";
 import { newTabPanelRegistration } from "@/panels/new-tab-panel";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 
 let panelsRegistered = false;
 
@@ -28,13 +29,18 @@ export function ensurePanelsRegistered(): void {
   registerPanel(providerSubagentPanelRegistration);
   registerPanel(setupPanelRegistration);
   registerPanel(terminalPanelRegistration);
-  registerPanel(browserPanelRegistration);
-  registerPanel(filePanelRegistration);
-  registerPanel(filesPanelRegistration);
+  const surface = getWorkspaceSurfaceConfig();
+  if (surface.showBrowser) registerPanel(browserPanelRegistration);
+  if (surface.showFileExplorer) {
+    registerPanel(filePanelRegistration);
+    registerPanel(filesPanelRegistration);
+  }
   registerPanel(pullRequestPanelRegistration);
-  registerPanel(commitDiffPanelRegistration);
-  registerPanel(workingDiffPanelRegistration);
-  registerPanel(changesTreePanelRegistration);
-  registerPanel(pluginPanelRegistration);
+  if (surface.showDiff) {
+    registerPanel(commitDiffPanelRegistration);
+    registerPanel(workingDiffPanelRegistration);
+  }
+  if (surface.showGitChanges) registerPanel(changesTreePanelRegistration);
+  if (surface.showPluginClientUi) registerPanel(pluginPanelRegistration);
   panelsRegistered = true;
 }

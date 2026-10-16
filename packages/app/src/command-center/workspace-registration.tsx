@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react-native";
 import { getIsElectron } from "@/constants/platform";
+import { getWorkspaceSurfaceConfig } from "@/workspace/surface-capabilities";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
 import { GIT_ACTION_ICONS } from "@/git/action-icons";
 import { useGitActionRunner, useGitActions } from "@/git/use-actions";
@@ -194,6 +195,7 @@ export function useWorkspaceCommandCenterActions(): void {
   const currentBranch = fields?.currentBranch ?? null;
   const isPinned = fields?.pinnedAt != null;
   const isCompact = useIsCompactFormFactor();
+  const surfaceConfig = getWorkspaceSurfaceConfig();
   const canPin = useHostFeature(serverId, "workspacePinning");
   const persistenceKey =
     serverId && fields
@@ -285,7 +287,8 @@ export function useWorkspaceCommandCenterActions(): void {
         shortcuts: resolveWorkspaceShortcuts(overrides),
         capabilities: {
           canSplitPanes: supportsDesktopPaneSplits() && !isCompact,
-          canOpenBrowserTabs: getIsElectron(),
+          canOpenBrowserTabs: getIsElectron() && surfaceConfig.showBrowser,
+          canOpenExplorerPanels: surfaceConfig.showFileExplorer || surfaceConfig.showGitChanges,
           isGit,
           canPin,
           canShowSetup,
@@ -310,6 +313,9 @@ export function useWorkspaceCommandCenterActions(): void {
       activeTabKind,
       canPin,
       canShowSetup,
+      surfaceConfig.showBrowser,
+      surfaceConfig.showFileExplorer,
+      surfaceConfig.showGitChanges,
       copyBranchName,
       copyPath,
       currentBranch,

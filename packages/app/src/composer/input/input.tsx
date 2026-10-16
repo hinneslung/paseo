@@ -131,6 +131,8 @@ export interface MessageInputProps {
   client: DaemonClient | null;
   /** Dictation start gate from host runtime (socket connected + directory ready). */
   isReadyForDictation?: boolean;
+  /** Whether this host surface supports voice and dictation controls. */
+  showVoice?: boolean;
   placeholder?: string;
   autoFocus?: boolean;
   autoFocusKey?: string;
@@ -1059,6 +1061,7 @@ interface ResolvedMessageInputProps {
   onPasteImages: ((files: readonly NativePastedFile[]) => void) | undefined;
   client: DaemonClient | null;
   isReadyForDictation: boolean | undefined;
+  showVoice: boolean;
   placeholder: string | undefined;
   autoFocus: boolean;
   autoFocusKey: string | undefined;
@@ -1106,6 +1109,7 @@ function resolveMessageInputProps(props: MessageInputProps): ResolvedMessageInpu
     onPasteImages: props.onPasteImages,
     client: props.client,
     isReadyForDictation: props.isReadyForDictation,
+    showVoice: props.showVoice ?? true,
     placeholder: props.placeholder,
     autoFocus: props.autoFocus ?? false,
     autoFocusKey: props.autoFocusKey,
@@ -1131,6 +1135,10 @@ function resolveMessageInputProps(props: MessageInputProps): ResolvedMessageInpu
     textReplacement: props.textReplacement,
     submitLabel: props.submitLabel,
   };
+}
+
+function shouldShowVoiceControls(showVoice: boolean, modeShowsVoice: boolean): boolean {
+  return showVoice && modeShowsVoice;
 }
 
 function extractErrorMessage(error: unknown): string | null {
@@ -1161,6 +1169,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       onPasteImages,
       client,
       isReadyForDictation,
+      showVoice,
       placeholder,
       autoFocus,
       autoFocusKey,
@@ -1187,6 +1196,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
       submitLabel,
     } = resolveMessageInputProps(props);
     const mode = resolveComposerInputMode(inputMode);
+    const showVoiceControls = shouldShowVoiceControls(showVoice, mode.showVoice);
     const { t } = useTranslation();
     const isCompact = useIsCompactFormFactor();
     const { height: windowHeight } = useWindowDimensions();
@@ -1847,7 +1857,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
             <View style={styles.rightButtonGroup}>
               {beforeVoiceContent}
               <VoiceButtonTooltip
-                visible={mode.showVoice}
+                visible={showVoiceControls}
                 onVoicePress={handleVoicePress}
                 isDictationStartEnabled={isDictationStartEnabled}
                 voiceButtonAccessibilityLabel={voiceButtonAccessibilityLabel}

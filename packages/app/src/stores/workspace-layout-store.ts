@@ -62,6 +62,12 @@ import {
 import { normalizeWorkspaceTabTarget } from "@/workspace-tabs/identity";
 import { createValidatedPersistStorage } from "@/storage/validated-persist-storage";
 import { panelTargetSupportsHostForWorkspaceKey } from "@/plugins/workspace-panels/locations";
+import {
+  getWorkspaceSurfaceConfig,
+  isWorkspaceTabTargetSupported,
+  supportsWorkspaceExplorer,
+  type WorkspaceSurfaceConfig,
+} from "@/workspace/surface-capabilities";
 
 export {
   AMBIENT_PLACEMENT,
@@ -432,7 +438,69 @@ function getWorkspaceLayout(
   state: Record<string, WorkspaceLayout>,
   workspaceKey: string,
 ): WorkspaceLayout {
-  return normalizeLayout(state[workspaceKey] ?? createWorkspaceLayoutWithExplorerSidebar());
+  return sanitizeWorkspaceLayoutForSurface(
+    normalizeLayout(state[workspaceKey] ?? createWorkspaceLayoutWithExplorerSidebar()),
+  );
+}
+
+export function sanitizeWorkspaceLayoutForSurface(
+  layout: WorkspaceLayout,
+  config: WorkspaceSurfaceConfig = getWorkspaceSurfaceConfig(),
+): WorkspaceLayout {
+  let root = layout.root;
+  for (const tab of collectAllTabs(root)) {
+    if (!isWorkspaceTabTargetSupported(tab.target, config)) {
+      root = removeTabFromTree(root, tab.tabId);
+    }
+  }
+  return normalizeLayout({ ...layout, root });
+}
+
+function removeRestoredExplorerSidebar(
+  layout: WorkspaceLayout,
+  registeredPaneId: string | null | undefined,
+  createNodeId: WorkspaceLayoutIdSource["createNodeId"],
+): { layout: WorkspaceLayout; explorerRemoved: boolean } {
+  const explorerPaneId = resolveExplorerSidebarPaneId(layout, registeredPaneId);
+  const explorerPane = findPaneById(layout.root, explorerPaneId);
+  if (!explorerPaneId || !explorerPane) {
+    return { layout, explorerRemoved: true };
+  }
+
+  const restored = restoreWorkspaceLayout(layout, explorerPaneId, createNodeId);
+  const visibleOrdinaryPanes = collectAllPanes(restored.root).filter(
+    (pane) => pane.id !== explorerPaneId,
+  );
+  const ordinaryPane =
+    visibleOrdinaryPanes.find((pane) => pane.id === DEFAULT_PANE_ID) ??
+    visibleOrdinaryPanes[0] ??
+    null;
+  if (!ordinaryPane) {
+    return { layout: restored, explorerRemoved: false };
+  }
+
+  let relocated = restored;
+  for (const tabId of explorerPane.tabIds) {
+    const moved = moveTabToPaneInLayout({
+      layout: relocated,
+      explorerSidebarPaneId: explorerPaneId,
+      tabId,
+      toPaneId: ordinaryPane.id,
+    });
+    if (!moved) {
+      return { layout: restored, explorerRemoved: false };
+    }
+    relocated = moved;
+  }
+  const withoutExplorer = normalizeLayout({
+    ...relocated,
+    root: removePaneFromTree(relocated.root, explorerPaneId),
+    focusedPaneId: ordinaryPane.id,
+  });
+  if (findPaneById(withoutExplorer.root, explorerPaneId)) {
+    return { layout: restored, explorerRemoved: false };
+  }
+  return { layout: withoutExplorer, explorerRemoved: true };
 }
 
 function keepWorkspaceFocusOutOfExplorerSidebar(
@@ -653,6 +721,7 @@ function createExplorerSidebarPane(
 
 export function createWorkspaceLayoutStore(
   ids: WorkspaceLayoutIdSource = defaultWorkspaceLayoutIds,
+  resolveSurfaceConfig: () => WorkspaceSurfaceConfig = getWorkspaceSurfaceConfig,
 ) {
   return create<WorkspaceLayoutStore>()(
     persist(
@@ -688,11 +757,47 @@ export function createWorkspaceLayoutStore(
         openTab: (input) => {
           const normalizedWorkspaceKey = trimNonEmpty(input.workspaceKey);
           const normalizedTarget = normalizeWorkspaceTabTarget(input.target);
-          if (!normalizedWorkspaceKey || !normalizedTarget) {
+          const surface = resolveSurfaceConfig();
+          if (
+            !normalizedWorkspaceKey ||
+            !normalizedTarget ||
+            !isWorkspaceTabTargetSupported(normalizedTarget, surface)
+          ) {
             return null;
           }
+          const currentState = get();
+          let placementState = currentState;
+          let explorerRemoved = false;
+          if (!supportsWorkspaceExplorer(surface)) {
+            const currentLayout = sanitizeWorkspaceLayoutForSurface(
+              normalizeLayout(
+                currentState.layoutByWorkspace[normalizedWorkspaceKey] ??
+                  createWorkspaceLayoutWithExplorerSidebar(),
+              ),
+              surface,
+            );
+            const relocation = removeRestoredExplorerSidebar(
+              currentLayout,
+              currentState.explorerSidebarPaneIdByWorkspace[normalizedWorkspaceKey],
+              ids.createNodeId,
+            );
+            if (relocation.explorerRemoved) {
+              explorerRemoved = true;
+              placementState = {
+                ...currentState,
+                layoutByWorkspace: {
+                  ...currentState.layoutByWorkspace,
+                  [normalizedWorkspaceKey]: relocation.layout,
+                },
+                explorerSidebarPaneIdByWorkspace: {
+                  ...currentState.explorerSidebarPaneIdByWorkspace,
+                  [normalizedWorkspaceKey]: null,
+                },
+              };
+            }
+          }
           const placement = getOpenTabPlacement(
-            get(),
+            placementState,
             normalizedWorkspaceKey,
             normalizedTarget,
             input.placement,
@@ -749,6 +854,12 @@ export function createWorkspaceLayoutStore(
                   normalizedTarget.agentId,
                 )
               : state.pinnedAgentIdsByWorkspace,
+            explorerSidebarPaneIdByWorkspace: explorerRemoved
+              ? {
+                  ...state.explorerSidebarPaneIdByWorkspace,
+                  [normalizedWorkspaceKey]: null,
+                }
+              : state.explorerSidebarPaneIdByWorkspace,
             layoutByWorkspace: {
               ...state.layoutByWorkspace,
               [normalizedWorkspaceKey]: input.parentTabId
@@ -763,6 +874,8 @@ export function createWorkspaceLayoutStore(
           return result.tabId;
         },
         showExplorerSidebar: (workspaceKey) => {
+          const surface = getWorkspaceSurfaceConfig();
+          if (!surface.showFileExplorer && !surface.showGitChanges) return null;
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
           if (!normalizedWorkspaceKey) {
             return null;
@@ -1023,7 +1136,14 @@ export function createWorkspaceLayoutStore(
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
           const normalizedTabId = trimNonEmpty(tabId);
           const normalizedTarget = normalizeWorkspaceTabTarget(target);
-          if (!normalizedWorkspaceKey || !normalizedTabId || !normalizedTarget) return null;
+          if (
+            !normalizedWorkspaceKey ||
+            !normalizedTabId ||
+            !normalizedTarget ||
+            !isWorkspaceTabTargetSupported(normalizedTarget)
+          ) {
+            return null;
+          }
           const result = replaceTabTargetInLayout({
             layout: getWorkspaceLayout(get().layoutByWorkspace, normalizedWorkspaceKey),
             tabId: normalizedTabId,
@@ -1715,7 +1835,7 @@ export function createWorkspaceLayoutStore(
             // Strip ephemeral (commit diff) tabs before persisting so they are
             // dropped on reload rather than restored pointing at a rebased SHA.
             layoutByWorkspace[key] = stripEphemeralTabsFromLayout(
-              normalizeLayout(state.layoutByWorkspace[key]),
+              sanitizeWorkspaceLayoutForSurface(normalizeLayout(state.layoutByWorkspace[key])),
             );
           }
           return {
@@ -1746,8 +1866,33 @@ export function createWorkspaceLayoutStore(
           for (const [workspaceKey, persistedLayout] of Object.entries(
             result.data.layoutByWorkspace,
           )) {
-            const restoredLayout = restoreWorkspaceLayout(
+            const surface = resolveSurfaceConfig();
+            const sanitizedLayout = sanitizeWorkspaceLayoutForSurface(
               stripEphemeralTabsFromLayout(persistedLayout),
+              surface,
+            );
+            if (!surface.showFileExplorer && !surface.showGitChanges) {
+              const explorerPaneId = resolveExplorerSidebarPaneId(
+                persistedLayout,
+                explorerSidebarPaneIdByWorkspace[workspaceKey],
+              );
+              const relocation = removeRestoredExplorerSidebar(
+                sanitizedLayout,
+                explorerPaneId,
+                ids.createNodeId,
+              );
+              layoutByWorkspace[workspaceKey] = restoreWorkspaceLayout(
+                relocation.layout,
+                relocation.explorerRemoved ? null : explorerPaneId,
+                ids.createNodeId,
+              );
+              explorerSidebarPaneIdByWorkspace[workspaceKey] = relocation.explorerRemoved
+                ? null
+                : explorerPaneId;
+              continue;
+            }
+            const restoredLayout = restoreWorkspaceLayout(
+              sanitizedLayout,
               resolveExplorerSidebarPaneId(
                 persistedLayout,
                 explorerSidebarPaneIdByWorkspace[workspaceKey],
