@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { WebSocket, type RawData } from "ws";
 
 export interface TcpTransportTarget {
@@ -42,6 +43,8 @@ export type WebSocketFactory = (input: WebSocketFactoryInput) => WebSocketLike;
 interface Session {
   id: string;
   ws: WebSocketLike;
+  password: string | null;
+  helloHandled: boolean;
   state: "opening" | "open" | "closing" | "closed";
 }
 
@@ -60,6 +63,12 @@ export class DaemonTransportAuthError extends Error {
 
 const WS_ENDPOINT_PATH = "/ws";
 const WS_CLOSE_DAEMON_AUTH_FAILED = 4401;
+const WS_BEARER_PROTOCOL_PREFIX = "paseo.bearer.";
+// WebSocket subprotocols accept HTTP token characters only, so passwords with
+// spaces, "@", or "/" authenticate through hello.auth only.
+const LEGACY_BEARER_PASSWORD_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const PASSWORD_PROBE_SESSION_ID = "vscode-password-probe";
+const PASSWORD_PROBE_TIMEOUT_MS = 4000;
 
 function createWebSocket(input: WebSocketFactoryInput): WebSocketLike {
   const ws = new WebSocket(input.url, input.protocols);
@@ -117,6 +126,130 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+interface HelloAuthApplication {
+  text: string;
+  isHello: boolean;
+}
+
+function applyBridgeHelloAuth(text: string, password: string | null): HelloAuthApplication {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { text, isHello: false };
+  }
+  if (!isRecord(parsed) || parsed.type !== "hello") {
+    return { text, isHello: false };
+  }
+  if (password) {
+    return {
+      text: JSON.stringify({ ...parsed, auth: { kind: "password", password } }),
+      isHello: true,
+    };
+  }
+  if (!("auth" in parsed)) {
+    return { text, isHello: true };
+  }
+  const withoutAuth: Record<string, unknown> = { ...parsed };
+  delete withoutAuth.auth;
+  return { text: JSON.stringify(withoutAuth), isHello: true };
+}
+
+function isServerInfoFrame(text: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.message) || !isRecord(parsed.message.payload)) {
+    return false;
+  }
+  return parsed.message.type === "status" && parsed.message.payload.status === "server_info";
+}
+
+function isHelloRejectedFrame(text: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  return isRecord(parsed) && parsed.type === "hello.rejected";
+}
+
+export interface VerifyDaemonHelloAuthInput {
+  endpoint: string;
+  password: string;
+  webSocketFactory?: WebSocketFactory;
+  timeoutMs?: number;
+}
+
+export async function verifyDaemonHelloAuth(input: VerifyDaemonHelloAuthInput): Promise<boolean> {
+  let resolveOutcome: (authenticated: boolean) => void = () => {};
+  const outcome = new Promise<boolean>((resolve) => {
+    resolveOutcome = resolve;
+  });
+  let settled = false;
+  const finish = (authenticated: boolean): void => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    clearTimeout(timer);
+    resolveOutcome(authenticated);
+  };
+  const timer = setTimeout(() => finish(false), input.timeoutMs ?? PASSWORD_PROBE_TIMEOUT_MS);
+  const probeId = randomUUID();
+  const sessionId = `${PASSWORD_PROBE_SESSION_ID}-${probeId}`;
+  const transport = new DaemonTransport({
+    openAuthGraceMs: 0,
+    emitEvent: (event) => {
+      if (event.kind === "error" || event.kind === "close") {
+        finish(false);
+        return;
+      }
+      if (event.kind !== "message" || typeof event.text !== "string") {
+        return;
+      }
+      if (isServerInfoFrame(event.text)) {
+        finish(true);
+        return;
+      }
+      if (isHelloRejectedFrame(event.text)) {
+        finish(false);
+      }
+    },
+    ...(input.webSocketFactory ? { webSocketFactory: input.webSocketFactory } : {}),
+  });
+
+  try {
+    await transport.openLocalTransportSession({
+      sessionId,
+      target: { transportType: "tcp", endpoint: input.endpoint },
+      password: input.password,
+    });
+    await transport.sendLocalTransportMessage({
+      sessionId,
+      text: JSON.stringify({
+        type: "hello",
+        clientId: `${PASSWORD_PROBE_SESSION_ID}-client-${probeId}`,
+        clientType: "browser",
+        protocolVersion: 1,
+      }),
+    });
+  } catch {
+    finish(false);
+  }
+
+  try {
+    return await outcome;
+  } finally {
+    clearTimeout(timer);
+    transport.closeAll();
+  }
+}
+
 export function parseOpenTcpTransportSessionInput(
   value: unknown,
   endpoint: string,
@@ -144,7 +277,9 @@ export function parseOpenTcpTransportSessionInput(
   ) {
     throw new Error("Local transport protocols must be strings.");
   }
-  const protocols = target.protocols as string[] | undefined;
+  const protocols = (target.protocols as string[] | undefined)?.filter(
+    (protocol) => !protocol.startsWith(WS_BEARER_PROTOCOL_PREFIX),
+  );
 
   return {
     sessionId,
@@ -178,9 +313,14 @@ export class DaemonTransport {
       throw new Error(`Local transport session already exists: ${sessionId}`);
     }
     const url = buildWebSocketUrl(input.target);
+    // COMPAT(vscodeBridgeSubprotocolAuth): added in v0.11.4, remove after 2027-03-24.
+    // Daemons that predate hello.auth accept the password only as a bearer
+    // subprotocol, which requires token-safe characters.
     const protocols = [
       ...(input.target.protocols ?? []),
-      ...(input.password ? [`paseo.bearer.${input.password}`] : []),
+      ...(input.password && LEGACY_BEARER_PASSWORD_PATTERN.test(input.password)
+        ? [`${WS_BEARER_PROTOCOL_PREFIX}${input.password}`]
+        : []),
     ];
 
     return new Promise((resolve, reject) => {
@@ -191,6 +331,8 @@ export class DaemonTransport {
       const session: Session = {
         id: sessionId,
         ws,
+        password: input.password,
+        helloHandled: false,
         state: "opening",
       };
       this.sessions.set(sessionId, session);
@@ -311,7 +453,12 @@ export class DaemonTransport {
       );
     }
 
-    const payload = decodeTransportMessage(input);
+    let payload = decodeTransportMessage(input);
+    if (typeof payload === "string" && !session.helloHandled) {
+      const applied = applyBridgeHelloAuth(payload, session.password);
+      session.helloHandled = applied.isHello;
+      payload = applied.text;
+    }
     await new Promise<void>((resolve, reject) => {
       session.ws.send(payload, (error) => {
         if (error) {

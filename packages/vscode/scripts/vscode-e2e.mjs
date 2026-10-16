@@ -226,18 +226,55 @@ function buildAgentRoute(frameUrl, serverId, workspaceId, agentId) {
   return route.href;
 }
 
-async function openSeededAgent(appFrame, seed) {
+async function readSeededAgentTabState(appFrame, agentId) {
+  const expectedTabTestId = `workspace-tab-agent_${agentId}`;
+  return appFrame.evaluate((tabTestId) => {
+    const isRendered = (element) =>
+      element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
+    const tabs = Array.from(document.querySelectorAll("[data-testid]")).filter(
+      (element) => element.getAttribute("data-testid") === tabTestId,
+    );
+    const visibleTabs = tabs.filter(isRendered);
+    const messageInput = document.querySelector('[data-testid="message-input-root"]');
+    return {
+      hasVisibleMessageInput: !!messageInput && isRendered(messageInput),
+      selectedTabCount: visibleTabs.filter((tab) => tab.getAttribute("aria-selected") === "true")
+        .length,
+      tabCount: tabs.length,
+      url: location.href,
+      visibleTabCount: visibleTabs.length,
+    };
+  }, expectedTabTestId);
+}
+
+async function openSeededAgent(appFrame, seed, workbench) {
   const route = buildAgentRoute(appFrame.url(), seed.serverId, seed.workspaceId, seed.agentId);
   await appFrame.evaluate((url) => {
     history.pushState({}, "", url);
     window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
   }, route);
-  await appFrame.waitForURL(
-    (url) =>
-      url.pathname.includes(`/workspace/${seed.workspaceId}`) && !url.searchParams.has("open"),
-    { timeout: 30_000 },
-  );
-  await appFrame.getByTestId("message-input-root").waitFor({ state: "visible", timeout: 30_000 });
+  try {
+    await waitForProbe(
+      `seeded agent tab ${seed.agentId}`,
+      async () => {
+        const state = await readSeededAgentTabState(appFrame, seed.agentId);
+        return { ready: state.selectedTabCount > 0 && state.hasVisibleMessageInput, ...state };
+      },
+      30_000,
+    );
+  } catch (error) {
+    await screenshot(workbench, "open-seeded-agent-failure");
+    throw error;
+  }
+  // Upstream re-applies the stale ?open query after our synthetic popstate, so strip it here.
+  await appFrame.evaluate(() => {
+    const url = new URL(location.href);
+    if (!url.searchParams.has("open")) {
+      return;
+    }
+    url.searchParams.delete("open");
+    history.replaceState(history.state, "", url.href);
+  });
 }
 
 async function runFileUriDropProbe(appFrame, linkedFile) {
@@ -376,7 +413,7 @@ async function runRichTranscriptAndFileLinkSpec({
       },
     });
     const seed = { ...route, agentId: agent.id };
-    await openSeededAgent(appFrame, seed);
+    await openSeededAgent(appFrame, seed, workbench);
     await runFileUriDropProbe(appFrame, linkedFile);
     await client.sendAgentMessage(agent.id, "Render the diagram and link the generated file.");
 

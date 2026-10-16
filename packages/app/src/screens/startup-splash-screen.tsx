@@ -443,11 +443,9 @@ export function StartupSplashScreen({
               <PaseoLogo size={64} />
               <Text style={styles.title}>{t("startup.errorTitle")}</Text>
             </View>
-
             <Text dataSet={CODE_SURFACE_DATASET} style={styles.errorMessage}>
               {vscodeError.message}
             </Text>
-
             <View style={styles.actionRow}>
               <Button variant="default" leftIcon={retryIcon} onPress={vscodeError.onRetry}>
                 Retry
@@ -466,9 +464,7 @@ export function StartupSplashScreen({
   }
 
   const desktopBootstrapState = bootstrapState;
-  if (!desktopBootstrapState) {
-    return null;
-  }
+  if (!desktopBootstrapState) return null;
 
   return (
     <View style={styles.errorScreen}>

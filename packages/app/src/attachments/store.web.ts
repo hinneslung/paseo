@@ -10,14 +10,11 @@ function createAttachmentStore(): AttachmentStore {
   if (isElectronRuntime() || getDesktopHost()?.platform === "vscode") {
     return createDesktopAttachmentStore(createDesktopAttachmentBridge());
   }
-
   return createIndexedDbAttachmentStore();
 }
 
 export async function getAttachmentStore(): Promise<AttachmentStore> {
-  if (!attachmentStorePromise) {
-    attachmentStorePromise = Promise.resolve(createAttachmentStore());
-  }
+  if (!attachmentStorePromise) attachmentStorePromise = Promise.resolve(createAttachmentStore());
   return await attachmentStorePromise;
 }
 

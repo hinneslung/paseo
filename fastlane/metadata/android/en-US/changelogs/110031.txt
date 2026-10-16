@@ -1,0 +1,11 @@
+Added
+- Added Hoplite as an opt-in provider in the ACP provider catalog
+- Added search to the Add provider catalog
+
+Changed
+- Changed Add provider failures to show as a toast
+
+Fixed
+- Fixed Remove being offered for plugin providers such as Antigravity and Muse Code
+
+Full notes: https://paseo.sh/changelog

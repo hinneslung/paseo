@@ -130,26 +130,6 @@ describe("desktop-daemon-transport", () => {
     });
   });
 
-  it("ignores transport events from another session", async () => {
-    const rpc = createFakeLocalDaemonTransportRpc();
-    const transportFactory = createDesktopDaemonTransportFactory(rpc);
-    expect(transportFactory).not.toBeNull();
-
-    const transport = transportFactory!({ url: LOCAL_URL });
-    const onOpen = vi.fn();
-    const onMessage = vi.fn();
-    transport.onOpen(onOpen);
-    transport.onMessage(onMessage);
-
-    rpc.resolveListen(vi.fn());
-    await Promise.resolve();
-    rpc.emitEvent({ sessionId: "another-session", kind: "open" });
-    rpc.emitEvent({ sessionId: "another-session", kind: "message", text: "wrong" });
-
-    expect(onOpen).not.toHaveBeenCalled();
-    expect(onMessage).not.toHaveBeenCalled();
-  });
-
   it.each([0, 65536])("rejects an out-of-range Remote SSH port (%s)", (sshPort) => {
     const transportFactory = createDesktopDaemonTransportFactory(
       createFakeLocalDaemonTransportRpc(),

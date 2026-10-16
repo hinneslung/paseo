@@ -1,26 +1,19 @@
-import { describe, expect, it, vi } from "vitest";
-import type { PanelPresentation } from "@/panels/panel-registry";
-import { resolveBuiltInLaunchPresentations } from "./presentations";
+import { describe, expect, it } from "vitest";
+import type { PanelPresentation, PanelRegistration } from "@/panels/panel-registry";
+import { resolveRegisteredLaunchPresentations } from "./internal/catalog";
 
-describe("resolveBuiltInLaunchPresentations", () => {
-  it("does not resolve unregistered VS Code panel metadata", () => {
+describe("resolveRegisteredLaunchPresentations", () => {
+  it("does not resolve metadata for unregistered VS Code panels", () => {
     const presentation = {} as PanelPresentation;
-    const resolve = vi.fn(() => presentation);
+    const requested: string[] = [];
+    const result = resolveRegisteredLaunchPresentations((kind) => {
+      requested.push(kind);
+      return kind === "pull_request"
+        ? ({ presentation } as unknown as PanelRegistration)
+        : undefined;
+    });
 
-    const result = resolveBuiltInLaunchPresentations(
-      {
-        showFileExplorer: false,
-        showDiff: false,
-        showGitChanges: false,
-        showBrowser: false,
-        showVoice: false,
-        showPluginClientUi: false,
-      },
-      resolve,
-    );
-
-    expect(resolve).toHaveBeenCalledTimes(1);
-    expect(resolve).toHaveBeenCalledWith("pull_request");
+    expect(requested).toEqual(["changes_tree", "working_diff", "files", "pull_request"]);
     expect(result).toEqual({
       changes: null,
       diff: null,

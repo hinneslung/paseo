@@ -1,3 +1,4 @@
+import { useHosts, useHostRuntimeLastError } from "@/runtime/host-runtime";
 import { useCallback, useEffect, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, Text, Pressable } from "react-native";
@@ -21,10 +22,10 @@ import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
 import { PairDeviceModal } from "@/desktop/components/pair-device-modal";
 import { buildSettingsHostSectionRoute } from "@/utils/host-routes";
-import { getIsVscode } from "@/constants/platform";
 
 export function OpenProjectScreen() {
   const { t } = useTranslation();
+  const hosts = useHosts();
   const router = useRouter();
   const openDesktopAgentList = usePanelStore((s) => s.openDesktopAgentList);
   const openProjectPicker = useOpenAddProject();
@@ -34,13 +35,12 @@ export function OpenProjectScreen() {
   const [isPairDeviceOpen, setIsPairDeviceOpen] = useState(false);
 
   const isCompactLayout = useIsCompactFormFactor();
-  const isVscodeRuntime = getIsVscode();
 
   useEffect(() => {
-    if (!isCompactLayout && !isVscodeRuntime) {
+    if (!isCompactLayout) {
       openDesktopAgentList();
     }
-  }, [isCompactLayout, isVscodeRuntime, openDesktopAgentList]);
+  }, [isCompactLayout, openDesktopAgentList]);
 
   const handleOpenPicker = useCallback(() => {
     void openProjectPicker();
@@ -66,6 +66,9 @@ export function OpenProjectScreen() {
         <View style={styles.logo}>
           <PaseoLogo size={52} />
         </View>
+        {hosts.map((host) => (
+          <HostError key={host.serverId} serverId={host.serverId} label={host.label} />
+        ))}
         <View style={styles.tiles}>
           <HomeTile
             icon={FolderOpen}
@@ -112,6 +115,15 @@ export function OpenProjectScreen() {
       {importSession.sheet}
     </View>
   );
+}
+
+function HostError({ serverId, label }: { serverId: string; label: string }) {
+  const error = useHostRuntimeLastError(serverId);
+  return error ? (
+    <Text accessibilityRole="alert" style={styles.hostError}>
+      {label}: {error}
+    </Text>
+  ) : null;
 }
 
 interface HomeTileProps {
@@ -179,6 +191,12 @@ const styles = StyleSheet.create((theme) => ({
   },
   logo: {
     marginBottom: theme.spacing[8],
+  },
+  hostError: {
+    color: theme.colors.destructive,
+    fontSize: theme.fontSize.base,
+    maxWidth: 452,
+    textAlign: "center",
   },
   tiles: {
     marginTop: { xs: theme.spacing[6], md: theme.spacing[12] },

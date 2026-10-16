@@ -21,10 +21,7 @@ describe("attachment store", () => {
         bridgeProtocol: 1,
         workspaceFolders: [],
       },
-      paseoDesktop: {
-        platform: "vscode",
-        invoke: async () => null,
-      },
+      paseoDesktop: { platform: "vscode", invoke: async () => null },
     });
 
     const store = await getAttachmentStore();

@@ -1,3 +1,4 @@
+import { useVoiceAudioEngineOptional } from "@/contexts/voice-context";
 import { pluginSettingsKey } from "./settings/use-settings";
 import { useEffect } from "react";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
@@ -13,6 +14,7 @@ export function PluginCatalogSync({
   serverId: string;
   client: DaemonClient;
 }) {
+  const audio = useVoiceAudioEngineOptional();
   const connected = useHostRuntimeIsConnected(serverId);
   const supported = useHostFeature(serverId, "plugins");
   const clientRuntimeSupported = getWorkspaceSurfaceConfig().showPluginClientUi;
@@ -20,7 +22,7 @@ export function PluginCatalogSync({
   useEffect(() => {
     let cancelled = false;
     let refreshQueue = Promise.resolve();
-    if (!clientRuntimeSupported || !supported) {
+    if (!clientRuntimeSupported || !supported || !audio) {
       pluginRegistry.removeHost(serverId);
       return;
     }
@@ -37,6 +39,7 @@ export function PluginCatalogSync({
               pluginRegistry.installCatalog(serverId, catalog, {
                 replacePluginId,
                 client,
+                audio,
               });
             }
             return undefined;
@@ -50,27 +53,38 @@ export function PluginCatalogSync({
       );
       return refreshQueue;
     };
-    void refresh();
-    const unsubscribe = client.on("status", (message) => {
-      if (message.payload.status === "plugin_settings_changed") {
-        const { pluginId, settingsId } = message.payload;
-        if (typeof settingsId === "string") {
-          const plugin = pluginRegistry
-            .getSnapshot()
-            .find((item) => item.serverId === serverId && item.id === pluginId);
-          void plugin?.queryClient.invalidateQueries({ queryKey: pluginSettingsKey(settingsId) });
+    const observation = client.observeEvents([
+      "status.plugin_catalog_changed",
+      "status.plugin_settings_changed",
+    ]);
+    observation.subscribe({
+      snapshot: () => {
+        void refresh();
+      },
+      update: (message) => {
+        if (message.type !== "status") return;
+        if (message.payload.status === "plugin_settings_changed") {
+          const { pluginId, settingsId } = message.payload;
+          if (typeof settingsId === "string") {
+            const plugin = pluginRegistry
+              .getSnapshot()
+              .find((item) => item.serverId === serverId && item.id === pluginId);
+            void plugin?.queryClient.invalidateQueries({ queryKey: pluginSettingsKey(settingsId) });
+          }
         }
-      }
-      if (message.payload.status === "plugin_catalog_changed") {
-        const pluginId = message.payload.pluginId;
-        if (typeof pluginId === "string") void refresh(pluginId);
-      }
+        if (message.payload.status === "plugin_catalog_changed") {
+          const pluginId = message.payload.pluginId;
+          if (typeof pluginId === "string") void refresh(pluginId);
+        }
+      },
     });
     return () => {
       cancelled = true;
-      unsubscribe();
+      void observation
+        .release()
+        .catch((error) => console.warn("[Plugins] Failed to release catalog", error));
     };
-  }, [client, clientRuntimeSupported, connected, serverId, supported]);
+  }, [audio, client, clientRuntimeSupported, connected, serverId, supported]);
 
   useEffect(() => () => pluginRegistry.removeHost(serverId), [serverId]);
   return null;

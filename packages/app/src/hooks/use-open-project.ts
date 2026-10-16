@@ -108,15 +108,15 @@ export function useOpenProjectWorkspace(
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
 
   return useCallback(
-    async (path: string) => {
-      return openProjectWorkspaceDirectly({
+    async (path: string) =>
+      openProjectWorkspaceDirectly({
         serverId: normalizedServerId,
         projectPath: path,
         isConnected,
         client,
         mergeWorkspaces,
         setHasHydratedWorkspaces,
-        openDraftTab: (workspaceKey: string) =>
+        openDraftTab: (workspaceKey) =>
           useWorkspaceLayoutStore.getState().openTab({
             workspaceKey,
             target: { kind: "draft", draftId: generateDraftId() },
@@ -125,8 +125,7 @@ export function useOpenProjectWorkspace(
           }),
         navigateToWorkspace: (targetServerId, workspaceId) =>
           navigateToWorkspace({ serverId: targetServerId, workspaceId }),
-      });
-    },
+      }),
     [client, isConnected, mergeWorkspaces, normalizedServerId, setHasHydratedWorkspaces],
   );
 }

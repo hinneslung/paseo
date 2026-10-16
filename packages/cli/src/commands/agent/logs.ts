@@ -1,5 +1,6 @@
 import { Command } from "commander";
-import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
+import { connectToDaemon } from "../../utils/client.js";
+import { waitForStop } from "../../utils/wait-for-stop.js";
 import type { CommandOptions } from "../../output/index.js";
 import {
   fetchProjectedTimelineItems,
@@ -7,7 +8,7 @@ import {
 } from "../../utils/timeline.js";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
-import { curateAgentActivity } from "@getpaseo/server";
+import { curateAgentActivity } from "@getpaseo/server/agent-activity";
 
 export function addLogsOptions(cmd: Command): Command {
   return cmd
@@ -91,23 +92,13 @@ export async function runLogsCommand(
   options: AgentLogsOptions,
   _command: Command,
 ): Promise<AgentLogsResult> {
-  const host = getDaemonHost({ host: options.host });
-
   if (!id) {
     console.error("Error: Agent ID required");
     console.error("Usage: paseo agent logs <id>");
     process.exit(1);
   }
 
-  let client: DaemonClient;
-  try {
-    client = await connectToDaemon({ host: options.host });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`Error: Cannot connect to daemon at ${host}: ${message}`);
-    console.error("Start the daemon with: paseo daemon start");
-    process.exit(1);
-  }
+  const client = await connectToDaemon({ target: options.daemonTarget });
 
   try {
     const fetchResult = await client.fetchAgent({ agentId: id });
@@ -157,6 +148,7 @@ export async function runLogsCommand(
     const transcript = formatAgentActivityTranscript(timelineItems, tailCount);
     console.log(transcript);
   } catch (err) {
+    if (err && typeof err === "object" && "code" in err) throw err;
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Error: Failed to get logs: ${message}`);
     await client.close().catch(() => {});
@@ -208,6 +200,14 @@ async function runFollowMode(
       return;
     }
 
+    if (message.type === "agent.timeline.error") {
+      console.error(`Timeline observation stopped: ${message.payload.error}`);
+      return;
+    }
+    if (message.type === "agent.timeline.subscription_restored") {
+      console.log("\n[Reconnected; live output resumed. Events may have been missed.]");
+      return;
+    }
     if (message.payload.event.type === "timeline") {
       const item = message.payload.event.item;
       // Apply filter
@@ -225,16 +225,7 @@ async function runFollowMode(
   await unsubscribe.ready;
   console.log(`\n--- Following logs (${tailLabel}; Ctrl+C to stop) ---\n`);
 
-  // Wait for interrupt
-  await new Promise<void>((resolve) => {
-    const cleanup = () => {
-      unsubscribe();
-      resolve();
-    };
-
-    process.on("SIGINT", cleanup);
-    process.on("SIGTERM", cleanup);
-  });
-
+  await waitForStop();
+  unsubscribe();
   await client.close();
 }

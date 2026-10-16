@@ -93,19 +93,13 @@ describe("appendFileMentionPaths", () => {
 
   it("preserves existing trailing whitespace before appended paths", () => {
     expect(
-      appendFileMentionPaths({
-        text: "review ",
-        relativePaths: ["packages/app/src/foo.tsx"],
-      }),
+      appendFileMentionPaths({ text: "review ", relativePaths: ["packages/app/src/foo.tsx"] }),
     ).toBe('review "packages/app/src/foo.tsx"');
   });
 
   it("uses the same double-quote escaping as autocomplete replacement", () => {
-    expect(
-      appendFileMentionPaths({
-        text: "",
-        relativePaths: ['src/"quoted".ts'],
-      }),
-    ).toBe('"src/\\"quoted\\".ts"');
+    expect(appendFileMentionPaths({ text: "", relativePaths: ['src/"quoted".ts'] })).toBe(
+      '"src/\\"quoted\\".ts"',
+    );
   });
 });

@@ -33,9 +33,7 @@ describe("parseDroppedFilePaths", () => {
 
   it("normalizes Windows file URIs", () => {
     expect(
-      parseDroppedFilePaths({
-        uriList: "file:///C:/Users/dev/repo/packages/app/src/foo.tsx",
-      }),
+      parseDroppedFilePaths({ uriList: "file:///C:/Users/dev/repo/packages/app/src/foo.tsx" }),
     ).toEqual(["C:/Users/dev/repo/packages/app/src/foo.tsx"]);
   });
 
@@ -87,18 +85,26 @@ describe("resolveDroppedFileMentionPath", () => {
 });
 
 describe("splitDroppedItemsForMentions", () => {
-  it("turns workspace file URIs into mentions and retains other files for upload", () => {
+  it("turns a VS Code workspace file URI into a mention and not an upload", () => {
+    expect(
+      splitDroppedItemsForMentions({
+        cwd: "/home/dev/repo",
+        items: [{ kind: "file-uri", path: "/home/dev/repo/src/index.ts" }],
+      }),
+    ).toEqual({ mentionPaths: ["src/index.ts"], uploadItems: [] });
+  });
+
+  it("retains outside-workspace and ordinary dropped files for upload", () => {
     expect(
       splitDroppedItemsForMentions({
         cwd: "/home/dev/repo",
         items: [
-          { kind: "file-uri", path: "/home/dev/repo/src/index.ts" },
           { kind: "file-uri", path: "/home/dev/outside.txt" },
           { kind: "desktop-path", path: "/home/dev/archive.zip" },
         ],
       }),
     ).toEqual({
-      mentionPaths: ["src/index.ts"],
+      mentionPaths: [],
       uploadItems: [
         { kind: "desktop-path", path: "/home/dev/outside.txt" },
         { kind: "desktop-path", path: "/home/dev/archive.zip" },

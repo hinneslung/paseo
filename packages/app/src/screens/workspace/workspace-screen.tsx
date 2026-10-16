@@ -80,9 +80,10 @@ import {
   type WorkspaceTabTarget,
 } from "@/workspace-tabs/model";
 import {
-  getWorkspaceSurfaceConfig,
   isWorkspaceTabTargetSupported,
-  type WorkspaceSurfaceConfig,
+  shouldAutoOpenWorkspacePullRequest,
+  useWorkspaceSurface,
+  WorkspaceExplorerSurface,
 } from "@/workspace/surface-capabilities";
 import { useSettings } from "@/hooks/use-settings";
 import { useKeyboardActionHandler } from "@/hooks/use-keyboard-action-handler";
@@ -211,7 +212,7 @@ import {
 } from "@/workspace/file-open";
 import { RenderProfile } from "@/utils/render-profiler";
 import { useWorkspaceCheckoutStatus } from "@/screens/workspace/use-workspace-checkout-status";
-import { useHasPullRequest } from "@/panels/pull-request";
+import { useHasPullRequest, usePullRequestAutoAdd } from "@/panels/pull-request";
 import { tryOpenWorkspaceFileInVscode } from "./vscode-file-open";
 
 const WORKSPACE_FLOATING_PANEL_PORTAL_HOST_PREFIX = "workspace-floating-panels";
@@ -263,13 +264,11 @@ interface WorkspaceScreenProps {
   workspaceId: string;
   isRouteFocused?: boolean;
   recoveryRequested?: boolean;
-  recoveryAgentId?: string | null;
 }
 
 type WorkspaceScreenContentProps = WorkspaceScreenProps & {
   isRouteFocused: boolean;
   recoveryRequested: boolean;
-  recoveryAgentId: string | null;
 };
 
 function trimNonEmpty(value: string | null | undefined): string | null {
@@ -865,7 +864,6 @@ export const WorkspaceScreen = memo(function WorkspaceScreen({
   workspaceId,
   isRouteFocused,
   recoveryRequested,
-  recoveryAgentId,
 }: WorkspaceScreenProps) {
   const navigationFocused = useIsFocused();
   useEffect(() => {
@@ -880,7 +878,6 @@ export const WorkspaceScreen = memo(function WorkspaceScreen({
       workspaceId={workspaceId}
       isRouteFocused={isRouteFocused ?? navigationFocused}
       recoveryRequested={recoveryRequested ?? false}
-      recoveryAgentId={recoveryAgentId ?? null}
     />
   );
 });
@@ -1521,30 +1518,6 @@ function resolveCommandCenterPanelTarget(target: WorkspacePanelTarget): Workspac
   }
 }
 
-function hasExplorerSurface(config: WorkspaceSurfaceConfig): boolean {
-  return config.showFileExplorer || config.showGitChanges;
-}
-
-function WorkspaceExplorerSurface({
-  visible,
-  children,
-}: {
-  visible: boolean;
-  children: ReactNode;
-}) {
-  return visible ? children : null;
-}
-
-function resolveWorkspaceLauncherVisibility(
-  config: WorkspaceSurfaceConfig,
-  isGitCheckout: boolean,
-): { showBrowser: boolean; showChanges: boolean } {
-  return {
-    showBrowser: getIsElectron() && config.showBrowser,
-    showChanges: config.showGitChanges && isGitCheckout,
-  };
-}
-
 function useLastMainPane(input: {
   workspaceKey: string | null;
   layout: WorkspaceLayout | null;
@@ -1569,14 +1542,11 @@ function WorkspaceScreenContent({
   workspaceId,
   isRouteFocused,
   recoveryRequested,
-  recoveryAgentId,
 }: WorkspaceScreenContentProps) {
   const { t } = useTranslation();
   const _insets = useSafeAreaInsets();
   const toast = useToast();
   const isMobile = useIsCompactFormFactor();
-  const surfaceConfig = useMemo(getWorkspaceSurfaceConfig, []);
-  const showExplorerSurface = hasExplorerSurface(surfaceConfig);
   const hasMacTrafficLights = useHasWindowChromeObstruction("top-left");
   const explorerToggleOwner = resolveWorkspaceExplorerToggleOwner({
     isMobile,
@@ -1697,7 +1667,6 @@ function WorkspaceScreenContent({
   const workspaceRecovery = useWorkspaceRecovery({
     serverId: normalizedServerId,
     workspaceId: normalizedWorkspaceId,
-    agentId: recoveryAgentId,
     enabled: shouldInspectWorkspaceRecovery(
       hasHydratedWorkspaces,
       workspaceDescriptor,
@@ -1798,10 +1767,23 @@ function WorkspaceScreenContent({
     workspace: workspaceDescriptor,
     checkoutState: workspaceHeaderCheckoutState,
   });
+  const {
+    config: surfaceConfig,
+    showExplorer: showExplorerSurface,
+    showBrowserLauncher: showCreateBrowserTab,
+    showChangesLauncher,
+    autoOpenPullRequest,
+  } = useWorkspaceSurface(isGitCheckout);
+  const canDetectPullRequestTab = canDetectPullRequest(isRouteFocused, isGitCheckout, isMobile);
   const hasPullRequest = useHasPullRequest({
     serverId: normalizedServerId,
     cwd: workspaceDirectory,
-    enabled: canDetectPullRequest(isRouteFocused, isGitCheckout, isMobile),
+    enabled: canDetectPullRequestTab,
+  });
+  usePullRequestAutoAdd({
+    workspaceKey: persistenceKey,
+    hasPullRequest,
+    enabled: shouldAutoOpenWorkspacePullRequest(canDetectPullRequestTab, autoOpenPullRequest),
   });
 
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
@@ -3272,9 +3254,7 @@ function WorkspaceScreenContent({
   const handleWorkspaceSidebarAction = useCallback(
     (action: KeyboardActionDefinition): boolean => {
       if (action.id === "sidebar.toggle.right") {
-        if (showExplorerSurface) {
-          handleToggleExplorerSidebar();
-        }
+        if (showExplorerSurface) handleToggleExplorerSidebar();
         return true;
       }
       if (action.id !== "sidebar.toggle.both") {
@@ -3909,11 +3889,9 @@ function WorkspaceScreenContent({
     () => createTerminalMutation.isPending || pendingTerminalCreateInput !== null,
     [createTerminalMutation.isPending, pendingTerminalCreateInput],
   );
-  const launcherVisibility = resolveWorkspaceLauncherVisibility(surfaceConfig, isGitCheckout);
-  const showCreateBrowserTab = launcherVisibility.showBrowser;
   const newTabLauncher = useMemo<NewTabLauncher>(
     () => ({
-      showChanges: launcherVisibility.showChanges,
+      showChanges: showChangesLauncher,
       showPullRequest: hasPullRequest,
       showBrowser: showCreateBrowserTab,
       terminalDisabled: createTerminalDisabled,
@@ -3922,7 +3900,7 @@ function WorkspaceScreenContent({
     [
       createTerminalDisabled,
       hasPullRequest,
-      launcherVisibility.showChanges,
+      showChangesLauncher,
       launchWorkspaceTab,
       showCreateBrowserTab,
     ],

@@ -53,6 +53,7 @@ import {
   SidebarWorkspaceRowFrame,
   SidebarWorkspaceRowContent,
   resolveTrailingActionVisibility,
+  type SidebarWorkspaceTrailingPresentation,
   SidebarWorkspaceTrailingActionBase,
   SidebarWorkspaceTrailingActionOverlay,
   SidebarWorkspaceTrailingActionSlot,
@@ -407,6 +408,7 @@ function StatusGroupHeader({
   group: SidebarWorkspaceGroup;
   collapsed: boolean;
 }) {
+  const { t } = useTranslation();
   const [isHovered, setIsHovered] = useState(false);
   const toggleWorkspaceGroupCollapsed = useSidebarCollapsedSectionsStore(
     (state) => state.toggleWorkspaceGroupCollapsed,
@@ -430,7 +432,7 @@ function StatusGroupHeader({
     <View onPointerEnter={handleHoverIn} onPointerLeave={handleHoverOut}>
       <Pressable
         accessibilityRole={platformIsWeb ? undefined : "button"}
-        accessibilityLabel={`${group.label} group`}
+        accessibilityLabel={t("sidebar.statusGroupAccessibility", { label: group.label })}
         accessibilityState={accessibilityState}
         style={rowStyle}
         onPress={handlePress}
@@ -828,7 +830,7 @@ function StatusWorkspaceRowInnerContent({
       {({ isHovered, contextMenuOpen, onContextMenuOpenChange, hoverHandlers }) => {
         const showShortcut = showShortcutBadge && shortcutNumber !== null;
         const {
-          showTrailing,
+          trailingPresentation,
           showKebab: showKebabInSlot,
           showScrim,
           renderSlot,
@@ -907,7 +909,7 @@ function StatusWorkspaceRowInnerContent({
                     workspace={workspace}
                     backdrop={backdrop}
                     trailing={trailing}
-                    showBase={showTrailing}
+                    trailingPresentation={trailingPresentation}
                     showKebab={showKebabInSlot}
                     showScrim={showScrim}
                     reserveSlotWidth={reserveSlotWidth}
@@ -938,7 +940,7 @@ function StatusWorkspaceActionSlot({
   workspace,
   backdrop,
   trailing,
-  showBase,
+  trailingPresentation,
   showKebab,
   showScrim,
   reserveSlotWidth,
@@ -958,7 +960,7 @@ function StatusWorkspaceActionSlot({
   workspace: SidebarWorkspaceEntry;
   backdrop: SidebarSurfaceBackdrop;
   trailing: SidebarWorkspaceTrailing;
-  showBase: boolean;
+  trailingPresentation: SidebarWorkspaceTrailingPresentation;
   showKebab: boolean;
   showScrim: boolean;
   reserveSlotWidth: boolean;
@@ -978,7 +980,7 @@ function StatusWorkspaceActionSlot({
   const kebab = useOpenKebabMenuVisibility(showKebab);
   return (
     <SidebarWorkspaceTrailingActionSlot reserveWidth={reserveSlotWidth}>
-      <SidebarWorkspaceTrailingActionBase visible={showBase}>
+      <SidebarWorkspaceTrailingActionBase presentation={trailingPresentation}>
         <SidebarWorkspaceTrailingContent workspace={workspace} trailing={trailing} />
       </SidebarWorkspaceTrailingActionBase>
       <SidebarWorkspaceTrailingActionOverlay

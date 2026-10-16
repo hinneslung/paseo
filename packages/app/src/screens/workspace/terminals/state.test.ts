@@ -1,4 +1,3 @@
-import type { CreateTerminalResponse } from "@getpaseo/protocol/messages";
 import { describe, expect, it } from "vitest";
 import {
   collectKnownTerminalIds,
@@ -10,16 +9,17 @@ import {
   upsertCreatedTerminalPayload,
   type ListTerminalsPayload,
 } from "@/screens/workspace/terminals/state";
+import type { CreateTerminalResponse } from "@getpaseo/protocol/messages";
 
-type TerminalEntry = ListTerminalsPayload["terminals"][number];
+function listedTerminal(id: string): ListTerminalsPayload["terminals"][number] {
+  return { id, name: id, title: id };
+}
 
-function listedTerminal(id: string, input?: { workspaceId?: string }): TerminalEntry {
-  return {
-    id,
-    name: id,
-    title: id,
-    ...(input?.workspaceId !== undefined ? { workspaceId: input.workspaceId } : {}),
-  };
+function terminalInWorkspace(
+  id: string,
+  workspaceId?: string,
+): ListTerminalsPayload["terminals"][number] {
+  return { ...listedTerminal(id), ...(workspaceId !== undefined ? { workspaceId } : {}) };
 }
 
 function createdTerminal(id: string): NonNullable<CreateTerminalResponse["payload"]["terminal"]> {
@@ -110,7 +110,7 @@ describe("terminalBelongsToWorkspace", () => {
   it("keeps legacy terminals without workspaceId for cwd-scoped subscriptions", () => {
     expect(
       terminalBelongsToWorkspace({
-        terminal: listedTerminal("legacy-terminal"),
+        terminal: terminalInWorkspace("legacy-terminal"),
         workspaceId: "workspace-1",
       }),
     ).toBe(true);
@@ -119,7 +119,7 @@ describe("terminalBelongsToWorkspace", () => {
   it("keeps stamped terminals whose workspaceId matches", () => {
     expect(
       terminalBelongsToWorkspace({
-        terminal: listedTerminal("matching-terminal", { workspaceId: "workspace-1" }),
+        terminal: terminalInWorkspace("matching-terminal", "workspace-1"),
         workspaceId: "workspace-1",
       }),
     ).toBe(true);
@@ -128,7 +128,7 @@ describe("terminalBelongsToWorkspace", () => {
   it("excludes stamped terminals from sibling workspaces sharing a cwd", () => {
     expect(
       terminalBelongsToWorkspace({
-        terminal: listedTerminal("sibling-terminal", { workspaceId: "workspace-2" }),
+        terminal: terminalInWorkspace("sibling-terminal", "workspace-2"),
         workspaceId: "workspace-1",
       }),
     ).toBe(false);

@@ -91,6 +91,10 @@ import type { WorkspaceTab } from "@/workspace-tabs/model";
 import { RenderProfile } from "@/utils/render-profiler";
 import { isNative } from "@/constants/platform";
 import { panelTargetSupportsHost } from "@/plugins/workspace-panels/locations";
+import {
+  getWorkspaceSurfaceConfig,
+  shouldRenderWorkspaceExplorer,
+} from "@/workspace/surface-capabilities";
 
 interface SplitContainerProps {
   layout: WorkspaceLayout;
@@ -397,18 +401,6 @@ export function SplitContainer({
     },
     [workspaceKey],
   );
-  const handleCreateExplorerTab = useCallback(
-    () => onCreateNewTab({ paneId: explorerSidebarPaneId ?? undefined }),
-    [explorerSidebarPaneId, onCreateNewTab],
-  );
-  const handleMoveExplorerTabToMain = useCallback(
-    (tabId: string) => {
-      if (layout.focusedPaneId) {
-        onMoveTabToPane(tabId, layout.focusedPaneId);
-      }
-    },
-    [layout.focusedPaneId, onMoveTabToPane],
-  );
   const splitRoot = useMemo(
     () =>
       resolveSplitContainerRoot({
@@ -439,9 +431,11 @@ export function SplitContainer({
       }),
     [requestedExplorerSidebarWidth, workspaceShellWidth],
   );
-  const renderExplorerSidebarDock = Boolean(
-    !focusModeEnabled && explorerSidebarPane && explorerSidebarPane.hidden !== true,
-  );
+  const renderExplorerSidebarDock = shouldRenderWorkspaceExplorer({
+    config: getWorkspaceSurfaceConfig(),
+    explorerPaneVisible: Boolean(explorerSidebarPane && explorerSidebarPane.hidden !== true),
+    focusModeEnabled: focusModeEnabled === true,
+  });
   const mainColumnWindowChromeCorners = renderExplorerSidebarDock
     ? removeWindowChromeCorner(inheritedWindowChromeCorners, "top-right")
     : inheritedWindowChromeCorners;
@@ -725,8 +719,19 @@ export function SplitContainer({
                   closingTabIds={closingTabIds}
                   onSelectTab={onSelectTabInPane}
                   onCloseTab={onCloseTab}
-                  onCreateNewTab={handleCreateExplorerTab}
-                  onMoveTabToMain={handleMoveExplorerTabToMain}
+                  onCreateNewTab={onCreateNewTab}
+                  hoveredCloseTabKey={hoveredCloseTabKey}
+                  setHoveredCloseTabKey={setHoveredCloseTabKey}
+                  onCopyResumeCommand={onCopyResumeCommand}
+                  onCopyAgentId={onCopyAgentId}
+                  onCopyTerminalId={onCopyTerminalId}
+                  onCopyFilePath={onCopyFilePath}
+                  onReloadAgent={onReloadAgent}
+                  onRenameTab={onRenameTab}
+                  onCloseTabsToLeft={onCloseTabsToLeft}
+                  onCloseTabsToRight={onCloseTabsToRight}
+                  onCloseOtherTabs={onCloseOtherTabs}
+                  onExitFocusMode={onExitFocusMode}
                   buildPaneContentModel={buildPaneContentModel}
                   onReorderTabsInPane={onReorderTabsInPane}
                   activeDragTabId={activeDragTabId}

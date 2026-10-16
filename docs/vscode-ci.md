@@ -151,6 +151,33 @@ each surface.
 
 The job uploads `packages/vscode/artifacts/vscode-e2e` on failure.
 
+### Layer 4 — Windows VM CUA smoke (manual, release QA)
+
+CI covers Windows only through the Layer 1–2 smoke. Before a release, drive the
+real extension on the Windows QA VM through cua-driver with the kit in
+[`scripts/vm-qa`](../packages/vscode/scripts/vm-qa). It covers what CDP cannot:
+native window input, a non-elevated VS Code, and Windows paths.
+
+1. Build the daemon packages, the web app, and `paseo.vsix` in your checkout.
+2. Run `stage.sh <checkout> <run-name> <ssh-target>`. It packs the daemon packages with
+   `--ignore-scripts` (the dists are already built; `prepack` would rebuild them),
+   copies them and the VSIX to `%USERPROFILE%\paseo-qa\<run-name>`, unpacks the
+   portable VS Code, Node, and MinGit zips cached in `%USERPROFILE%\paseo-qa\cache`, and installs everything there.
+3. Start processes through cua-driver `launch_app`, never over SSH: SSH sessions
+   cannot reach the desktop. Start the daemon with `start-daemon.cmd <name> <port>
+[password]`; development mode registers the `mock` provider. Write
+   `ud\User\settings.json` with `paseo.endpoint` over SSH, then launch
+   `run-code.cmd` through `explorer.exe`. A cua-driver child runs elevated, and an
+   elevated VS Code rejects drag and drop from Explorer.
+4. Seed deterministic content with `node daemon\seed-agent.mjs <port>
+<workspace-dir>`: Markdown, Mermaid, a code block, and a line link.
+5. Drive and capture with `PASEO_QA_VM=<ssh-target> vcua.sh <tool> '<json>'`. It sends the JSON over stdin
+   because cmd and PowerShell quoting mangles inline JSON.
+
+The VS Code webview exposes almost no UI Automation tree, so target pixels from
+the screenshot. Background clicks land; keystrokes need a foreground click on the
+field, then foreground `type_text`.
+
 ## Implementation order
 
 1. **WS1 — done.** `.github/actions/npm-install` composite; `vscode.yml` has

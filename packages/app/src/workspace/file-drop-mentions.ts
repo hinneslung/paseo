@@ -1,5 +1,5 @@
-import { resolveWorkspaceFilePaths } from "@/workspace/file-open";
 import type { DroppedItem } from "@/components/file-drop/types";
+import { resolveWorkspaceFilePaths } from "@/workspace/file-open";
 
 export interface ParseDroppedFilePathsInput {
   uriList?: string | null;
@@ -35,10 +35,9 @@ function normalizeWslFileUriPath(hostname: string, pathname: string): string | n
 }
 
 function parseFileUri(value: string): string | null {
-  const trimmed = value.trim();
   let url: URL;
   try {
-    url = new URL(trimmed);
+    url = new URL(value.trim());
   } catch {
     return null;
   }
@@ -47,33 +46,22 @@ function parseFileUri(value: string): string | null {
     const decodedPath = decodeUriComponent(url.pathname);
     return decodedPath ? normalizeUrlPath(decodedPath) : null;
   }
-
-  if (url.protocol !== "file:") {
-    return null;
-  }
+  if (url.protocol !== "file:") return null;
 
   const decodedPath = decodeUriComponent(url.pathname);
-  if (!decodedPath) {
-    return null;
-  }
+  if (!decodedPath) return null;
 
   const decodedHost = decodeUriComponent(url.hostname) ?? "";
   const wslPath = normalizeWslFileUriPath(decodedHost, decodedPath);
-  if (wslPath) {
-    return wslPath;
-  }
-
+  if (wslPath) return wslPath;
   if (decodedHost && decodedHost !== "localhost") {
     return normalizeDroppedPath(`//${decodedHost}${decodedPath}`);
   }
-
   return normalizeUrlPath(decodedPath);
 }
 
 function parseUriList(value: string | null | undefined): string[] {
-  if (!value) {
-    return [];
-  }
+  if (!value) return [];
   return value
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -85,23 +73,11 @@ function parseUriList(value: string | null | undefined): string[] {
 }
 
 export function parseDroppedFilePaths(input: ParseDroppedFilePathsInput): string[] {
-  const seen = new Set<string>();
-  const paths: string[] = [];
-  for (const path of parseUriList(input.uriList)) {
-    if (seen.has(path)) {
-      continue;
-    }
-    seen.add(path);
-    paths.push(path);
-  }
-  return paths;
+  return [...new Set(parseUriList(input.uriList))];
 }
 
 export function resolveDroppedFileMentionPath(input: { path: string; cwd: string }): string | null {
-  const resolved = resolveWorkspaceFilePaths({
-    path: input.path,
-    workspaceRoot: input.cwd,
-  });
+  const resolved = resolveWorkspaceFilePaths({ path: input.path, workspaceRoot: input.cwd });
   return resolved?.relativePath ?? null;
 }
 

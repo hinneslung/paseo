@@ -1,3 +1,12 @@
+import {
+  collectAllPanes,
+  collectAllTabs,
+  createWorkspaceLayoutWithExplorerSidebar,
+  DEFAULT_PANE_ID,
+  findPaneContainingTab,
+  resolveExplorerSidebarPaneId,
+  useWorkspaceLayoutStore,
+} from "@/stores/workspace-layout-store";
 import type { OpenInSidePanePreferences, PullRequestOpenLocation } from "@/hooks/use-settings";
 import type { ExplorerCheckoutContext } from "@/stores/explorer-checkout-context";
 import {
@@ -10,12 +19,17 @@ import {
   openPreferredWorkspaceTarget,
   openWorkspaceTargetAtLocation,
 } from "@/workspace-tabs/open-beside";
+import {
+  getWorkspaceSurfaceConfig,
+  type WorkspaceSurfaceConfig,
+} from "@/workspace/surface-capabilities";
 
 interface WorkspaceViewInput {
   isCompact: boolean;
   workspaceKey: string | null;
   checkout: ExplorerCheckoutContext | null;
   supportsPaneSplits?: boolean;
+  surfaceConfig?: WorkspaceSurfaceConfig;
 }
 
 interface OpenWorkspaceChangesInput extends WorkspaceViewInput {
@@ -56,6 +70,15 @@ export function openComposerChanges(input: OpenWorkspaceChangesInput): string | 
 
 /** Opens the workspace pull request at its semantic destination. */
 export function openWorkspacePullRequest(input: OpenWorkspacePullRequestInput): string | null {
+  const surface = input.surfaceConfig ?? getWorkspaceSurfaceConfig();
+  if (!surface.showFileExplorer && !surface.showGitChanges) {
+    return openWorkspaceTargetAtLocation({
+      isCompact: input.isCompact,
+      workspaceKey: input.workspaceKey,
+      target: { kind: "pull_request" },
+      location: "main",
+    });
+  }
   if (usesCompactExplorerSidebar(input) || input.destination === "explorer") {
     openExplorerView(input, "pr");
     return null;
@@ -65,5 +88,52 @@ export function openWorkspacePullRequest(input: OpenWorkspacePullRequestInput): 
     workspaceKey: input.workspaceKey,
     target: { kind: "pull_request" },
     location: input.destination,
+  });
+}
+
+/** Adds a detected desktop PR once without revealing or selecting its destination. */
+export function autoOpenWorkspacePullRequest(input: {
+  workspaceKey: string | null;
+  destination: PullRequestOpenLocation;
+  surfaceConfig?: WorkspaceSurfaceConfig;
+}): string | null {
+  const surface = input.surfaceConfig ?? getWorkspaceSurfaceConfig();
+  if (!surface.showFileExplorer && !surface.showGitChanges) return null;
+  if (!input.workspaceKey) return null;
+  const workspaceKey = input.workspaceKey;
+  const store = useWorkspaceLayoutStore.getState();
+  return store.autoOpenPullRequestTab(workspaceKey, () => {
+    const layout =
+      store.layoutByWorkspace[workspaceKey] ?? createWorkspaceLayoutWithExplorerSidebar();
+    // A background open finds an existing PR tab wherever the user left it.
+    if (collectAllTabs(layout.root).some((tab) => tab.target.kind === "pull_request")) {
+      return {};
+    }
+    const explorerPaneId = resolveExplorerSidebarPaneId(
+      layout,
+      store.explorerSidebarPaneIdByWorkspace[workspaceKey],
+    );
+    let paneId = explorerPaneId;
+    if (input.destination === "side") {
+      paneId = store.ensureSidePane(workspaceKey, { focus: false });
+    } else if (input.destination === "main") {
+      const panes = collectAllPanes(layout.root);
+      const mainPane =
+        panes.find((pane) => pane.id === DEFAULT_PANE_ID) ??
+        panes.find((pane) => pane.id !== explorerPaneId && !pane.hidden);
+      paneId = mainPane?.id ?? null;
+    }
+    const changes =
+      input.destination === "explorer"
+        ? collectAllTabs(layout.root).find(
+            (tab) =>
+              tab.target.kind === "changes_tree" &&
+              findPaneContainingTab(layout.root, tab.tabId)?.id === paneId,
+          )
+        : undefined;
+    return {
+      placement: paneId ? { mode: "prefer", paneId } : undefined,
+      insertionPosition: changes ? { afterTabId: changes.tabId } : undefined,
+    };
   });
 }

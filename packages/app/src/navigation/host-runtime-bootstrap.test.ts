@@ -11,7 +11,7 @@ import {
 import type { DaemonStartResult, StartDaemonIfEnabledInput } from "@/runtime/daemon-start-service";
 
 describe("startHostRuntimeBootstrap", () => {
-  it("boots the host registry and starts the managed-daemon decision as one operation", async () => {
+  it("boots the host registry and starts the managed-daemon decision independently", async () => {
     const events: string[] = [];
     const shouldStartDaemon = async () => true;
     const store = {
@@ -40,9 +40,10 @@ describe("startHostRuntimeBootstrap", () => {
 
     expect(events).toEqual(["boot", "daemon-start-decision"]);
     expect(await receivedDecisions[0]).toBe(true);
+    expect(events).toEqual(["boot", "daemon-start-decision"]);
   });
 
-  it("waits for the host registry to load before evaluating managed-daemon startup", async () => {
+  it("loads the registry before evaluating managed-daemon startup", async () => {
     const events: string[] = [];
     let resolveBoot!: () => void;
     const booted = new Promise<void>((resolve) => {
@@ -234,29 +235,6 @@ describe("resolveStartupRoute", () => {
     ).toEqual({ kind: "redirect", href: "/h/server-1" });
   });
 
-  it("restores the last workspace host even when a different host is already online", () => {
-    expect(
-      resolveStartupRoute({
-        ...baseIndexInput,
-        hosts: [{ serverId: "server-offline" }, { serverId: "server-online" }],
-        anyOnlineHostServerId: "server-online",
-        workspaceSelection: { serverId: "server-offline", workspaceId: "workspace-a" },
-        workspaceSelectionStatus: "unknown",
-      }),
-    ).toEqual({ kind: "redirect", href: "/h/server-offline" });
-  });
-
-  it("does not restore a saved workspace after workspace hydration proves it is missing", () => {
-    expect(
-      resolveStartupRoute({
-        ...baseIndexInput,
-        hosts: [{ serverId: "server-1" }],
-        workspaceSelection: { serverId: "server-1", workspaceId: "workspace-a" },
-        workspaceSelectionStatus: "missing",
-      }),
-    ).toEqual({ kind: "redirect", href: "/h/server-1" });
-  });
-
   it("redirects VS Code startup to the matched workspace before the saved workspace", () => {
     expect(
       resolveStartupRoute({
@@ -297,6 +275,29 @@ describe("resolveStartupRoute", () => {
         },
       }),
     ).toEqual({ kind: "redirect", href: "/h/server-saved" });
+  });
+
+  it("restores the last workspace host even when a different host is already online", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hosts: [{ serverId: "server-offline" }, { serverId: "server-online" }],
+        anyOnlineHostServerId: "server-online",
+        workspaceSelection: { serverId: "server-offline", workspaceId: "workspace-a" },
+        workspaceSelectionStatus: "unknown",
+      }),
+    ).toEqual({ kind: "redirect", href: "/h/server-offline" });
+  });
+
+  it("does not restore a saved workspace after workspace hydration proves it is missing", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hosts: [{ serverId: "server-1" }],
+        workspaceSelection: { serverId: "server-1", workspaceId: "workspace-a" },
+        workspaceSelectionStatus: "missing",
+      }),
+    ).toEqual({ kind: "redirect", href: "/h/server-1" });
   });
 
   it("falls back to a saved host when the restored workspace host is no longer saved", () => {

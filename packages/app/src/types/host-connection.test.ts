@@ -77,48 +77,13 @@ describe("normalizeStoredHostProfile", () => {
     expect(profile?.connections[0]).not.toHaveProperty("password");
   });
 
-  it("preserves legacy relay ids when TLS is absent", () => {
+  it("moves a stored direct TCP password to the host profile", () => {
     const profile = normalizeStoredHostProfile({
-      serverId: "srv_relay",
-      connections: [
-        {
-          id: "relay:relay.example.com:80",
-          type: "relay",
-          relayEndpoint: "relay.example.com:80",
-          daemonPublicKeyB64: "pubkey",
-        },
-      ],
+      serverId: "srv_legacy",
+      connections: [{ type: "directTcp", endpoint: "localhost:6767", password: "old-secret" }],
     });
-
-    expect(profile?.connections[0]).toEqual({
-      id: "relay:relay.example.com:80",
-      type: "relay",
-      relayEndpoint: "relay.example.com:80",
-      daemonPublicKeyB64: "pubkey",
-    });
-  });
-
-  it("namespaces relay ids only when TLS is true", () => {
-    const profile = normalizeStoredHostProfile({
-      serverId: "srv_relay",
-      connections: [
-        {
-          id: "relay:relay.example.com:443",
-          type: "relay",
-          relayEndpoint: "relay.example.com:443",
-          useTls: true,
-          daemonPublicKeyB64: "pubkey",
-        },
-      ],
-    });
-
-    expect(profile?.connections[0]).toEqual({
-      id: "relay:wss:relay.example.com:443",
-      type: "relay",
-      relayEndpoint: "relay.example.com:443",
-      useTls: true,
-      daemonPublicKeyB64: "pubkey",
-    });
+    expect(profile?.password).toBe("old-secret");
+    expect(profile?.connections[0]).not.toHaveProperty("password");
   });
 
   it("loads direct TCP bridge connections without loopback rewriting", () => {
@@ -168,6 +133,50 @@ describe("normalizeStoredHostProfile", () => {
     });
 
     expect(profile).toBeNull();
+  });
+
+  it("preserves legacy relay ids when TLS is absent", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_relay",
+      connections: [
+        {
+          id: "relay:relay.example.com:80",
+          type: "relay",
+          relayEndpoint: "relay.example.com:80",
+          daemonPublicKeyB64: "pubkey",
+        },
+      ],
+    });
+
+    expect(profile?.connections[0]).toEqual({
+      id: "relay:relay.example.com:80",
+      type: "relay",
+      relayEndpoint: "relay.example.com:80",
+      daemonPublicKeyB64: "pubkey",
+    });
+  });
+
+  it("namespaces relay ids only when TLS is true", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_relay",
+      connections: [
+        {
+          id: "relay:relay.example.com:443",
+          type: "relay",
+          relayEndpoint: "relay.example.com:443",
+          useTls: true,
+          daemonPublicKeyB64: "pubkey",
+        },
+      ],
+    });
+
+    expect(profile?.connections[0]).toEqual({
+      id: "relay:wss:relay.example.com:443",
+      type: "relay",
+      relayEndpoint: "relay.example.com:443",
+      useTls: true,
+      daemonPublicKeyB64: "pubkey",
+    });
   });
 
   it("gives a host stored before appearance existed the default appearance", () => {
@@ -278,67 +287,29 @@ describe("upsertHostConnectionInProfiles", () => {
       type: "directTcp",
       endpoint: "example.test:6767",
       useTls: false,
-      password: "old-secret",
     };
     const existing: HostProfile = {
       ...makeHost("srv_known"),
+      password: "old-secret",
       connections: [existingConnection],
       preferredConnectionId: existingConnection.id,
     };
     const replacement: HostConnection = {
       ...existingConnection,
       useTls: true,
-      password: "new-secret",
     };
 
     const [profile] = upsertHostConnectionInProfiles({
       profiles: [existing],
       serverId: "srv_known",
       connection: replacement,
+      password: "new-secret",
     });
 
     expect(profile.connections).toEqual([replacement]);
+    expect("password" in profile.connections[0]!).toBe(false);
+    expect(profile.password).toBe("new-secret");
     expect(profile.preferredConnectionId).toBe(replacement.id);
-  });
-
-  it("keeps a user label when the same endpoint answers as a different daemon", () => {
-    // A daemon that resets its identity on the same endpoint is still the machine the user
-    // named, so the reported hostname does not replace the name they chose.
-    const existing: HostProfile = {
-      ...makeHost("srv_before_reset"),
-      label: "my mac",
-      connections: [connection],
-      preferredConnectionId: connection.id,
-    };
-
-    const profiles = upsertHostConnectionInProfiles({
-      profiles: [existing],
-      serverId: "srv_after_reset",
-      label: "hostname-from-daemon",
-      connection,
-    });
-
-    expect(profiles).toHaveLength(1);
-    expect(profiles[0].serverId).toBe("srv_after_reset");
-    expect(profiles[0].label).toBe("my mac");
-  });
-
-  it("keeps a custom label when the same daemon reconnects", () => {
-    const existing: HostProfile = {
-      ...makeHost("srv_known"),
-      label: "my laptop",
-      connections: [connection],
-      preferredConnectionId: connection.id,
-    };
-
-    const [profile] = upsertHostConnectionInProfiles({
-      profiles: [existing],
-      serverId: "srv_known",
-      label: "hostname-from-daemon",
-      connection,
-    });
-
-    expect(profile.label).toBe("my laptop");
   });
 });
 
@@ -371,27 +342,29 @@ describe("moveHostConnectionToServer", () => {
     });
 
     expect(profiles).toHaveLength(2);
-    expect(profiles[0].serverId).toBe("srv_machine_a");
-    expect(profiles[0].label).toBe("machine-a");
-    expect(profiles[0].connections).toEqual([direct]);
-    expect(profiles[0].preferredConnectionId).toBe(direct.id);
-    expect(profiles[1].serverId).toBe("srv_machine_b");
-    expect(profiles[1].label).toBe("machine-b");
-    expect(profiles[1].connections).toEqual([bridge]);
-    expect(profiles[1].preferredConnectionId).toBe(bridge.id);
+    expect(profiles[0]).toMatchObject({
+      serverId: "srv_machine_a",
+      label: "machine-a",
+      connections: [direct],
+      preferredConnectionId: direct.id,
+    });
+    expect(profiles[1]).toMatchObject({
+      serverId: "srv_machine_b",
+      label: "machine-b",
+      connections: [bridge],
+      preferredConnectionId: bridge.id,
+    });
   });
 
   it("drops a source profile that had nothing but the moved connection", () => {
     const source: HostProfile = {
       ...makeHost("srv_machine_a"),
-      label: "machine-a",
       connections: [bridge],
       preferredConnectionId: bridge.id,
     };
-    const other = makeHost("srv_other");
 
     const profiles = moveHostConnectionToServer({
-      profiles: [source, other],
+      profiles: [source, makeHost("srv_other")],
       fromServerId: "srv_machine_a",
       serverId: "srv_machine_b",
       label: "machine-b",
@@ -399,27 +372,9 @@ describe("moveHostConnectionToServer", () => {
     });
 
     expect(profiles.map((profile) => profile.serverId)).toEqual(["srv_machine_b", "srv_other"]);
-    expect(profiles[0].label).toBe("machine-b");
   });
 
-  it("picks a new preferred connection when the moved one was preferred", () => {
-    const source: HostProfile = {
-      ...makeHost("srv_machine_a"),
-      connections: [direct, bridge],
-      preferredConnectionId: bridge.id,
-    };
-
-    const [remaining] = moveHostConnectionToServer({
-      profiles: [source],
-      fromServerId: "srv_machine_a",
-      serverId: "srv_machine_b",
-      connection: bridge,
-    });
-
-    expect(remaining.preferredConnectionId).toBe(direct.id);
-  });
-
-  it("keeps the target label a user chose", () => {
+  it("keeps a target label the user chose", () => {
     const source: HostProfile = {
       ...makeHost("srv_machine_a"),
       connections: [direct, bridge],

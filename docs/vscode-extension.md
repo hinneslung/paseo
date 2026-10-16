@@ -64,6 +64,10 @@ The plaintext password stays in the Node extension host. It is used there to
 validate the password and authenticate the daemon WebSocket connection; it is not
 written into the webview HTML, runtime config, or postMessage payloads.
 
+Passwords containing characters outside the HTTP token set — spaces, `@`, `/` —
+authenticate through `hello.auth`, so they need a daemon from v0.11 or later;
+older daemons accept only the bearer subprotocol and reject them.
+
 ## VS Code-Owned Surfaces
 
 The extension intentionally does not provide Paseo's duplicate workspace

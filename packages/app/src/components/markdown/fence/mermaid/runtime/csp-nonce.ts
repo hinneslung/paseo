@@ -7,9 +7,7 @@ const HTML_ATTRIBUTE_ESCAPE: Record<string, string> = {
 };
 
 export function withMermaidRuntimeCspNonce(html: string, nonce?: string): string {
-  if (!nonce) {
-    return html;
-  }
+  if (!nonce) return html;
   const escapedNonce = nonce.replace(/[&"'<>]/g, (character) => HTML_ATTRIBUTE_ESCAPE[character]);
   return html.replace("<script>", `<script nonce="${escapedNonce}">`);
 }

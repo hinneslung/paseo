@@ -2,7 +2,7 @@
 
 Paseo is a mobile app for monitoring and controlling your local AI coding agents from anywhere. Your dev environment, in your pocket. Connects directly to your actual development environment — your code stays on your machine.
 
-**Supported agents:** Claude Code, Codex, GitHub Copilot, OpenCode, and Pi.
+**Supported agents:** Claude Code, Codex, GitHub Copilot, OpenCode, Pi, Antigravity, and Muse Code.
 
 ## Repository map
 
@@ -44,8 +44,8 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/service-proxy.md](docs/service-proxy.md)                       | Service proxy: exposing workspace scripts at public URLs, DNS setup, reverse proxy config                                      |
 | [docs/development.md](docs/development.md)                           | Dev server, build sync gotchas, CLI reference, agent state, Playwright MCP                                                     |
 | [docs/vscode-extension.md](docs/vscode-extension.md)                 | VS Code extension install, daemon discovery, bridge security, limitations, and debugging                                       |
-| [docs/vscode-ci.md](docs/vscode-ci.md)                               | VS Code extension CI: `vscode.yml` shape, the regression map, and the three e2e layers (smoke, bridge round-trip, CDP specs)   |
-| [docs/vscode-v0.8.0-plan.md](docs/vscode-v0.8.0-plan.md)             | VS Code v0.8.0 integration scope, team rules, release gates, and linked progress scratchpad                                    |
+| [docs/vscode-ci.md](docs/vscode-ci.md)                               | VS Code extension CI: `vscode.yml` shape, the regression map, e2e layers (smoke, bridge, CDP) and the Windows VM CUA smoke     |
+| [docs/vscode-v0.11.4-plan.md](docs/vscode-v0.11.4-plan.md)           | VS Code v0.11.4 rebase round: scope, decisions, module stack, team, and linked QA scratchpad                                   |
 | [docs/rpc-namespacing.md](docs/rpc-namespacing.md)                   | WebSocket RPC naming convention — dotted namespaces and `.request`/`.response` pairs                                           |
 | [docs/protocol-compatibility.md](docs/protocol-compatibility.md)     | Why app/daemon versions drift, protocol vs feature contract, capability gating, COMPAT tagging                                 |
 | [docs/protocol-validation.md](docs/protocol-validation.md)           | zod-aot generated inbound WebSocket validation, patched compiler regressions, schema-purity rules                              |
@@ -128,6 +128,7 @@ and updating `next`, integrating it after a release, and releasing a hotfix from
   - If you must run a broad suite, pipe output to a file and read it afterward: `npx vitest run <file> --bail=1 > /tmp/test-output.txt 2>&1` then read the file.
   - Never re-run a test suite that another agent already ran and reported green — trust the result.
   - For full suite verification, push to CI and check GitHub Actions instead.
+- Add tests to existing suites and reuse their npm scripts and CI jobs instead of creating feature-specific ones.
 - **Always run typecheck and lint after every change.**
 - **Build workspace packages before diagnosing cross-package type errors.** This repo consumes generated declarations across workspaces. If typecheck fails in a package that depends on another workspace, rebuild the owning stack first so `dist` declarations are current:
   - `npm run build:client` — rebuild protocol and client declarations.

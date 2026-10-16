@@ -59,9 +59,7 @@ export function appendFileMentionPaths(input: {
     .filter((path) => path.trim().length > 0)
     .map(formatQuotedFileMentionPath)
     .join(" ");
-  if (!mentions) {
-    return input.text;
-  }
+  if (!mentions) return input.text;
   const separator = input.text.length === 0 || /\s$/.test(input.text) ? "" : " ";
   return `${input.text}${separator}${mentions}`;
 }

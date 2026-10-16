@@ -40,6 +40,7 @@ describe("planWorkspaceOpenTargets", () => {
         workspacePath: "/repo",
         filePath: "/repo/src/app.ts",
         line: 3,
+        lineEnd: 5,
       },
     });
   });

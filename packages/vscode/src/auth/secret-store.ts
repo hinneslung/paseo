@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { verifyDaemonHelloAuth, type WebSocketFactory } from "../bridge/daemon-transport";
 import { type FetchLike, validateDaemonPassword } from "../daemon/discovery";
 
 function passwordKey(endpoint: string): string {
@@ -31,6 +32,7 @@ export async function promptForDaemonPassword(input: {
   context: vscode.ExtensionContext;
   endpoint: string;
   fetch?: FetchLike;
+  webSocketFactory?: WebSocketFactory;
 }): Promise<string> {
   const password = await vscode.window.showInputBox({
     password: true,
@@ -40,11 +42,19 @@ export async function promptForDaemonPassword(input: {
   if (!password) {
     throw new Error("Paseo daemon password is required.");
   }
-  const valid = await validateDaemonPassword({
-    endpoint: input.endpoint,
-    password,
-    fetch: input.fetch,
-  });
+  // The daemon parses HTTP bearer tokens by splitting on whitespace, so only
+  // hello.auth can verify a password with spaces.
+  const valid = /\s/u.test(password)
+    ? await verifyDaemonHelloAuth({
+        endpoint: input.endpoint,
+        password,
+        ...(input.webSocketFactory ? { webSocketFactory: input.webSocketFactory } : {}),
+      })
+    : await validateDaemonPassword({
+        endpoint: input.endpoint,
+        password,
+        fetch: input.fetch,
+      });
   if (!valid) {
     throw new Error("Incorrect Paseo daemon password.");
   }

@@ -18,23 +18,19 @@ import {
 } from "@/attachments/workspace-file-drag";
 
 function canUseFileUriDrop(): boolean {
-  return getDesktopHost() !== null;
+  return getIsVscode() && getDesktopHost() !== null;
 }
 
 function dataTransferHasFileUri(dataTransfer: DataTransfer | null): boolean {
-  if (!canUseFileUriDrop()) {
-    return false;
-  }
-  return Boolean(dataTransfer?.types.includes("text/uri-list"));
+  return canUseFileUriDrop() && Boolean(dataTransfer?.types.includes("text/uri-list"));
 }
 
 function getDroppedFileUriItems(dataTransfer: DataTransfer | null): DroppedFileUriItem[] {
-  if (!dataTransfer || !canUseFileUriDrop()) {
-    return [];
-  }
-  return parseDroppedFilePaths({
-    uriList: dataTransfer.getData("text/uri-list"),
-  }).map((path) => ({ kind: "file-uri", path }));
+  if (!dataTransfer || !canUseFileUriDrop()) return [];
+  return parseDroppedFilePaths({ uriList: dataTransfer.getData("text/uri-list") }).map((path) => ({
+    kind: "file-uri",
+    path,
+  }));
 }
 
 type DesktopDragDropPayload =
@@ -132,9 +128,7 @@ export function useDropListeners({
         return false;
       }
       // VS Code does not provide Electron's native file-drop event; use DOM DataTransfer.
-      if (getIsVscode()) {
-        return false;
-      }
+      if (getIsVscode()) return false;
 
       const desktopWindow = desktopHost.window?.getCurrentWindow?.();
       if (!desktopWindow || typeof desktopWindow.onDragDropEvent !== "function") {

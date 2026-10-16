@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonClientConfig } from "@getpaseo/client/internal/daemon-client";
+import { DaemonAuthenticationError } from "@getpaseo/client/internal/daemon-client";
 import type { DaemonConnectionDependencies, DaemonProbeClient } from "./test-daemon-connection";
 
 class FakeDaemonClient implements DaemonProbeClient {
@@ -195,21 +196,36 @@ describe("test-daemon-connection connectToDaemon", () => {
     });
   });
 
-  it("passes direct TCP connection passwords into the client config", async () => {
+  it("passes the host password into the client config", async () => {
     const { connectToDaemon } = await import("./test-daemon-connection");
     const result = await connectToDaemon(
       {
         id: "direct:lan:6767",
         type: "directTcp",
         endpoint: "lan:6767",
-        password: "shared-secret",
       },
-      undefined,
+      { password: "shared-secret" },
       probe.deps,
     );
     await result.client.close();
 
     expect(probe.createdConfigs()[0]?.password).toBe("shared-secret");
+  });
+
+  it("does not pass a stored host password to a VS Code bridge", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const result = await connectToDaemon(
+      {
+        id: "bridge:127.0.0.1:6767",
+        type: "directTcpBridge",
+        endpoint: "127.0.0.1:6767",
+      },
+      { password: "renderer-owned-secret" },
+      probe.deps,
+    );
+    await result.client.close();
+
+    expect(probe.createdConfigs()[0]).not.toHaveProperty("password");
   });
 
   it("passes performance tracing into the connected client", async () => {
@@ -268,7 +284,7 @@ describe("test-daemon-connection connectToDaemon", () => {
   it("surfaces auth rejection as an incorrect password", async () => {
     const { connectToDaemon } = await import("./test-daemon-connection");
     probe.failNextConnection(
-      new Error("Transport closed (code 4001)"),
+      new DaemonAuthenticationError("incorrect_password"),
       "Transport closed (code 4001)",
     );
 
@@ -278,13 +294,13 @@ describe("test-daemon-connection connectToDaemon", () => {
           id: "direct:lan:6767",
           type: "directTcp",
           endpoint: "lan:6767",
-          password: "wrong-secret",
         },
-        undefined,
+        { password: "wrong-secret" },
         probe.deps,
       ),
     ).rejects.toMatchObject({
       message: "Incorrect password",
+      authFailureReason: "incorrect_password",
     });
   });
 
@@ -298,9 +314,8 @@ describe("test-daemon-connection connectToDaemon", () => {
           id: "direct:lan:6767",
           type: "directTcp",
           endpoint: "lan:6767",
-          password: "shared-secret",
         },
-        undefined,
+        { password: "shared-secret" },
         probe.deps,
       ),
     ).rejects.toMatchObject({
