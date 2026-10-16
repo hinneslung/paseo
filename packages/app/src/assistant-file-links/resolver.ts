@@ -194,7 +194,11 @@ export function shouldResolveDirectFileThroughSuggestions(input: {
 
   const normalizedRoot = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "");
   const normalizedPath = input.target.path.replace(/\\/g, "/");
-  return normalizedPath.startsWith(`${normalizedRoot}/`);
+  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) {
+    return false;
+  }
+
+  return !getAmbiguousSuggestionQuery(input.target, normalizedRoot).includes("/");
 }
 
 function isAbsoluteInlineCodeToken(token: string): boolean {

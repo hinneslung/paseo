@@ -78,6 +78,7 @@ export interface DesktopEditorOpenTargetInput {
   filePath?: string;
   line?: number;
   column?: number;
+  lineEnd?: number;
 }
 
 export interface VscodeRuntimeConfig {
