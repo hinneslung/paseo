@@ -6,6 +6,8 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { queryClient } from "@/data/query-client";
 import { I18nProvider } from "@/i18n/provider";
 import { RootErrorBoundary } from "@/components/root-error-boundary";
+import { getIsVscode } from "@/constants/platform";
+import { resolveRootRecoveryLocation } from "@/navigation/root-error-recovery";
 
 // Keep Expo's platform filtering, route root, and lazy import configuration.
 const { ctx: context } = require("expo-router/_ctx") as {
@@ -29,7 +31,10 @@ export function RootRouter({ context: routes }: Pick<ComponentProps<typeof ExpoR
               {/* Recreate the router at a safe destination before a failed route can mount. */}
               <ExpoRoot
                 context={routes}
-                location={generation === 0 ? undefined : "/open-project"}
+                location={resolveRootRecoveryLocation({
+                  generation,
+                  isVscodeRuntime: getIsVscode(),
+                })}
               />
             </Head.Provider>
           </RootErrorBoundary>

@@ -1,13 +1,23 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type {
+  OpenProjectResponseMessage,
   ProjectGithubCloneProtocol,
   ProjectAddResponse,
   WorkspaceProjectDescriptorPayload,
 } from "@getpaseo/protocol/messages";
-import { normalizeProjectDescriptor, type ProjectDescriptor } from "@/stores/session-store";
+import {
+  normalizeProjectDescriptor,
+  normalizeWorkspaceDescriptor,
+  type ProjectDescriptor,
+  type WorkspaceDescriptor,
+} from "@/stores/session-store";
+import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 
-type OpenProjectPayload = ProjectAddResponse["payload"];
-type OpenProjectErrorCode = NonNullable<OpenProjectPayload["errorCode"]>;
+type ProjectAddPayload = ProjectAddResponse["payload"];
+type WorkspaceOpenPayload = OpenProjectResponseMessage["payload"];
+type OpenProjectErrorCode = NonNullable<
+  ProjectAddPayload["errorCode"] | WorkspaceOpenPayload["errorCode"]
+>;
 
 export interface OpenProjectSuccess {
   ok: true;
@@ -46,6 +56,17 @@ export interface OpenProjectDirectlyInput {
   client: Pick<DaemonClient, "addProject"> | null;
   upsertProject: (serverId: string, project: ProjectDescriptor) => void;
   setHasHydratedWorkspaces: (serverId: string, hydrated: boolean) => void;
+}
+
+export interface OpenProjectWorkspaceDirectlyInput {
+  serverId: string;
+  projectPath: string;
+  isConnected: boolean;
+  client: Pick<DaemonClient, "openProject"> | null;
+  mergeWorkspaces: (serverId: string, workspaces: Iterable<WorkspaceDescriptor>) => void;
+  setHasHydratedWorkspaces: (serverId: string, hydrated: boolean) => void;
+  openDraftTab: (workspaceKey: string) => string | null;
+  navigateToWorkspace: (serverId: string, workspaceId: string) => void;
 }
 
 interface ProjectRegistrationCallbacks {
@@ -148,4 +169,39 @@ export async function cloneGithubProjectDirectly(
   return registered
     ? { ok: true, project: payload.project }
     : { ok: false, errorCode: null, error: "Unable to register project" };
+}
+
+export async function openProjectWorkspaceDirectly(
+  input: OpenProjectWorkspaceDirectlyInput,
+): Promise<OpenProjectResult> {
+  const normalizedServerId = input.serverId.trim();
+  const trimmedPath = input.projectPath.trim();
+  if (!normalizedServerId || !trimmedPath || !input.client || !input.isConnected) {
+    return { ok: false, errorCode: null, error: null };
+  }
+
+  const payload = await input.client.openProject(trimmedPath);
+  if (payload.error || !payload.workspace) {
+    return {
+      ok: false,
+      errorCode: payload.errorCode ?? null,
+      error: payload.error,
+    };
+  }
+
+  const workspace = normalizeWorkspaceDescriptor(payload.workspace);
+  input.mergeWorkspaces(normalizedServerId, [workspace]);
+  input.setHasHydratedWorkspaces(normalizedServerId, true);
+
+  const workspaceKey = buildWorkspaceTabPersistenceKey({
+    serverId: normalizedServerId,
+    workspaceId: workspace.id,
+  });
+  if (!workspaceKey) {
+    return { ok: false, errorCode: null, error: null };
+  }
+
+  input.openDraftTab(workspaceKey);
+  input.navigateToWorkspace(normalizedServerId, workspace.id);
+  return { ok: true, project: payload.workspace };
 }

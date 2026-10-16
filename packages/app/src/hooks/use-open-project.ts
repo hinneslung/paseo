@@ -5,9 +5,13 @@ import { useSessionStore } from "@/stores/session-store";
 import {
   cloneGithubProjectDirectly,
   openProjectDirectly,
+  openProjectWorkspaceDirectly,
   type OpenProjectResult,
   type ProjectGithubCloneProtocol,
 } from "@/hooks/open-project";
+import { generateDraftId } from "@/stores/draft-keys";
+import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
+import { FOCUSED_PANE_PLACEMENT, useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 
 export function useOpenProject(
   serverId: string | null,
@@ -91,5 +95,37 @@ export function useCloneGithubProject(
       });
     },
     [client, isConnected, normalizedServerId, setHasHydratedWorkspaces, upsertProject],
+  );
+}
+
+export function useOpenProjectWorkspace(
+  serverId: string | null,
+): (path: string) => Promise<OpenProjectResult> {
+  const normalizedServerId = serverId?.trim() ?? "";
+  const client = useHostRuntimeClient(normalizedServerId);
+  const isConnected = useHostRuntimeIsConnected(normalizedServerId);
+  const mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
+  const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
+
+  return useCallback(
+    async (path: string) =>
+      openProjectWorkspaceDirectly({
+        serverId: normalizedServerId,
+        projectPath: path,
+        isConnected,
+        client,
+        mergeWorkspaces,
+        setHasHydratedWorkspaces,
+        openDraftTab: (workspaceKey) =>
+          useWorkspaceLayoutStore.getState().openTab({
+            workspaceKey,
+            target: { kind: "draft", draftId: generateDraftId() },
+            intent: "new",
+            placement: FOCUSED_PANE_PLACEMENT,
+          }),
+        navigateToWorkspace: (targetServerId, workspaceId) =>
+          navigateToWorkspace({ serverId: targetServerId, workspaceId }),
+      }),
+    [client, isConnected, mergeWorkspaces, normalizedServerId, setHasHydratedWorkspaces],
   );
 }
