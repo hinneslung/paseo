@@ -5,6 +5,7 @@ on:
     tags:
       - "v*"
       - "android-v*"
+      - "!vscode-v*"
   workflow_dispatch:
     inputs:
       tag:
