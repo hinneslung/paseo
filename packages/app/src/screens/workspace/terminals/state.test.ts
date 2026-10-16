@@ -5,6 +5,7 @@ import {
   collectStandaloneTerminalIds,
   reconcilePendingScriptTerminals,
   removeTerminalFromPayload,
+  terminalBelongsToWorkspace,
   upsertCreatedTerminalPayload,
   type ListTerminalsPayload,
 } from "@/screens/workspace/terminals/state";
@@ -12,6 +13,13 @@ import type { CreateTerminalResponse } from "@getpaseo/protocol/messages";
 
 function listedTerminal(id: string): ListTerminalsPayload["terminals"][number] {
   return { id, name: id, title: id };
+}
+
+function terminalInWorkspace(
+  id: string,
+  workspaceId?: string,
+): ListTerminalsPayload["terminals"][number] {
+  return { ...listedTerminal(id), ...(workspaceId !== undefined ? { workspaceId } : {}) };
 }
 
 function createdTerminal(id: string): NonNullable<CreateTerminalResponse["payload"]["terminal"]> {
@@ -95,5 +103,34 @@ describe("workspace terminal state", () => {
       requestId: "existing",
       terminals: [],
     });
+  });
+});
+
+describe("terminalBelongsToWorkspace", () => {
+  it("keeps legacy terminals without workspaceId for cwd-scoped subscriptions", () => {
+    expect(
+      terminalBelongsToWorkspace({
+        terminal: terminalInWorkspace("legacy-terminal"),
+        workspaceId: "workspace-1",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps stamped terminals whose workspaceId matches", () => {
+    expect(
+      terminalBelongsToWorkspace({
+        terminal: terminalInWorkspace("matching-terminal", "workspace-1"),
+        workspaceId: "workspace-1",
+      }),
+    ).toBe(true);
+  });
+
+  it("excludes stamped terminals from sibling workspaces sharing a cwd", () => {
+    expect(
+      terminalBelongsToWorkspace({
+        terminal: terminalInWorkspace("sibling-terminal", "workspace-2"),
+        workspaceId: "workspace-1",
+      }),
+    ).toBe(false);
   });
 });

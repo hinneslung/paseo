@@ -1,5 +1,93 @@
 import { describe, it, expect } from "vitest";
-import { formatDuration, formatMessageTimestamp } from "./time";
+import {
+  describeCompactTimeAgo,
+  describeTimeAgo,
+  formatCompactTimeAgo,
+  formatCompactTimeAgoAsProse,
+  formatDuration,
+  formatMessageTimestamp,
+  formatTimeAgo,
+} from "./time";
+
+describe("formatTimeAgo", () => {
+  const now = new Date("2026-07-16T12:00:00.000Z");
+
+  it.each([
+    ["2026-07-16T11:59:55.000Z", "just now"],
+    ["2026-07-16T11:59:30.000Z", "just now"],
+    ["2026-07-16T11:59:00.000Z", "1m ago"],
+    ["2026-07-16T11:55:00.000Z", "5m ago"],
+    ["2026-07-16T10:00:00.000Z", "2h ago"],
+    ["2026-07-13T12:00:00.000Z", "3d ago"],
+    ["2026-01-15T12:00:00.000Z", "Jan 15"],
+  ])("formats %s as %s", (date, expected) => {
+    expect(formatTimeAgo(new Date(date), now)).toBe(expected);
+  });
+});
+
+describe("describeTimeAgo", () => {
+  const now = new Date("2026-07-16T12:00:00.000Z");
+
+  it.each([
+    ["2026-07-16T11:59:30.000Z", "just now", "minute"],
+    ["2026-07-16T11:55:00.000Z", "5m ago", "minute"],
+    ["2026-07-16T10:00:00.000Z", "2h ago", "hour"],
+    ["2026-07-13T12:00:00.000Z", "3d ago", "day"],
+    ["2026-01-15T12:00:00.000Z", "Jan 15", "static"],
+  ] as const)("formats %s as %s at %s resolution", (date, label, resolution) => {
+    expect(describeTimeAgo(new Date(date), now)).toEqual({ label, resolution });
+  });
+});
+
+describe("describeCompactTimeAgo", () => {
+  const now = new Date("2026-07-16T12:00:00.000Z");
+
+  it.each([
+    ["2026-07-16T11:59:59.000Z", "now", "minute"],
+    ["2026-07-16T11:59:30.000Z", "now", "minute"],
+    ["2026-07-16T11:59:00.000Z", "1m", "minute"],
+    ["2026-07-16T11:55:00.000Z", "5m", "minute"],
+    ["2026-07-16T11:00:00.000Z", "1h", "hour"],
+    ["2026-07-16T10:00:00.000Z", "2h", "hour"],
+    ["2026-07-15T12:00:00.000Z", "1d", "day"],
+    ["2026-07-13T12:00:00.000Z", "3d", "day"],
+    ["2026-07-10T12:00:00.000Z", "6d", "day"],
+    ["2026-07-09T12:00:00.000Z", "Jul 9", "static"],
+    ["2026-01-15T12:00:00.000Z", "Jan 15", "static"],
+  ] as const)("formats %s as %s at %s resolution", (date, label, resolution) => {
+    expect(describeCompactTimeAgo(new Date(date), now)).toEqual({ label, resolution });
+  });
+
+  it("never shows a sub-minute count", () => {
+    // A seconds label is only true for the second it rendered. Everything under a minute is
+    // "now", which stays true and lets the row sit still.
+    for (let seconds = 0; seconds < 60; seconds += 1) {
+      const date = new Date(now.getTime() - seconds * 1000);
+      expect(describeCompactTimeAgo(date, now).label).toBe("now");
+    }
+  });
+
+  it("switches to an absolute date exactly at seven days", () => {
+    const almost = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000 - 1));
+    const exactly = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    expect(describeCompactTimeAgo(almost, now).resolution).toBe("day");
+    expect(describeCompactTimeAgo(exactly, now).resolution).toBe("static");
+  });
+
+  it("keeps formatCompactTimeAgo as the label alone", () => {
+    const date = new Date("2026-07-16T10:00:00.000Z");
+    expect(formatCompactTimeAgo(date, now)).toBe(describeCompactTimeAgo(date, now).label);
+  });
+});
+
+describe("formatCompactTimeAgoAsProse", () => {
+  it("puts elapsed labels back into prose and leaves dates alone", () => {
+    expect(formatCompactTimeAgoAsProse("now")).toBe("just now");
+    expect(formatCompactTimeAgoAsProse("3m")).toBe("3m ago");
+    expect(formatCompactTimeAgoAsProse("2h")).toBe("2h ago");
+    expect(formatCompactTimeAgoAsProse("Jan 15")).toBe("Jan 15");
+  });
+});
 
 describe("formatDuration", () => {
   it("renders sub-minute durations as whole seconds", () => {
@@ -44,6 +132,17 @@ describe("formatMessageTimestamp", () => {
     const formatted = formatMessageTimestamp(date, now);
     expect(formatted).toMatch(/Monday/);
     expect(formatted).toMatch(/10:12 PM|22:12/);
+  });
+
+  it("shows the full date for last week's same weekday, even under seven days ago", () => {
+    // 2026-09-18 is a Friday. The reply is 6 days 23h45m old and lands on today's weekday,
+    // so a weekday label would read as today.
+    const now = new Date(2026, 8, 25, 11, 47);
+    const date = new Date(2026, 8, 18, 12, 2);
+    const formatted = formatMessageTimestamp(date, now);
+    expect(formatted).toMatch(/Sep|September/);
+    expect(formatted).toMatch(/18/);
+    expect(formatted).not.toMatch(/Friday/);
   });
 
   it("includes full date for older timestamps", () => {

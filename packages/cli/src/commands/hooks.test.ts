@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { AGENT_HOOK_PROVIDERS } from "@getpaseo/server/agent-hooks";
 import { describe, expect, it } from "vitest";
 import { runHooksCommand } from "./hooks.js";
@@ -14,6 +15,15 @@ function inputFrom(value: string) {
       yield value;
     },
   };
+}
+
+function claudeNotification(notificationType: string) {
+  return JSON.stringify({
+    session_id: "session-1",
+    hook_event_name: "Notification",
+    message: "Claude is waiting for your input",
+    notification_type: notificationType,
+  });
 }
 
 function ttyInput() {
@@ -75,6 +85,14 @@ function expectPostedState(fetch: RecordingFetch, state: string) {
 }
 
 describe("runHooksCommand", () => {
+  it("keeps provider names out of the generic command", () => {
+    const source = readFileSync(new URL("./hooks.ts", import.meta.url), "utf8").toLowerCase();
+
+    for (const providerId of Object.keys(AGENT_HOOK_PROVIDERS)) {
+      expect(source).not.toContain(providerId);
+    }
+  });
+
   it.each([
     [claudeProvider.events[0].event, "running"],
     [claudeProvider.events[1].event, "idle"],
@@ -114,7 +132,7 @@ describe("runHooksCommand", () => {
     const send = await runHook(
       claudeProvider.id,
       claudeProvider.events[4].event,
-      inputFrom('{"reason":"idle_prompt"}'),
+      inputFrom(claudeNotification("idle_prompt")),
     );
 
     expectPostedState(send, "needs-input");
@@ -122,11 +140,11 @@ describe("runHooksCommand", () => {
 
   it.each(["permission_prompt", "elicitation_prompt", "elicitation_response", "auth_success"])(
     "ignores Claude %s notifications",
-    async (reason) => {
+    async (notificationType) => {
       const send = await runHook(
         claudeProvider.id,
         claudeProvider.events[4].event,
-        inputFrom(JSON.stringify({ reason })),
+        inputFrom(claudeNotification(notificationType)),
       );
 
       expect(send.calls).toEqual([]);

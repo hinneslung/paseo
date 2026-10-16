@@ -2,7 +2,7 @@ import { Buffer } from "buffer";
 import type { AgentStreamEventPayload, SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { resolveVoiceUnavailableMessage } from "@/utils/server-info-capabilities";
 import type { DaemonServerInfo } from "@/stores/session-store";
-import type { AudioEngine } from "@/voice/audio-engine-types";
+import type { AudioEngine } from "@/audio";
 import {
   THINKING_TONE_NATIVE_PCM_BASE64,
   THINKING_TONE_NATIVE_PCM_DURATION_MS,
@@ -11,6 +11,13 @@ import {
 const PCM_MIME_TYPE = "audio/pcm;rate=16000;bits=16";
 const KEEP_AWAKE_TAG = "paseo:voice";
 const THINKING_TONE_REPEAT_GAP_MS = 350;
+/**
+ * A reply is spoken as one TTS segment per sentence, and the daemon starts the next segment
+ * only once the current one has finished playing, so a reply in progress is punctuated by short
+ * silences. The cue is for a wait the user cannot otherwise explain, so it starts only once the
+ * silence has outlasted those gaps.
+ */
+const THINKING_TONE_MIN_SILENCE_MS = 1500;
 const DISPLAY_VOLUME_PUBLISH_INTERVAL_MS = 120;
 const DISPLAY_VOLUME_CHANGE_EPSILON = 0.02;
 const DISPLAY_VOLUME_ATTACK = 0.35;
@@ -111,10 +118,8 @@ interface RuntimePlaybackState {
 }
 
 interface CueState {
-  active: boolean;
-  token: number;
+  controller: AbortController | null;
   timeout: ReturnType<typeof setTimeout> | null;
-  playing: boolean;
 }
 
 const INITIAL_SNAPSHOT: VoiceRuntimeSnapshot = {
@@ -203,10 +208,8 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
     generation: 0,
   };
   const cue: CueState = {
-    active: false,
-    token: 0,
+    controller: null,
     timeout: null,
-    playing: false,
   };
   const cuePcm16 = Uint8Array.from(Buffer.from(THINKING_TONE_NATIVE_PCM_BASE64, "base64"));
   const cueSource = {
@@ -435,17 +438,11 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
   }
 
   function stopCue(): void {
-    const hadActive = cue.active || cue.timeout !== null || cue.playing;
-    cue.active = false;
-    cue.token += 1;
+    cue.controller?.abort();
+    cue.controller = null;
     if (cue.timeout) {
       clearTimeout(cue.timeout);
       cue.timeout = null;
-    }
-    cue.playing = false;
-    if (hadActive) {
-      deps.engine.stop();
-      deps.engine.clearQueue();
     }
   }
 
@@ -460,29 +457,26 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       stopCue();
       return;
     }
-    if (cue.active) {
+    if (cue.controller) {
       return;
     }
-    cue.active = true;
-    cue.token += 1;
-    const token = cue.token;
+    const controller = new AbortController();
+    cue.controller = controller;
 
     const playNext = () => {
-      if (!cue.active || cue.token !== token) {
+      if (controller.signal.aborted) {
         return;
       }
-      cue.playing = true;
       void deps.engine
-        .play(cueSource)
+        .play(cueSource, controller.signal)
         .catch((error) => {
-          if (cue.token !== token) {
+          if (controller.signal.aborted) {
             return;
           }
           console.warn(`[VoiceRuntime#${instanceId}] Cue playback failed:`, error);
         })
         .finally(() => {
-          cue.playing = false;
-          if (!cue.active || cue.token !== token) {
+          if (controller.signal.aborted) {
             return;
           }
           cue.timeout = setTimeout(
@@ -492,7 +486,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
         });
     };
 
-    playNext();
+    cue.timeout = setTimeout(playNext, THINKING_TONE_MIN_SILENCE_MS);
   }
 
   const uploader: ContinuousVoiceUploader = {
@@ -730,6 +724,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       const previousServerId = state.snapshot.activeServerId;
       const previousAgentId = state.snapshot.activeAgentId;
       const generation = state.generation + 1;
+      let enabledCurrentVoiceMode = false;
       state.generation = generation;
       state.transportReady = false;
       patchSnapshot((prev) => ({
@@ -759,6 +754,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
 
         await deps.engine.initialize();
         await session.adapter.setVoiceMode(true, agentId);
+        enabledCurrentVoiceMode = true;
         await deps.engine.startCapture();
         if (state.generation !== generation) {
           return;
@@ -776,6 +772,9 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
           isMuted: deps.engine.isMuted(),
         }));
       } catch (error) {
+        if (enabledCurrentVoiceMode) {
+          await session.adapter.setVoiceMode(false).catch(() => undefined);
+        }
         await performLocalStop();
         throw error;
       }
@@ -908,10 +907,9 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
       if (isSpeaking) {
         const shouldInterruptPlayback =
           state.snapshot.phase === "playing" || playback.groups.size > 0;
-        const hadCue = cue.active || cue.timeout !== null || cue.playing;
         resetPlaybackState();
         stopCue();
-        if (shouldInterruptPlayback && !hadCue) {
+        if (shouldInterruptPlayback) {
           deps.engine.stop();
           deps.engine.clearQueue();
         }

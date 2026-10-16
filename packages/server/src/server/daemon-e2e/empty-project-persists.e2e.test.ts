@@ -62,10 +62,10 @@ test("project.add creates a project without creating a workspace", async () => {
     expect(added.project).not.toBeNull();
     const project = added.project!;
     expect(project).toMatchObject({
-      projectId: repoRoot,
       projectRootPath: repoRoot,
       projectKind: "git",
     });
+    expect(project.projectId).toMatch(/^prj_[0-9a-f]{16}$/);
 
     const workspaces = await client.fetchWorkspaces({
       filter: { projectId: project.projectId },
@@ -73,7 +73,6 @@ test("project.add creates a project without creating a workspace", async () => {
     expect(workspaces.entries).toEqual([]);
     expect(workspaces.emptyProjects).toEqual([
       expect.objectContaining({
-        projectId: repoRoot,
         projectRootPath: repoRoot,
         projectKind: "git",
       }),
@@ -109,7 +108,7 @@ test("archiving the last workspace leaves the project parent with no workspaces"
     const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
     cleanupClients.add(client);
     await client.connect();
-    await client.fetchAgents({ subscribe: { subscriptionId: "empty-project-agents" } });
+    await client.fetchAgents({ subscribe: {} });
 
     const created = await client.createWorkspace({ source: { kind: "directory", path: repoRoot } });
     expect(created.error).toBeNull();

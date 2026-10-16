@@ -1,3 +1,4 @@
+import { SessionDelivery } from "./session/owned-subscriptions/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Server as HTTPServer } from "http";
 import type pino from "pino";
@@ -5,8 +6,6 @@ import type { AgentManager } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
 import type { DaemonConfigStore } from "./daemon-config-store.js";
-import type { FileBackedChatService } from "./chat/chat-service.js";
-import type { LoopService } from "./loop-service.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import type {
@@ -17,7 +16,8 @@ import type {
 import type { PersistedWorkspaceRecord, WorkspaceRegistry } from "./workspace-registry.js";
 import { asInternals, createStub } from "./test-utils/class-mocks.js";
 import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
-import type { PushNotificationSender, PushPayload } from "./push/notifications.js";
+import type { PushNotificationSender, PushPayload } from "./push/index.js";
+import type { WorkspaceAutoName } from "./workspace-auto-name.js";
 
 const wsModuleMock = vi.hoisted(() => {
   class MockWebSocketServer {
@@ -66,6 +66,13 @@ function createLogger() {
     error: vi.fn(),
   };
   return logger;
+}
+
+function createWorkspaceAutoNameStub(): WorkspaceAutoName {
+  return createStub<WorkspaceAutoName>({
+    scheduleForWorktree: () => {},
+    scheduleForDirectory: () => {},
+  });
 }
 
 function createTerminalManager() {
@@ -125,6 +132,7 @@ function createServer(terminalManager: TerminalManager, workspaceRegistry?: Work
     })),
   };
   const daemonConfigStore = {
+    onApply: vi.fn(() => () => {}),
     onChange: vi.fn(() => () => {}),
   };
 
@@ -139,6 +147,7 @@ function createServer(terminalManager: TerminalManager, workspaceRegistry?: Work
     createStub<DaemonConfigStore>(daemonConfigStore),
     null,
     { allowedOrigins: new Set() },
+    createWorkspaceAutoNameStub(),
     undefined,
     undefined,
     terminalManager,
@@ -147,8 +156,6 @@ function createServer(terminalManager: TerminalManager, workspaceRegistry?: Work
     undefined,
     undefined,
     workspaceRegistry,
-    createStub<FileBackedChatService>({}),
-    createStub<LoopService>({}),
     createStub<ScheduleService>({}),
     createStub<CheckoutDiffManager>({
       subscribe: vi.fn(),
@@ -186,11 +193,17 @@ function createOpenSocket() {
   };
 }
 
-function connectClient(server: VoiceAssistantWebSocketServer) {
+function connectClient(server: VoiceAssistantWebSocketServer, subscribed = true) {
   const ws = createOpenSocket();
+  const delivery = new SessionDelivery(() => {});
+  delivery.attach(ws, false);
   asInternals<{ sessions: Map<unknown, unknown> }>(server).sessions.set(ws, {
+    kind: "trusted",
     session: {
+      delivery,
+      wantsSourceNotification: () => true,
       getClientActivity: vi.fn(() => null),
+      subscribesToTerminalDirectory: vi.fn(async () => subscribed),
     },
     clientId: "client-test",
     appVersion: null,
@@ -265,6 +278,25 @@ function transition(input: {
 describe("VoiceAssistantWebSocketServer terminal attention notifications", () => {
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("does not emit attention without a matching terminal-directory subscription", async () => {
+    const { manager, emit } = createTerminalManager();
+    const { server, pushNotifications } = createServer(manager);
+    const ws = connectClient(server, false);
+
+    emit(
+      transition({
+        previousState: "working",
+        previousChangedAt: 1000,
+        state: "idle",
+        changedAt: 11001,
+      }),
+    );
+    await flushAsync();
+
+    expectNoTerminalAttentionMessage(ws);
+    expect(pushNotifications.sent).toHaveLength(1);
   });
 
   it("broadcasts terminal_attention_required after working -> idle", async () => {

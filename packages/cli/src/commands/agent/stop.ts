@@ -1,6 +1,5 @@
 import { Command } from "commander";
-import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
+import { connectToDaemon } from "../../utils/client.js";
 import { isSameOrDescendantPath } from "../../utils/paths.js";
 import type {
   CommandOptions,
@@ -42,8 +41,6 @@ export async function runStopCommand(
   options: AgentStopOptions,
   _command: Command,
 ): Promise<AgentStopResult> {
-  const host = getDaemonHost({ host: options.host });
-
   // Validate arguments - need either an id, --all, or --cwd
   if (!id && !options.all && !options.cwd) {
     const error: CommandError = {
@@ -54,18 +51,7 @@ export async function runStopCommand(
     throw error;
   }
 
-  let client: DaemonClient;
-  try {
-    client = await connectToDaemon({ host: options.host });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const error: CommandError = {
-      code: "DAEMON_NOT_RUNNING",
-      message: `Cannot connect to daemon at ${host}: ${message}`,
-      details: "Start the daemon with: paseo daemon start",
-    };
-    throw error;
-  }
+  const client = await connectToDaemon({ target: options.daemonTarget });
 
   try {
     const fetchPayload = await client.fetchAgents({ filter: { includeArchived: true } });
@@ -83,7 +69,7 @@ export async function runStopCommand(
       });
     } else if (id) {
       // Stop specific agent
-      const fetchResult = await client.fetchAgent(id);
+      const fetchResult = await client.fetchAgent({ agentId: id });
       if (!fetchResult) {
         const error: CommandError = {
           code: "AGENT_NOT_FOUND",

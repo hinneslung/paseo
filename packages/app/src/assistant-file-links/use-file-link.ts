@@ -20,7 +20,6 @@ export interface UseFileLinkResult {
   target: InlinePathTarget | null;
   onHoverIn: () => void;
   onPress: () => void;
-  onAuxPress: () => void;
   open: (source: AssistantFileLinkSource, disposition: OpenFileDisposition) => void;
 }
 
@@ -60,7 +59,7 @@ export function useFileLink(source: AssistantFileLinkSource): UseFileLinkResult 
         ? assistantFileLinkQueryKey({
             serverId,
             workspaceRoot,
-            ambiguousQuery: resolution.ambiguousQuery,
+            token: resolution.token,
           })
         : DISABLED_QUERY_KEY,
     [resolution, serverId, workspaceRoot],
@@ -118,10 +117,7 @@ export function useFileLink(source: AssistantFileLinkSource): UseFileLinkResult 
   });
 
   const onPress = useStableEvent(() => {
-    open(stableSource, "main");
-  });
-  const onAuxPress = useStableEvent(() => {
-    open(stableSource, "side");
+    open(stableSource, "preferred");
   });
 
   const target = useMemo(() => {
@@ -131,10 +127,7 @@ export function useFileLink(source: AssistantFileLinkSource): UseFileLinkResult 
     return query.data ?? null;
   }, [query.data, resolution]);
 
-  return useMemo(
-    () => ({ target, onHoverIn, onPress, onAuxPress, open }),
-    [target, onHoverIn, onPress, onAuxPress, open],
-  );
+  return useMemo(() => ({ target, onHoverIn, onPress, open }), [target, onHoverIn, onPress, open]);
 }
 
 export function useAssistantFileLinkActions(): AssistantFileLinkActions {
@@ -186,7 +179,7 @@ function openAssistantFileLink(input: {
   const capturedQueryKey = assistantFileLinkQueryKey({
     serverId: capturedConfig.serverId,
     workspaceRoot: capturedConfig.workspaceRoot,
-    ambiguousQuery: capturedResolution.ambiguousQuery,
+    token: capturedResolution.token,
   });
 
   const run = async () => {
@@ -242,24 +235,19 @@ function canResolveAssistantFileLinkToFile(
 }
 
 function useStableSource(source: AssistantFileLinkSource): AssistantFileLinkSource {
-  const { href, text, markup, sourceInfo, sourceType } = source;
+  const { href, text, title, markup, sourceInfo, sourceType } = source;
   return useMemo(
-    () => ({ href, text, markup, sourceInfo, sourceType }),
-    [href, text, markup, sourceInfo, sourceType],
+    () => ({ href, text, title, markup, sourceInfo, sourceType }),
+    [href, text, title, markup, sourceInfo, sourceType],
   );
 }
 
 function assistantFileLinkQueryKey(input: {
   serverId?: string;
   workspaceRoot?: string;
-  ambiguousQuery: string;
+  token: string;
 }): AssistantFileLinkQueryKey {
-  return [
-    "assistantFileLink",
-    input.serverId ?? null,
-    input.workspaceRoot ?? null,
-    input.ambiguousQuery,
-  ];
+  return ["assistantFileLink", input.serverId ?? null, input.workspaceRoot ?? null, input.token];
 }
 
 async function dispatchResolvedLink(input: {

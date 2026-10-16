@@ -16,11 +16,14 @@ export async function runInspectCommand(
   options: ScheduleCommandOptions,
   _command: Command,
 ): Promise<ListResult<ScheduleInspectRow>> {
-  const { client } = await connectScheduleClient(options.host);
+  const { client } = await connectScheduleClient(options.daemonTarget);
   try {
     const payload = await client.scheduleInspect({ id });
     if (payload.error || !payload.schedule) {
       throw new Error(payload.error ?? `Schedule not found: ${id}`);
+    }
+    if (payload.schedule.target.type !== "new-agent") {
+      throw new Error(`Schedule not found: ${id}`);
     }
     const rows = createScheduleInspectRows(payload.schedule);
     return {

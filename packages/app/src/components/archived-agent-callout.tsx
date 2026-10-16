@@ -1,14 +1,13 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { View, Text } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet } from "react-native-unistyles";
-import Animated from "react-native-reanimated";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { FOOTER_HEIGHT, MAX_CONTENT_WIDTH } from "@/constants/layout";
+import { FOOTER_HEIGHT } from "@/constants/layout";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
-import { useKeyboardShiftStyle } from "@/hooks/use-keyboard-shift-style";
+import { KeyboardTranslateView } from "@/keyboard/shift";
 import { Button } from "@/components/ui/button";
 import type { Theme } from "@/styles/theme";
+import { toErrorMessage } from "@/utils/error-messages";
 
 interface ArchivedAgentCalloutProps {
   serverId: string;
@@ -17,47 +16,48 @@ interface ArchivedAgentCalloutProps {
 
 export function ArchivedAgentCallout({ serverId, agentId }: ArchivedAgentCalloutProps) {
   const { t } = useTranslation();
-  const insets = useSafeAreaInsets();
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
   const [isUnarchiving, setIsUnarchiving] = useState(false);
-
-  const { style: keyboardAnimatedStyle } = useKeyboardShiftStyle({ mode: "translate" });
-
-  const containerStyle = useMemo(
-    () => [styles.container, { paddingBottom: insets.bottom }, keyboardAnimatedStyle],
-    [insets.bottom, keyboardAnimatedStyle],
-  );
+  const [unarchiveError, setUnarchiveError] = useState<string | null>(null);
 
   const handleUnarchive = useCallback(async () => {
     if (!client || !isConnected || isUnarchiving) return;
     setIsUnarchiving(true);
+    setUnarchiveError(null);
     try {
       await client.refreshAgent(agentId);
     } catch (error) {
-      console.error("[ArchivedAgentCallout] Failed to unarchive agent:", error);
+      setUnarchiveError(toErrorMessage(error));
       setIsUnarchiving(false);
     }
   }, [client, isConnected, isUnarchiving, agentId]);
 
   return (
-    <Animated.View style={containerStyle}>
+    <KeyboardTranslateView style={styles.container}>
       <View style={styles.inputAreaContainer}>
         <View style={styles.inputAreaContent}>
-          <View style={styles.callout}>
-            <Text style={styles.calloutText}>{t("agentPanel.archived.callout")}</Text>
-            <Button
-              size="sm"
-              variant="secondary"
-              onPress={handleUnarchive}
-              disabled={!isConnected || isUnarchiving}
-            >
-              {t("agentPanel.archived.unarchive")}
-            </Button>
+          <View style={styles.calloutStack}>
+            <View style={styles.callout}>
+              <Text style={styles.calloutText}>{t("agentPanel.archived.callout")}</Text>
+              <Button
+                size="sm"
+                variant="secondary"
+                onPress={handleUnarchive}
+                disabled={!isConnected || isUnarchiving}
+              >
+                {t("agentPanel.archived.unarchive")}
+              </Button>
+            </View>
+            {unarchiveError ? (
+              <Text style={styles.errorText} testID="agent-unarchive-error">
+                {unarchiveError}
+              </Text>
+            ) : null}
           </View>
         </View>
       </View>
-    </Animated.View>
+    </KeyboardTranslateView>
   );
 }
 
@@ -77,7 +77,7 @@ const styles = StyleSheet.create((theme: Theme) => ({
   },
   inputAreaContent: {
     width: "100%",
-    maxWidth: MAX_CONTENT_WIDTH,
+    maxWidth: theme.contentMaxWidth,
   },
   callout: {
     flexDirection: "row",
@@ -97,8 +97,16 @@ const styles = StyleSheet.create((theme: Theme) => ({
       md: theme.spacing[6],
     },
   },
+  calloutStack: {
+    gap: theme.spacing[2],
+  },
   calloutText: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.base,
+  },
+  errorText: {
+    color: theme.colors.statusDanger,
+    fontSize: theme.fontSize.base,
+    textAlign: "center",
   },
 })) as unknown as Record<string, object>;

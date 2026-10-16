@@ -37,7 +37,7 @@ describe("daemon E2E (real claude) - runtime model reconciliation", () => {
     try {
       await client.connect();
       await client.fetchAgents({
-        subscribe: { subscriptionId: "claude-runtime-model-reconcile" },
+        subscribe: {},
       });
 
       const modelsResult = await client.listProviderModels("claude", { cwd });
@@ -55,7 +55,7 @@ describe("daemon E2E (real claude) - runtime model reconciliation", () => {
       const finish = await client.waitForFinish(agent.id, 180_000);
       expect(finish.status).toBe("idle");
 
-      const snapshot = await client.fetchAgent(agent.id);
+      const snapshot = await client.fetchAgent({ agentId: agent.id });
       expect(snapshot).not.toBeNull();
       const runtimeModelId = snapshot?.agent.runtimeInfo?.model ?? null;
       expect(typeof runtimeModelId).toBe("string");

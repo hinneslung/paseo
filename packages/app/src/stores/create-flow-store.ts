@@ -13,22 +13,42 @@ export interface PendingCreateAttempt {
   text: string;
   timestamp: number;
   lifecycle: CreateFlowLifecycleState;
+  errorMessage?: string;
   images?: UserMessageImageAttachment[];
   attachments?: AgentAttachment[];
+}
+
+export function isActiveCreateFlowForDraft(input: {
+  pending: PendingCreateAttempt | null | undefined;
+  serverId: string | null;
+  draftId: string | null | undefined;
+}): boolean {
+  const draftId = input.draftId?.trim();
+  return Boolean(
+    draftId &&
+    input.pending?.draftId === draftId &&
+    input.pending.serverId === input.serverId &&
+    input.pending.lifecycle === "active",
+  );
 }
 
 interface CreateFlowState {
   pendingByDraftId: Record<string, PendingCreateAttempt>;
   setPending: (pending: Omit<PendingCreateAttempt, "lifecycle">) => void;
+  trySetPending: (pending: Omit<PendingCreateAttempt, "lifecycle">) => boolean;
   updateAgentId: (input: { draftId: string; agentId: string }) => void;
-  markLifecycle: (input: { draftId: string; lifecycle: CreateFlowLifecycleState }) => void;
+  markLifecycle: (input: {
+    draftId: string;
+    lifecycle: CreateFlowLifecycleState;
+    errorMessage?: string;
+  }) => void;
   rekeyDraft: (input: { fromDraftId: string; toDraftId: string }) => void;
   clear: (input: { draftId: string }) => void;
   clearByAgent: (input: { serverId: string; agentId: string }) => void;
   clearAll: () => void;
 }
 
-export const useCreateFlowStore = create<CreateFlowState>((set) => ({
+export const useCreateFlowStore = create<CreateFlowState>((set, get) => ({
   pendingByDraftId: {},
   setPending: (pending) =>
     set((state) => ({
@@ -40,6 +60,12 @@ export const useCreateFlowStore = create<CreateFlowState>((set) => ({
         },
       },
     })),
+  trySetPending: (pending) => {
+    const existing = get().pendingByDraftId[pending.draftId];
+    if (existing?.serverId === pending.serverId && existing.lifecycle !== "abandoned") return false;
+    get().setPending(pending);
+    return true;
+  },
   updateAgentId: ({ draftId, agentId }) =>
     set((state) => {
       const current = state.pendingByDraftId[draftId];
@@ -53,7 +79,7 @@ export const useCreateFlowStore = create<CreateFlowState>((set) => ({
         },
       };
     }),
-  markLifecycle: ({ draftId, lifecycle }) =>
+  markLifecycle: ({ draftId, lifecycle, errorMessage }) =>
     set((state) => {
       const current = state.pendingByDraftId[draftId];
       if (!current || current.lifecycle === lifecycle) {
@@ -62,7 +88,7 @@ export const useCreateFlowStore = create<CreateFlowState>((set) => ({
       return {
         pendingByDraftId: {
           ...state.pendingByDraftId,
-          [draftId]: { ...current, lifecycle },
+          [draftId]: { ...current, lifecycle, errorMessage },
         },
       };
     }),
@@ -95,7 +121,10 @@ export const useCreateFlowStore = create<CreateFlowState>((set) => ({
     set((state) => {
       const next = Object.fromEntries(
         Object.entries(state.pendingByDraftId).filter(
-          ([, pending]) => pending.serverId !== serverId || pending.agentId !== agentId,
+          ([, pending]) =>
+            pending.lifecycle !== "sent" ||
+            pending.serverId !== serverId ||
+            pending.agentId !== agentId,
         ),
       );
       if (Object.keys(next).length === Object.keys(state.pendingByDraftId).length) {

@@ -1,9 +1,16 @@
 #!/usr/bin/env node
-import net from "node:net";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import {
+  createElectronSpawnOptions,
+  registerDevRunnerShutdownSignals,
+  resolveChildKillTarget,
+} from "./dev-runner-config.mjs";
+
+import { waitForMetro } from "./dev-runner-readiness.mjs";
+import { resolveDevElectronArgs } from "./dev-runner-args.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const desktopDir = path.resolve(scriptDir, "..");
@@ -19,11 +26,15 @@ if (!Number.isInteger(expoPort) || expoPort <= 0) {
 }
 
 const expoDevUrl = process.env.EXPO_DEV_URL || `http://localhost:${expoPort}`;
-const daemonEndpoint = process.env.PASEO_DAEMON_ENDPOINT || process.env.PASEO_LISTEN || "";
+const electronArgs = resolveDevElectronArgs(process.platform, process.argv.slice(2));
 const colorEnv = {
   FORCE_COLOR: process.env.FORCE_COLOR || "1",
   npm_config_color: process.env.npm_config_color || "always",
 };
+const devBuildLabel = execFileSync("git", ["branch", "--show-current"], {
+  cwd: rootDir,
+  encoding: "utf8",
+}).trim();
 
 const children = new Map();
 let stopping = false;
@@ -58,7 +69,11 @@ function spawnChild(name, command, args, options = {}) {
     ...options,
   });
 
-  children.set(name, child);
+  const managedChild = {
+    process: child,
+    detached: options.detached === true,
+  };
+  children.set(name, managedChild);
   prefixStream(name, child.stdout, process.stdout);
   prefixStream(name, child.stderr, process.stderr);
 
@@ -82,17 +97,13 @@ function spawnChild(name, command, args, options = {}) {
   return child;
 }
 
-function killChild(child, signal) {
+function killChild({ process: child, detached }, signal) {
   if (!child.pid || child.killed) {
     return;
   }
 
   try {
-    if (child.detached) {
-      process.kill(-child.pid, signal);
-    } else {
-      child.kill(signal);
-    }
+    process.kill(resolveChildKillTarget(child.pid, detached), signal);
   } catch {
     // The child may have exited between the liveness check and the signal.
   }
@@ -123,37 +134,7 @@ function stopAll(signal) {
   }, 50);
 }
 
-async function waitForPort(port, host = "127.0.0.1", timeoutMs = 60_000) {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    if (await canConnect(port, host)) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-
-  throw new Error(`Timed out waiting for ${host}:${port}`);
-}
-
-function canConnect(port, host) {
-  return new Promise((resolve) => {
-    const socket = net.createConnection({ port, host });
-    socket.setTimeout(1000);
-    socket.once("connect", () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once("timeout", () => {
-      socket.destroy();
-      resolve(false);
-    });
-    socket.once("error", () => resolve(false));
-  });
-}
-
-process.on("SIGINT", () => stopAll("SIGTERM"));
-process.on("SIGTERM", () => stopAll("SIGTERM"));
+registerDevRunnerShutdownSignals({ signalSource: process, stop: stopAll });
 
 spawnChild("metro", "npx", ["expo", "start", "--port", String(expoPort)], {
   cwd: appDir,
@@ -163,13 +144,13 @@ spawnChild("metro", "npx", ["expo", "start", "--port", String(expoPort)], {
     ...colorEnv,
     BROWSER: "none",
     APP_VARIANT: "development",
+    EXPO_PUBLIC_PASEO_DEV_BUILD_LABEL: devBuildLabel,
     PASEO_WEB_PLATFORM: "electron",
-    EXPO_PUBLIC_LOCAL_DAEMON: daemonEndpoint,
   },
 });
 
 try {
-  await waitForPort(expoPort);
+  await waitForMetro(expoDevUrl);
 } catch (error) {
   console.error(`[dev] ${error.message}`);
   exitCode = 1;
@@ -177,12 +158,15 @@ try {
 }
 
 if (!stopping) {
-  spawnChild("electron", electron, [desktopDir], {
-    detached: true,
-    env: {
-      ...process.env,
-      ...colorEnv,
-      EXPO_DEV_URL: expoDevUrl,
-    },
-  });
+  spawnChild(
+    "electron",
+    electron,
+    [...electronArgs, desktopDir],
+    createElectronSpawnOptions({
+      env: process.env,
+      colorEnv,
+      expoDevUrl,
+      devBuildLabel,
+    }),
+  );
 }

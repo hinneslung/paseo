@@ -1,22 +1,20 @@
 import type { Logger } from "pino";
-import { z } from "zod";
 
-import type { AgentCapabilityFlags } from "../agent-sdk-types.js";
 import { checkProviderLaunchAvailable, resolveProviderLaunch } from "../provider-launch-config.js";
-import { ACPAgentClient, DEFAULT_ACP_CAPABILITIES } from "./acp-agent.js";
 import {
-  formatProviderDiagnostic,
-  formatProviderDiagnosticError,
+  ACPAgentClient,
+  type ACPCatalogModelResolver,
+  type ACPClientCapabilityMeta,
+  type ACPConfigFeatureOption,
+  DEFAULT_ACP_CAPABILITIES,
+  type ACPExtensionCommandsParser,
+} from "./acp-agent.js";
+import {
   buildBinaryDiagnosticRows,
+  formatProviderDiagnostic,
+  type DiagnosticEntry,
+  toDiagnosticErrorMessage,
 } from "./diagnostic-utils.js";
-
-export const GenericACPProviderParamsSchema = z
-  .object({
-    supportsMcpServers: z.boolean().optional(),
-  })
-  .passthrough();
-
-type GenericACPProviderParams = z.infer<typeof GenericACPProviderParamsSchema>;
 
 interface GenericACPAgentClientOptions {
   logger: Logger;
@@ -24,15 +22,21 @@ interface GenericACPAgentClientOptions {
   env?: Record<string, string>;
   providerId?: string;
   label?: string;
-  providerParams?: unknown;
   waitForInitialCommands?: boolean;
   initialCommandsWaitTimeoutMs?: number;
+  diagnosticPhaseTimeoutMs?: number;
+  clientCapabilityMeta?: ACPClientCapabilityMeta;
+  configFeatureOptions?: ACPConfigFeatureOption[];
+  extensionCommandsParser?: ACPExtensionCommandsParser;
+  catalogModelResolver?: ACPCatalogModelResolver;
+  now?: () => number;
 }
 
 export class GenericACPAgentClient extends ACPAgentClient {
   private readonly command: [string, ...string[]];
   private readonly providerId?: string;
   private readonly label?: string;
+  private readonly diagnosticPhaseTimeoutMs?: number;
 
   constructor(options: GenericACPAgentClientOptions) {
     super({
@@ -42,14 +46,22 @@ export class GenericACPAgentClient extends ACPAgentClient {
         env: options.env,
       },
       defaultCommand: options.command,
-      capabilities: buildGenericACPCapabilities(options),
-      waitForInitialCommands: options.waitForInitialCommands,
+      capabilities: DEFAULT_ACP_CAPABILITIES,
+      // ACP agents advertise slash commands with available_commands_update after
+      // session/new, so the first listCommands() waits for that batch.
+      waitForInitialCommands: options.waitForInitialCommands ?? true,
       initialCommandsWaitTimeoutMs: options.initialCommandsWaitTimeoutMs,
+      clientCapabilityMeta: options.clientCapabilityMeta,
+      configFeatureOptions: options.configFeatureOptions,
+      extensionCommandsParser: options.extensionCommandsParser,
+      catalogModelResolver: options.catalogModelResolver,
+      now: options.now,
     });
 
     this.command = options.command;
     this.providerId = options.providerId;
     this.label = options.label;
+    this.diagnosticPhaseTimeoutMs = options.diagnosticPhaseTimeoutMs;
   }
 
   protected override async resolveLaunchCommand(): Promise<{ command: string; args: string[] }> {
@@ -67,35 +79,43 @@ export class GenericACPAgentClient extends ACPAgentClient {
 
   async getDiagnostic(): Promise<{ diagnostic: string }> {
     const providerName = formatProviderName(this.label, this.providerId);
+    const entries: DiagnosticEntry[] = [
+      { label: "Provider ID", value: this.providerId ?? "unknown" },
+      { label: "Configured command", value: this.command.join(" ") },
+    ];
+    const versionProbe = buildVersionProbeCommand(this.command);
 
     try {
       const launch = await this.resolveConfiguredLaunch();
       const availability = await checkProviderLaunchAvailable(launch);
-      const versionProbe = buildVersionProbeCommand(this.command);
-
-      return {
-        diagnostic: formatProviderDiagnostic(providerName, [
-          { label: "Provider ID", value: this.providerId ?? "unknown" },
-          { label: "Configured command", value: this.command.join(" ") },
-          ...(await buildBinaryDiagnosticRows(launch, availability, {
-            binaryLabel: "Launcher binary",
-            versionCommand: {
-              command: versionProbe.command,
-              args: versionProbe.args,
-              env: this.runtimeSettings?.env,
-            },
-          })),
-          {
-            label: "Version command",
-            value: formatCommand(versionProbe.command, versionProbe.args),
+      entries.push(
+        ...(await buildBinaryDiagnosticRows(launch, availability, {
+          binaryLabel: "Launcher binary",
+          versionCommand: {
+            command: versionProbe.command,
+            args: versionProbe.args,
+            env: this.runtimeSettings?.env,
           },
-        ]),
-      };
+        })),
+      );
     } catch (error) {
-      return {
-        diagnostic: formatProviderDiagnosticError(providerName, error),
-      };
+      entries.push({
+        label: "Launcher binary",
+        value: `error: ${toDiagnosticErrorMessage(error)}`,
+      });
     }
+
+    entries.push(
+      {
+        label: "Version command",
+        value: formatCommand(versionProbe.command, versionProbe.args),
+      },
+      ...(await this.getACPProbeRowsForDiagnostic()),
+    );
+
+    return {
+      diagnostic: formatProviderDiagnostic(providerName, entries),
+    };
   }
 
   private async resolveConfiguredLaunch() {
@@ -104,18 +124,21 @@ export class GenericACPAgentClient extends ACPAgentClient {
       defaultBinary: this.command[0],
     });
   }
-}
 
-function buildGenericACPCapabilities(options: GenericACPAgentClientOptions): AgentCapabilityFlags {
-  const params = parseGenericACPProviderParams(options.providerParams);
-  return {
-    ...DEFAULT_ACP_CAPABILITIES,
-    supportsMcpServers: params.supportsMcpServers ?? DEFAULT_ACP_CAPABILITIES.supportsMcpServers,
-  };
-}
-
-function parseGenericACPProviderParams(params: unknown): GenericACPProviderParams {
-  return GenericACPProviderParamsSchema.parse(params ?? {});
+  private async getACPProbeRowsForDiagnostic() {
+    try {
+      return await this.buildACPProbeDiagnosticRows({
+        phaseTimeoutMs: this.diagnosticPhaseTimeoutMs,
+      });
+    } catch (error) {
+      return [
+        {
+          label: "ACP probe",
+          value: `error: ${toDiagnosticErrorMessage(error)}`,
+        },
+      ];
+    }
+  }
 }
 
 export interface CommandInvocation {

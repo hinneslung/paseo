@@ -100,7 +100,7 @@ async function approvePendingPermissions(
   agentId: string,
   handledPermissionIds: Set<string>,
 ): Promise<void> {
-  const snapshot = await client.fetchAgent(agentId).catch(() => null);
+  const snapshot = await client.fetchAgent({ agentId }).catch(() => null);
   const pending = snapshot?.agent.pendingPermissions ?? [];
   const toApprove = pending.filter((permission) => !handledPermissionIds.has(permission.id));
   for (const permission of toApprove) {
@@ -256,7 +256,7 @@ async function createHarness(): Promise<{
   });
   const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
   await client.connect();
-  await client.fetchAgents({ subscribe: { subscriptionId: "opencode-send-interrupt-real" } });
+  await client.fetchAgents({ subscribe: {} });
   return { client, daemon };
 }
 

@@ -1,7 +1,9 @@
 const fs = require("fs");
 const path = require("path");
 
-const { smokePackagedDesktopApp } = require("./smoke-packaged-desktop-app.js");
+const { smokePackagedDesktopApp } = require("../e2e/packaged-app-smoke.js");
+
+const { installLinuxLauncher } = require("./linux-sandbox");
 
 const EXECUTABLE_NAME = "Paseo";
 
@@ -114,6 +116,10 @@ exports.default = async function afterPack(context) {
   const arch = ARCH_MAP[context.arch] || process.arch;
 
   pruneNativeModules(context.appOutDir, platform, arch);
+
+  if (platform === "linux") {
+    installLinuxLauncher(context.appOutDir);
+  }
 
   if (platform === "linux" || platform === "win32") {
     if (arch !== process.arch) {

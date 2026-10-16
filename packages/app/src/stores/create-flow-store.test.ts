@@ -1,9 +1,36 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { useCreateFlowStore } from "./create-flow-store";
+import { isActiveCreateFlowForDraft, useCreateFlowStore } from "./create-flow-store";
 
 describe("create-flow-store", () => {
   beforeEach(() => {
     useCreateFlowStore.setState({ pendingByDraftId: {} });
+  });
+
+  it("accepts a retry after failure while rejecting repeated active or completed submissions", () => {
+    const store = useCreateFlowStore.getState();
+    const submission = {
+      draftId: "draft-retry",
+      serverId: "server-1",
+      workspaceId: "workspace-1",
+      agentId: null,
+      clientMessageId: "draft-retry:initial-message",
+      text: "hello",
+      timestamp: 1,
+    };
+    expect(store.trySetPending(submission)).toBe(true);
+    expect(store.trySetPending(submission)).toBe(false);
+    store.markLifecycle({
+      draftId: submission.draftId,
+      lifecycle: "abandoned",
+      errorMessage: "Disconnected",
+    });
+    expect(store.trySetPending(submission)).toBe(true);
+    expect(useCreateFlowStore.getState().pendingByDraftId[submission.draftId]).toEqual({
+      ...submission,
+      lifecycle: "active",
+    });
+    store.markLifecycle({ draftId: submission.draftId, lifecycle: "sent" });
+    expect(store.trySetPending(submission)).toBe(false);
   });
 
   it("tracks lifecycle transitions explicitly", () => {
@@ -87,5 +114,41 @@ describe("create-flow-store", () => {
     useCreateFlowStore.getState().clearByAgent({ serverId: "server-1", agentId: "agent-1" });
 
     expect(useCreateFlowStore.getState().pendingByDraftId["draft-1"]).toBeUndefined();
+  });
+
+  it("matches only active pending create flows for a draft and server", () => {
+    useCreateFlowStore.getState().setPending({
+      draftId: "draft-1",
+      serverId: "server-1",
+      agentId: null,
+      clientMessageId: "msg-1",
+      text: "hello",
+      timestamp: Date.now(),
+    });
+    const pending = useCreateFlowStore.getState().pendingByDraftId["draft-1"];
+
+    expect(
+      isActiveCreateFlowForDraft({
+        pending,
+        serverId: "server-1",
+        draftId: " draft-1 ",
+      }),
+    ).toBe(true);
+    expect(
+      isActiveCreateFlowForDraft({
+        pending,
+        serverId: "server-2",
+        draftId: "draft-1",
+      }),
+    ).toBe(false);
+
+    useCreateFlowStore.getState().markLifecycle({ draftId: "draft-1", lifecycle: "sent" });
+    expect(
+      isActiveCreateFlowForDraft({
+        pending: useCreateFlowStore.getState().pendingByDraftId["draft-1"],
+        serverId: "server-1",
+        draftId: "draft-1",
+      }),
+    ).toBe(false);
   });
 });

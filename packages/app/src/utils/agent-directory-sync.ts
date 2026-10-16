@@ -1,9 +1,14 @@
 import type { FetchAgentsEntry } from "@getpaseo/client/internal/daemon-client";
-import { type Agent, useSessionStore } from "@/stores/session-store";
+import type { Agent } from "@/stores/session-store";
 import { derivePendingPermissionKey, normalizeAgentSnapshot } from "@/utils/agent-snapshots";
 import { resolveProjectPlacement } from "@/utils/project-placement";
+import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 
 type AgentDirectoryFetchEntry = FetchAgentsEntry;
+export type AgentDirectoryDelta = Extract<
+  SessionOutboundMessage,
+  { type: "agent_update" }
+>["payload"];
 
 interface PendingPermissionEntry {
   key: string;
@@ -40,36 +45,4 @@ export function buildAgentDirectoryState(input: {
   }
 
   return { agents, pendingPermissions };
-}
-
-export function replaceFetchedAgentDirectory(input: {
-  serverId: string;
-  entries: FetchAgentsEntry[];
-}): { agents: Map<string, Agent> } {
-  const { agents: fetchedAgents, pendingPermissions } = buildAgentDirectoryState(input);
-  const store = useSessionStore.getState();
-
-  store.setAgents(input.serverId, fetchedAgents);
-  store.setAgentDetails(input.serverId, (prev) => {
-    let next: Map<string, Agent> | null = null;
-    for (const agentId of fetchedAgents.keys()) {
-      if (!prev.has(agentId)) {
-        continue;
-      }
-      next ??= new Map(prev);
-      next.delete(agentId);
-    }
-    return next ?? prev;
-  });
-
-  const lastActivityByAgentId = new Map<string, Date>();
-  for (const agent of fetchedAgents.values()) {
-    lastActivityByAgentId.set(agent.id, agent.lastActivityAt);
-  }
-  store.setAgentLastActivityBatch(lastActivityByAgentId);
-
-  store.setPendingPermissions(input.serverId, new Map(pendingPermissions));
-  store.setInitializingAgents(input.serverId, new Map());
-  store.setHasHydratedAgents(input.serverId, true);
-  return { agents: fetchedAgents };
 }

@@ -5,12 +5,29 @@ import type {
   ProviderSnapshotEntry,
 } from "@getpaseo/protocol/agent-types";
 import type { AgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
-import type { DraftCommandConfig } from "@/hooks/use-agent-commands-query";
-import { buildFavoriteModelKey, type FavoriteModelRow } from "@/hooks/use-form-preferences";
+import type { DraftCommandTarget } from "@/hooks/use-agent-commands-query";
 import { i18n } from "@/i18n/i18next";
-import { compareMatchScores, scoreTextFields } from "@/utils/score-match";
+import { compareMatchScores, scoreTextFields } from "@getpaseo/protocol/search/text-match";
+import { filterSelectableModels } from "./model-catalog";
 
-export type ProviderSelectionModelRow = FavoriteModelRow & { isDefault?: boolean };
+export interface ProviderSelectionModelRow {
+  /**
+   * Row identity — `provider:modelId`. Used as the React key and as the row's
+   * stable handle across list rebuilds. The name is historical; it has nothing
+   * to do with the removed favourites feature.
+   */
+  favoriteKey: string;
+  provider: string;
+  providerLabel: string;
+  modelId: string;
+  modelLabel: string;
+  description?: string;
+  isDefault?: boolean;
+}
+
+function buildModelRowKey(provider: string, modelId: string): string {
+  return `${provider}:${modelId}`;
+}
 
 export type ProviderModelSelection =
   | { kind: "models"; rows: ProviderSelectionModelRow[] }
@@ -43,7 +60,7 @@ function buildModelRows(
   models: AgentModelDefinition[],
 ): ProviderSelectionModelRow[] {
   return models.map((model) => ({
-    favoriteKey: buildFavoriteModelKey({ provider, modelId: model.id }),
+    favoriteKey: buildModelRowKey(provider, model.id),
     provider,
     providerLabel,
     modelId: model.id,
@@ -58,7 +75,7 @@ function buildSyntheticDefaultRow(
   providerLabel: string,
 ): ProviderSelectionModelRow {
   return {
-    favoriteKey: buildFavoriteModelKey({ provider, modelId: "" }),
+    favoriteKey: buildModelRowKey(provider, ""),
     provider,
     providerLabel,
     modelId: "",
@@ -76,10 +93,11 @@ function buildModelSelection(
   if (models === null) {
     return { kind: "loading" };
   }
-  if (models.length === 0) {
+  const selectableModels = filterSelectableModels(models) ?? [];
+  if (selectableModels.length === 0) {
     return { kind: "models", rows: [buildSyntheticDefaultRow(provider, providerLabel)] };
   }
-  return { kind: "models", rows: buildModelRows(provider, providerLabel, models) };
+  return { kind: "models", rows: buildModelRows(provider, providerLabel, selectableModels) };
 }
 
 function buildEntryModelSelection(
@@ -157,7 +175,9 @@ export function resolveSelectedModelLabel(input: {
 }): string {
   const selectedProvider = input.selectedProvider.trim();
   if (!selectedProvider) {
-    return i18n.t("providerSelection.selectModel");
+    return input.isLoading
+      ? i18n.t("providerSelection.loading")
+      : i18n.t("providerSelection.selectModel");
   }
 
   const provider = input.providers.find((entry) => entry.id === selectedProvider);
@@ -177,6 +197,10 @@ export function resolveSelectedModelLabel(input: {
   }
 
   const model = provider.modelSelection.rows.find((entry) => entry.modelId === input.selectedModel);
+  const selectedModel = input.selectedModel.trim();
+  if (!model && selectedModel) {
+    return selectedModel;
+  }
   const defaultModel = provider.modelSelection.rows.find((row) => row.isDefault);
   return (
     model?.modelLabel ??
@@ -188,6 +212,14 @@ export function resolveSelectedModelLabel(input: {
 
 export function buildSelectedTriggerLabel(modelLabel: string): string {
   return modelLabel;
+}
+
+/**
+ * Cross-provider result rows need the provider named up front: the same model
+ * label ships on several providers at once.
+ */
+export function buildProviderQualifiedDescription(row: ProviderSelectionModelRow): string {
+  return row.description ? `${row.providerLabel} · ${row.description}` : row.providerLabel;
 }
 
 export function matchesModelSearch(
@@ -254,19 +286,22 @@ export function resolveEffectiveComposerThinkingOptionId(
   return selectedModelDefinition?.defaultThinkingOptionId ?? "";
 }
 
-export function buildDraftCommandConfig(input: {
+export function buildDraftCommandTarget(input: {
   selection: ProviderSelectionState;
   cwd: string;
   effectiveModelId: string;
   effectiveThinkingOptionId: string;
   featureValues?: Record<string, unknown>;
-}): DraftCommandConfig | undefined {
+}): DraftCommandTarget {
   const cwd = input.cwd.trim();
-  if (!input.selection.provider || !cwd) {
-    return undefined;
+  if (!cwd) {
+    return { status: "needs-project" };
+  }
+  if (!input.selection.provider) {
+    return { status: "needs-provider" };
   }
 
-  return {
+  const config = {
     provider: input.selection.provider,
     cwd,
     ...(input.selection.modeOptions.length > 0 && input.selection.modeId !== ""
@@ -278,6 +313,7 @@ export function buildDraftCommandConfig(input: {
       : {}),
     ...(input.featureValues ? { featureValues: input.featureValues } : {}),
   };
+  return { status: "ready", config };
 }
 
 export function resolveSubmissionReadiness(input: {

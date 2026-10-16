@@ -28,9 +28,15 @@ function makeCtx(overrides: Partial<ShortcutRoutingContext> = {}): ShortcutRouti
 describe("routeKeyboardShortcut — dispatch passthroughs", () => {
   it.each([
     ["agent.interrupt", { id: "agent.interrupt", scope: "global" }],
-    ["workspace.tab.new", { id: "workspace.tab.new", scope: "workspace" }],
+    ["workspace.tab.menu.open", { id: "workspace.tab.menu.open", scope: "workspace" }],
+    ["workspace.tab.target.agent", { id: "workspace.tab.target.agent", scope: "workspace" }],
+    ["workspace.tab.target.browser", { id: "workspace.tab.target.browser", scope: "workspace" }],
+    ["workspace.tab.target.changes", { id: "workspace.tab.target.changes", scope: "workspace" }],
+    ["workspace.tab.target.files", { id: "workspace.tab.target.files", scope: "workspace" }],
     ["workspace.new", { id: "workspace.new", scope: "sidebar" }],
-    ["worktree.archive", { id: "worktree.archive", scope: "sidebar" }],
+    ["workspace.project.pick", { id: "workspace.project.pick", scope: "workspace" }],
+    ["workspace.archive", { id: "workspace.archive", scope: "sidebar" }],
+    ["workspace.pin", { id: "workspace.pin", scope: "sidebar" }],
     ["worktree.new", { id: "worktree.new", scope: "sidebar" }],
     ["workspace.terminal.new", { id: "workspace.terminal.new", scope: "workspace" }],
     ["workspace.tab.close.current", { id: "workspace.tab.close-current", scope: "workspace" }],
@@ -46,10 +52,32 @@ describe("routeKeyboardShortcut — dispatch passthroughs", () => {
     ["workspace.pane.move-tab.up", { id: "workspace.pane.move-tab.up", scope: "workspace" }],
     ["workspace.pane.move-tab.down", { id: "workspace.pane.move-tab.down", scope: "workspace" }],
     ["workspace.pane.close", { id: "workspace.pane.close", scope: "workspace" }],
+    ["view.toggle.focus", { id: "workspace.focus.toggle", scope: "workspace" }],
   ])("%s → dispatch %j", (action, expected) => {
     expect(routeKeyboardShortcut({ action, payload: null }, makeCtx())).toEqual({
       kind: "dispatch",
       action: expected,
+    });
+  });
+
+  it("closes desktop settings when Escape routes through agent interrupt", () => {
+    expect(
+      routeKeyboardShortcut(
+        { action: "agent.interrupt", payload: null },
+        makeCtx({ pathname: "/settings/general" }),
+      ),
+    ).toEqual<ShortcutAction>({ kind: "navigate-last-workspace" });
+  });
+
+  it("keeps agent interrupt behavior on compact settings layouts", () => {
+    expect(
+      routeKeyboardShortcut(
+        { action: "agent.interrupt", payload: null },
+        makeCtx({ pathname: "/settings/general", isMobile: true }),
+      ),
+    ).toEqual<ShortcutAction>({
+      kind: "dispatch",
+      action: { id: "agent.interrupt", scope: "global" },
     });
   });
 });
@@ -332,7 +360,6 @@ describe("routeKeyboardShortcut — callbacks and pickers", () => {
   it.each([
     ["sidebar.toggle.left", "toggle-agent-list"],
     ["sidebar.toggle.both", "toggle-both-sidebars"],
-    ["view.toggle.focus", "toggle-focus-mode"],
     ["theme.cycle", "cycle-theme"],
   ] as const)("%s → callback %s", (action, name) => {
     expect(routeKeyboardShortcut({ action, payload: null }, makeCtx())).toEqual<ShortcutAction>({
@@ -349,6 +376,24 @@ describe("routeKeyboardShortcut — callbacks and pickers", () => {
 });
 
 describe("routeKeyboardShortcut — toggle dialogs", () => {
+  it("opens the command center scoped to files from a workspace", () => {
+    expect(
+      routeKeyboardShortcut({ action: "command-center.files", payload: null }, makeCtx()),
+    ).toEqual<ShortcutAction>({ kind: "command-center-toggle", nextOpen: true, scope: "files" });
+  });
+
+  it("leaves the file-search shortcut to the project-picker host outside a workspace", () => {
+    expect(
+      routeKeyboardShortcut(
+        { action: "command-center.files", payload: null },
+        makeCtx({ pathname: "/settings" }),
+      ),
+    ).toEqual<ShortcutAction>({
+      kind: "dispatch",
+      action: { id: "workspace.project.pick", scope: "workspace" },
+    });
+  });
+
   it("opens the command center when closed", () => {
     expect(
       routeKeyboardShortcut(

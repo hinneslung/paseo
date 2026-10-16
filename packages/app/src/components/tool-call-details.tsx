@@ -10,12 +10,14 @@ import { ScrollView as GHScrollView } from "react-native-gesture-handler";
 import { StyleSheet } from "react-native-unistyles";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import { AppearanceStyleBoundary } from "@/components/appearance-style-boundary";
 import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
+import {
+  buildPaseoToolDetailSections,
+  type PaseoToolDetailSection,
+} from "@getpaseo/protocol/paseo-tool-call-detail";
 import { buildLineDiff, parseUnifiedDiff, type DiffLine } from "@/utils/tool-call-parsers";
 import { highlightDiffLines } from "@/utils/diff-highlight";
 import { hasMeaningfulToolCallDetail } from "@/utils/tool-call-detail-state";
-import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 import { extensionFromPath, highlightToKeyedLines } from "@/utils/highlight-cache";
@@ -29,6 +31,7 @@ const ScrollView = isWeb ? RNScrollView : GHScrollView;
 // ---- Content Component ----
 
 interface ToolCallDetailsContentProps {
+  toolName?: string;
   detail?: ToolCallDetail;
   errorText?: string;
   maxHeight?: number;
@@ -46,7 +49,6 @@ interface DetailStyles {
   jsonScrollErrorCombined: StyleProp<ViewStyle>;
   fullBleedContainerStyle: StyleProp<ViewStyle>;
   loadingContainerStyle: StyleProp<ViewStyle>;
-  webScrollbarStyle: StyleProp<ViewStyle>;
   resolvedMaxHeight: number | undefined;
   shouldFill: boolean;
   isFullBleed: boolean;
@@ -70,7 +72,6 @@ function useDetailStyles(
   resolvedMaxHeight: number | undefined,
   fillAvailableHeight: boolean,
 ): DetailStyles {
-  const webScrollbarStyle = useWebScrollbarStyle();
   const isFullBleed = resolveIsFullBleed(detail);
   const shouldFill = resolveShouldFill(detail, fillAvailableHeight);
   const codeBlockStyle = isFullBleed ? styles.fullBleedBlock : styles.diffContainer;
@@ -88,35 +89,26 @@ function useDetailStyles(
       styles.codeVerticalScroll,
       resolvedMaxHeight !== undefined && inlineUnistylesStyle({ maxHeight: resolvedMaxHeight }),
       shouldFill && styles.fillHeight,
-      webScrollbarStyle,
     ],
-    [resolvedMaxHeight, shouldFill, webScrollbarStyle],
+    [resolvedMaxHeight, shouldFill],
   );
   const scrollAreaFillStyle = useMemo(
     () => [
       styles.scrollArea,
       resolvedMaxHeight !== undefined && inlineUnistylesStyle({ maxHeight: resolvedMaxHeight }),
       shouldFill && styles.fillHeight,
-      webScrollbarStyle,
     ],
-    [resolvedMaxHeight, shouldFill, webScrollbarStyle],
+    [resolvedMaxHeight, shouldFill],
   );
   const scrollAreaStyle = useMemo(
     () => [
       styles.scrollArea,
       resolvedMaxHeight !== undefined && inlineUnistylesStyle({ maxHeight: resolvedMaxHeight }),
-      webScrollbarStyle,
     ],
-    [resolvedMaxHeight, webScrollbarStyle],
+    [resolvedMaxHeight],
   );
-  const jsonScrollCombined = useMemo(
-    () => [styles.jsonScroll, webScrollbarStyle],
-    [webScrollbarStyle],
-  );
-  const jsonScrollErrorCombined = useMemo(
-    () => [styles.jsonScroll, styles.jsonScrollError, webScrollbarStyle],
-    [webScrollbarStyle],
-  );
+  const jsonScrollCombined = styles.jsonScroll;
+  const jsonScrollErrorCombined = [styles.jsonScroll, styles.jsonScrollError];
   const fullBleedContainerStyle = useMemo(
     () => [
       isFullBleed ? styles.fullBleedContainer : styles.paddedContainer,
@@ -139,7 +131,6 @@ function useDetailStyles(
     jsonScrollErrorCombined,
     fullBleedContainerStyle,
     loadingContainerStyle,
-    webScrollbarStyle,
     resolvedMaxHeight,
     shouldFill,
     isFullBleed,
@@ -179,7 +170,6 @@ function ShellDetailSection({ command, output, ds }: ShellDetailProps) {
             horizontal
             nestedScrollEnabled
             showsHorizontalScrollIndicator
-            style={ds.webScrollbarStyle}
             contentContainerStyle={styles.codeHorizontalContent}
           >
             <View style={styles.codeLine} dataSet={CODE_SURFACE_DATASET}>
@@ -224,7 +214,6 @@ function WorktreeSetupDetailSection({
             horizontal
             nestedScrollEnabled
             showsHorizontalScrollIndicator
-            style={ds.webScrollbarStyle}
             contentContainerStyle={styles.codeHorizontalContent}
           >
             <View style={styles.codeLine} dataSet={CODE_SURFACE_DATASET}>
@@ -389,7 +378,6 @@ function SubAgentDetailSection({
             horizontal
             nestedScrollEnabled
             showsHorizontalScrollIndicator
-            style={ds.webScrollbarStyle}
             contentContainerStyle={styles.codeHorizontalContent}
           >
             <View style={styles.codeLine} dataSet={CODE_SURFACE_DATASET}>
@@ -466,12 +454,7 @@ function ScrollableTextSection({
       nestedScrollEnabled
       showsVerticalScrollIndicator={true}
     >
-      <ScrollView
-        horizontal
-        nestedScrollEnabled
-        showsHorizontalScrollIndicator={true}
-        style={ds.webScrollbarStyle}
-      >
+      <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator={true}>
         {keyedLines ? (
           <HighlightedLines lines={keyedLines} startLine={startLine} />
         ) : (
@@ -501,12 +484,7 @@ function FetchDetailSection({ url, result, ds }: FetchDetailProps) {
         nestedScrollEnabled
         showsVerticalScrollIndicator
       >
-        <ScrollView
-          horizontal
-          nestedScrollEnabled
-          showsHorizontalScrollIndicator
-          style={ds.webScrollbarStyle}
-        >
+        <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator>
           <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
             {result ? `${url}\n\n${result}` : url}
           </Text>
@@ -516,12 +494,19 @@ function FetchDetailSection({ url, result, ds }: FetchDetailProps) {
   );
 }
 
-function PlainTextSection({ text }: { text: string }) {
+function ScrollablePlainTextSection({ text, ds }: { text: string; ds: DetailStyles }) {
   return (
-    <View style={styles.plainTextSection}>
-      <Text selectable style={styles.plainText}>
-        {text}
-      </Text>
+    <View style={styles.section}>
+      <ScrollView
+        style={ds.scrollAreaStyle}
+        contentContainerStyle={styles.scrollContent}
+        nestedScrollEnabled
+        showsVerticalScrollIndicator
+      >
+        <Text selectable style={styles.plainText}>
+          {text}
+        </Text>
+      </ScrollView>
     </View>
   );
 }
@@ -545,12 +530,7 @@ function buildSearchSections(detail: SearchDetail, ds: DetailStyles): ReactNode[
           nestedScrollEnabled
           showsVerticalScrollIndicator
         >
-          <ScrollView
-            horizontal
-            nestedScrollEnabled
-            showsHorizontalScrollIndicator
-            style={ds.webScrollbarStyle}
-          >
+          <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator>
             <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
               {detail.content}
             </Text>
@@ -607,13 +587,7 @@ function buildUnknownSections(detail: UnknownDetail, ds: DetailStyles, t: TFunct
     typeof detail.input === "string" && detail.output === null ? detail.input : null;
 
   if (plainInputText !== null) {
-    return [
-      <View key="unknown-plain-text" style={styles.plainTextSection}>
-        <Text selectable style={styles.plainText}>
-          {plainInputText}
-        </Text>
-      </View>,
-    ];
+    return [<ScrollablePlainTextSection key="unknown-plain-text" text={plainInputText} ds={ds} />];
   }
 
   const sectionsFromTopLevel = [
@@ -657,7 +631,42 @@ function buildUnknownSections(detail: UnknownDetail, ds: DetailStyles, t: TFunct
   return out;
 }
 
+function PaseoDetailSection({ section }: { section: PaseoToolDetailSection }) {
+  return (
+    <View style={styles.paseoSection}>
+      <Text style={styles.paseoSectionTitle}>{section.title}</Text>
+      {section.kind === "prose" ? (
+        <Text selectable style={styles.paseoProse}>
+          {section.text}
+        </Text>
+      ) : (
+        <View style={styles.paseoFields}>
+          {section.fields.map((field) => (
+            <View key={field.label} style={styles.paseoFieldRow}>
+              <Text style={styles.paseoFieldLabel}>{field.label}</Text>
+              <Text selectable style={styles.paseoFieldValue}>
+                {field.value}
+              </Text>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+function buildPaseoUnknownSections(
+  toolName: string | undefined,
+  detail: UnknownDetail,
+): ReactNode[] | null {
+  if (!toolName) return null;
+  const sections = buildPaseoToolDetailSections(toolName, detail.input, detail.output);
+  if (!sections) return null;
+  return sections.map((section) => <PaseoDetailSection key={section.title} section={section} />);
+}
+
 function buildDetailSections(
+  toolName: string | undefined,
   detail: ToolCallDetail | undefined,
   diffLines: DiffLine[] | undefined,
   ds: DetailStyles,
@@ -729,10 +738,10 @@ function buildDetailSections(
   }
   if (detail.type === "plain_text") {
     if (!detail.text) return [];
-    return [<PlainTextSection key="plain-text" text={detail.text} />];
+    return [<ScrollablePlainTextSection key="plain-text" text={detail.text} ds={ds} />];
   }
   if (detail.type === "unknown") {
-    return buildUnknownSections(detail, ds, t);
+    return buildPaseoUnknownSections(toolName, detail) ?? buildUnknownSections(detail, ds, t);
   }
   return [];
 }
@@ -741,7 +750,7 @@ function ErrorSection({ errorText, ds }: { errorText: string; ds: DetailStyles }
   const { t } = useTranslation();
   return (
     <View style={styles.section}>
-      <Text style={SECTION_TITLE_ERROR_STYLE}>{t("toolCallDetails.error")}</Text>
+      <Text style={[styles.sectionTitle, styles.errorText]}>{t("toolCallDetails.error")}</Text>
       <ScrollView
         horizontal
         nestedScrollEnabled
@@ -749,7 +758,11 @@ function ErrorSection({ errorText, ds }: { errorText: string; ds: DetailStyles }
         contentContainerStyle={styles.jsonContent}
         showsHorizontalScrollIndicator={true}
       >
-        <Text selectable style={SCROLL_TEXT_ERROR_STYLE} dataSet={CODE_SURFACE_DATASET}>
+        <Text
+          selectable
+          style={[styles.scrollText, styles.errorText]}
+          dataSet={CODE_SURFACE_DATASET}
+        >
           {errorText}
         </Text>
       </ScrollView>
@@ -767,15 +780,8 @@ function LoadingSkeleton({ containerStyle }: { containerStyle: StyleProp<ViewSty
   );
 }
 
-export function ToolCallDetailsContent({ ...props }: ToolCallDetailsContentProps) {
-  return (
-    <AppearanceStyleBoundary>
-      <ToolCallDetailsContentInner {...props} />
-    </AppearanceStyleBoundary>
-  );
-}
-
-function ToolCallDetailsContentInner({
+export function ToolCallDetailsContent({
+  toolName,
   detail,
   errorText,
   maxHeight,
@@ -787,7 +793,7 @@ function ToolCallDetailsContentInner({
   const ds = useDetailStyles(detail, resolvedMaxHeight, fillAvailableHeight);
   const diffLines = useDiffLines(detail);
 
-  const sections: ReactNode[] = buildDetailSections(detail, diffLines, ds, t);
+  const sections: ReactNode[] = buildDetailSections(toolName, detail, diffLines, ds, t);
 
   if (errorText) {
     sections.push(<ErrorSection key="error" errorText={errorText} ds={ds} />);
@@ -828,8 +834,48 @@ const styles = StyleSheet.create((theme) => {
     },
     groupHeaderText: {
       color: theme.colors.foregroundMuted,
-      fontSize: theme.fontSize.sm,
+      fontSize: theme.fontSize.base,
       fontWeight: theme.fontWeight.normal,
+    },
+    paseoSection: {
+      gap: theme.spacing[3],
+      paddingHorizontal: theme.spacing[4],
+      paddingVertical: theme.spacing[4],
+      borderBottomWidth: theme.borderWidth[1],
+      borderBottomColor: theme.colors.border,
+    },
+    paseoSectionTitle: {
+      color: theme.colors.foreground,
+      fontSize: theme.fontSize.base,
+      fontWeight: theme.fontWeight.medium,
+    },
+    paseoProse: {
+      color: theme.colors.foreground,
+      fontSize: theme.fontSize.content,
+      lineHeight: Math.round(theme.fontSize.content * 1.5),
+      overflowWrap: "anywhere",
+    },
+    paseoFields: {
+      gap: theme.spacing[3],
+    },
+    paseoFieldRow: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: theme.spacing[4],
+    },
+    paseoFieldLabel: {
+      width: 120,
+      color: theme.colors.foregroundMuted,
+      fontSize: theme.fontSize.sm,
+      lineHeight: Math.round(theme.fontSize.base * 1.5),
+    },
+    paseoFieldValue: {
+      flex: 1,
+      minWidth: 0,
+      color: theme.colors.foreground,
+      fontSize: theme.fontSize.base,
+      lineHeight: Math.round(theme.fontSize.base * 1.5),
+      overflowWrap: "anywhere",
     },
     section: {
       gap: theme.spacing[2],
@@ -837,10 +883,6 @@ const styles = StyleSheet.create((theme) => {
     fillHeight: {
       flex: 1,
       minHeight: 0,
-    },
-    plainTextSection: {
-      gap: theme.spacing[2],
-      padding: theme.spacing[3],
     },
     plainText: {
       fontFamily: theme.fontFamily.ui,
@@ -851,14 +893,14 @@ const styles = StyleSheet.create((theme) => {
     },
     sectionTitle: {
       color: theme.colors.foregroundMuted,
-      fontSize: theme.fontSize.xs,
+      fontSize: theme.fontSize.sm,
       fontWeight: theme.fontWeight.semibold,
       textTransform: "uppercase",
       letterSpacing: 0.5,
     },
     rangeText: {
       color: theme.colors.foregroundMuted,
-      fontSize: theme.fontSize.xs,
+      fontSize: theme.fontSize.sm,
     },
     diffContainer: {
       borderWidth: theme.borderWidth[1],
@@ -955,7 +997,7 @@ const styles = StyleSheet.create((theme) => {
     },
     emptyStateText: {
       color: theme.colors.foregroundMuted,
-      fontSize: theme.fontSize.sm,
+      fontSize: theme.fontSize.base,
       fontStyle: "italic",
     },
     loadingContainer: {
@@ -982,6 +1024,3 @@ const styles = StyleSheet.create((theme) => {
     },
   };
 });
-
-const SECTION_TITLE_ERROR_STYLE = [styles.sectionTitle, styles.errorText];
-const SCROLL_TEXT_ERROR_STYLE = [styles.scrollText, styles.errorText];

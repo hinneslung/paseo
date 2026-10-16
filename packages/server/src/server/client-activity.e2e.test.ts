@@ -3,7 +3,7 @@ import { createTestPaseoDaemon, type TestPaseoDaemon } from "./test-utils/paseo-
 import { DaemonClient } from "./test-utils/daemon-client.js";
 import type { AgentStreamEventPayload } from "@getpaseo/protocol/messages";
 import type { AgentSnapshotPayload } from "./messages.js";
-import type { PushNotificationSender, PushPayload } from "./push/notifications.js";
+import type { PushNotificationSender, PushPayload } from "./push/index.js";
 import { PRESENCE_THRESHOLD_MS } from "./agent-attention-policy.js";
 
 class RecordingPushNotificationSender implements PushNotificationSender {
@@ -84,14 +84,11 @@ describe("client activity tracking", () => {
         reject(new Error(`Timeout waiting for attention_required (${timeout}ms)`));
       }, timeout);
 
-      const cleanup = client.on("agent_stream", (msg) => {
-        if (msg.type !== "agent_stream") return;
-        if (msg.payload.agentId !== agentId) return;
-        if (msg.payload.event.type !== "attention_required") return;
-
+      const cleanup = client.onAgentAttentionRequired((notification) => {
+        if (notification.agentId !== agentId) return;
         clearTimeout(timer);
         cleanup();
-        resolve(msg.payload.event);
+        resolve({ type: "attention_required", ...notification });
       });
     });
   }
@@ -107,7 +104,7 @@ describe("client activity tracking", () => {
         reject(new Error(`Timeout waiting for assistant timeline (${timeout}ms)`));
       }, timeout);
 
-      const cleanup = client.on("agent_stream", (msg) => {
+      const cleanup = client.subscribeAgentTimeline(agentId, (msg) => {
         if (msg.type !== "agent_stream") return;
         if (msg.payload.agentId !== agentId) return;
         if (msg.payload.event.type !== "timeline") return;

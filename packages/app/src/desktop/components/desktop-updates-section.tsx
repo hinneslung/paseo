@@ -1,17 +1,22 @@
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, { type ReactElement, useCallback, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Text, View } from "react-native";
+import { Alert, Text, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { useTranslation } from "react-i18next";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { settingsStyles } from "@/styles/settings";
-import { SettingsSection } from "@/screens/settings/settings-section";
+import { SettingsSection } from "@/components/settings/headings/settings-section";
 import { ArrowUpRight, Copy, FileText, Activity } from "lucide-react-native";
 import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { isVersionMismatch } from "@/desktop/updates/desktop-updates";
-import { getCliDaemonStatus, shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
+import {
+  getCliDaemonStatus,
+  shouldUseDesktopDaemon,
+  confirmAndStopDesktopDaemon,
+} from "@/desktop/daemon/desktop-daemon";
 import { useBuiltInDaemonManagement } from "@/desktop/hooks/use-built-in-daemon-management";
 import { useDaemonStatus } from "@/desktop/hooks/use-daemon-status";
 import { useDesktopSettings, type DesktopSettings } from "@/desktop/settings/desktop-settings";
@@ -246,7 +251,7 @@ function DaemonInfoCard(props: DaemonInfoCardProps) {
           <Text style={styles.valueSubtext}>{daemonStatusDetailText}</Text>
         </View>
       </View>
-      <View style={ROW_WITH_BORDER_STYLE}>
+      <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
         <View style={settingsStyles.rowContent}>
           <Text style={settingsStyles.rowTitle}>{t("desktop.daemon.management.title")}</Text>
           <Text style={settingsStyles.rowHint}>{t("desktop.daemon.management.hint")}</Text>
@@ -258,7 +263,7 @@ function DaemonInfoCard(props: DaemonInfoCardProps) {
           accessibilityLabel={t("desktop.daemon.management.title")}
         />
       </View>
-      <View style={ROW_WITH_BORDER_STYLE}>
+      <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
         <View style={settingsStyles.rowContent}>
           <Text style={settingsStyles.rowTitle}>{t("desktop.daemon.keepRunning.title")}</Text>
           <Text style={settingsStyles.rowHint}>{t("desktop.daemon.keepRunning.hint")}</Text>
@@ -270,7 +275,7 @@ function DaemonInfoCard(props: DaemonInfoCardProps) {
           accessibilityLabel={t("desktop.daemon.keepRunning.title")}
         />
       </View>
-      <View style={ROW_WITH_BORDER_STYLE}>
+      <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
         <View style={settingsStyles.rowContent}>
           <Text style={settingsStyles.rowTitle}>{t("desktop.daemon.logs.title")}</Text>
           <Text style={settingsStyles.rowHint}>
@@ -294,7 +299,7 @@ function DaemonInfoCard(props: DaemonInfoCardProps) {
           </Button>
         </View>
       </View>
-      <View style={ROW_WITH_BORDER_STYLE}>
+      <View style={[settingsStyles.row, settingsStyles.rowBorder]}>
         <View style={settingsStyles.rowContent}>
           <Text style={settingsStyles.rowTitle}>{t("desktop.daemon.fullStatus.title")}</Text>
           <Text style={settingsStyles.rowHint}>{t("desktop.daemon.fullStatus.hint")}</Text>
@@ -329,6 +334,17 @@ export function LocalDaemonSection() {
   const daemonStatus = data?.status ?? null;
   const daemonLogs = data?.logs ?? null;
   const daemonVersion = daemonStatus?.version ?? null;
+  const [isStopping, setIsStopping] = useState(false);
+  const handleStop = useCallback(() => {
+    setIsStopping(true);
+    void confirmAndStopDesktopDaemon()
+      .then((status) => {
+        if (status) setStatus(status);
+        return undefined;
+      })
+      .catch((error) => Alert.alert(t("desktop.daemon.lifecycle.stopFailed"), String(error)))
+      .finally(() => setIsStopping(false));
+  }, [setStatus, t]);
 
   const daemonVersionMismatch = isVersionMismatch(appVersion, daemonVersion);
   const daemonStatusStateText =
@@ -420,8 +436,8 @@ export function LocalDaemonSection() {
       testID="host-page-daemon-lifecycle-card"
     >
       {isLoading || isLoadingSettings ? (
-        <View style={LOADING_CARD_STYLE}>
-          <ActivityIndicator size="small" color={theme.colors.foregroundMuted} />
+        <View style={[settingsStyles.card, styles.loadingCard]}>
+          <LoadingSpinner size="small" color={theme.colors.foregroundMuted} />
         </View>
       ) : (
         <>
@@ -443,6 +459,26 @@ export function LocalDaemonSection() {
             handleRunCliStatus={handleRunCliStatus}
             isLoadingCliStatus={isLoadingCliStatus}
           />
+
+          {daemonStatus?.pid ? (
+            <View style={settingsStyles.card}>
+              <View style={settingsStyles.row}>
+                <View style={settingsStyles.rowContent}>
+                  <Text style={settingsStyles.rowTitle}>
+                    {daemonStatus.ownedByDesktop
+                      ? t("desktop.daemon.lifecycle.owned")
+                      : t("desktop.daemon.lifecycle.attached")}
+                  </Text>
+                  <Text style={settingsStyles.rowHint}>{daemonStatus.home}</Text>
+                </View>
+                <Button variant="outline" size="sm" onPress={handleStop} disabled={isStopping}>
+                  {isStopping
+                    ? t("desktop.daemon.lifecycle.stopping")
+                    : t("desktop.daemon.lifecycle.stop")}
+                </Button>
+              </View>
+            </View>
+          ) : null}
 
           {daemonVersionMismatch ? (
             <View style={styles.warningCard}>
@@ -488,11 +524,11 @@ const styles = StyleSheet.create((theme) => ({
   },
   valueText: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
   valueSubtext: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
   },
   warningCard: {
     marginTop: theme.spacing[3],
@@ -505,7 +541,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   warningText: {
     color: theme.colors.palette.amber[500],
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
   },
   modalBody: {
     gap: theme.spacing[3],
@@ -513,7 +549,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   logOutput: {
     color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.xs,
+    fontSize: theme.fontSize.sm,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     lineHeight: 18,
   },
@@ -524,7 +560,5 @@ const styles = StyleSheet.create((theme) => ({
   },
 }));
 
-const LOADING_CARD_STYLE = [settingsStyles.card, styles.loadingCard];
-const ROW_WITH_BORDER_STYLE = [settingsStyles.row, settingsStyles.rowBorder];
 const LOGS_MODAL_SNAP_POINTS = ["70%", "92%"];
 const CLI_STATUS_MODAL_SNAP_POINTS = ["60%", "85%"];

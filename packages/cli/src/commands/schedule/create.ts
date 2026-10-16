@@ -18,6 +18,7 @@ export interface ScheduleCreateOptions extends ScheduleCommandOptions {
   target?: string;
   provider?: string;
   mode?: string;
+  thinking?: string;
   cwd?: string;
   maxRuns?: string;
   expiresIn?: string;
@@ -40,13 +41,14 @@ export async function runCreateCommand(
     target: options.target,
     provider: options.provider,
     mode: options.mode,
+    thinking: options.thinking,
     cwd: options.cwd,
-    host: options.host,
+    daemonTarget: options.daemonTarget,
     maxRuns: options.maxRuns,
     expiresIn: options.expiresIn,
     runNow,
   });
-  const { client } = await connectScheduleClient(options.host);
+  const { client } = await connectScheduleClient(options.daemonTarget);
   try {
     const payload = await client.scheduleCreate(input);
     if (payload.error || !payload.schedule) {

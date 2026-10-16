@@ -3,7 +3,10 @@ import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
 import {
   composeWorkspaceStructure,
+  createWorkspaceStructureProjectsSelector,
   selectHasHydratedWorkspaces,
+  selectHydratedWorkspaceServerIds,
+  selectWorkspaceDirectoryServerIds,
   selectHasWorkspaces,
   selectProjectOrder,
   selectRecommendedProjectPaths,
@@ -12,9 +15,8 @@ import {
   selectWorkspaceExists,
   selectWorkspaceFields,
   selectWorkspaceKeys,
-  selectWorkspaceOrderByScopeForServer,
+  selectWorkspaceOrderByScope,
   selectWorkspaceStatusesForBadges,
-  selectWorkspaceStructureProjects,
   workspaceEqualityFns,
   type WorkspaceStructure,
 } from "./selectors";
@@ -70,6 +72,22 @@ export function useHasHydratedWorkspaces(serverId: string | null): boolean {
   );
 }
 
+export function useHydratedWorkspaceServerIds(serverIds: string[]): string[] {
+  return useStoreWithEqualityFn(
+    useSessionStore,
+    (state) => selectHydratedWorkspaceServerIds(state, serverIds),
+    workspaceEqualityFns.deep,
+  );
+}
+
+export function useWorkspaceDirectoryServerIds(serverIds: string[]): string[] {
+  return useStoreWithEqualityFn(
+    useSessionStore,
+    (state) => selectWorkspaceDirectoryServerIds(state, serverIds),
+    workspaceEqualityFns.deep,
+  );
+}
+
 export function useWorkspaceDirectory(
   serverId: string | null,
   workspaceId: string | null,
@@ -81,32 +99,35 @@ export function useWorkspaceDirectory(
   );
 }
 
-export function useWorkspaceStructure(serverId: string | null): WorkspaceStructure {
+export function useWorkspaceStructure(serverIds: string[]): WorkspaceStructure {
+  const selectProjects = useMemo(
+    () => createWorkspaceStructureProjectsSelector(serverIds),
+    [serverIds],
+  );
   const projects = useStoreWithEqualityFn(
     useSessionStore,
-    (state) => selectWorkspaceStructureProjects(state, serverId),
+    selectProjects,
     workspaceEqualityFns.deep,
   );
   const projectOrder = useStoreWithEqualityFn(
     useSidebarOrderStore,
-    (state) => selectProjectOrder(state, serverId),
+    (state) => selectProjectOrder(state),
     workspaceEqualityFns.deep,
   );
   const workspaceOrderByScope = useStoreWithEqualityFn(
     useSidebarOrderStore,
-    (state) => selectWorkspaceOrderByScopeForServer(state, serverId),
+    (state) => selectWorkspaceOrderByScope(state),
     workspaceEqualityFns.deep,
   );
 
   return useMemo(
     () =>
       composeWorkspaceStructure({
-        serverId,
         projects,
         projectOrder,
         workspaceOrderByScope,
       }),
-    [projectOrder, projects, serverId, workspaceOrderByScope],
+    [projectOrder, projects, workspaceOrderByScope],
   );
 }
 

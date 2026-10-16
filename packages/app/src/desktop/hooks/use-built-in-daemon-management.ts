@@ -34,6 +34,7 @@ interface UseBuiltInDaemonManagementInput {
 interface UseBuiltInDaemonManagementResult {
   isUpdating: boolean;
   toggle: () => void;
+  enable: () => Promise<DaemonManagementToggleResult | null>;
 }
 
 export function useBuiltInDaemonManagement(
@@ -42,25 +43,37 @@ export function useBuiltInDaemonManagement(
   const { t } = useTranslation();
   const { daemonStatus, settings, updateSettings, setStatus, refreshStatus } = input;
   const reportError = useDesktopIpcErrorReporter();
-  const { mutate: toggleDaemonManagement, isPending: isUpdating } = useMutation<
-    DaemonManagementToggleResult,
-    Error
-  >({
-    mutationFn: async () => {
-      const wasManagingDaemon = settings.manageBuiltInDaemon;
+  const {
+    mutate: toggleDaemonManagement,
+    mutateAsync: toggleDaemonManagementAsync,
+    isPending: isUpdating,
+  } = useMutation<DaemonManagementToggleResult, Error, { forceEnable: boolean }>({
+    mutationFn: async ({ forceEnable }) => {
+      // forceEnable takes the enable branch regardless of the persisted
+      // setting — the recovery affordance must never reach the stop/confirm
+      // path even if manageBuiltInDaemon was left true.
+      const wasManagingDaemon = forceEnable ? false : settings.manageBuiltInDaemon;
       try {
         const result = await executeDaemonManagementToggle(wasManagingDaemon, daemonStatus, {
           confirm: () =>
             confirmDialog({
               title: t("desktop.daemon.management.pauseTitle"),
-              message: t("desktop.daemon.management.pauseMessage"),
-              confirmLabel: t("desktop.daemon.management.pauseAndStop"),
+              message: t(
+                daemonStatus?.ownedByDesktop
+                  ? "desktop.daemon.management.pauseMessage"
+                  : "desktop.daemon.lifecycle.pauseAttached",
+              ),
+              confirmLabel: t(
+                daemonStatus?.ownedByDesktop
+                  ? "desktop.daemon.management.pauseAndStop"
+                  : "desktop.daemon.lifecycle.pause",
+              ),
               cancelLabel: t("common.actions.cancel"),
               destructive: true,
             }),
           persistSettings: (next) => updateSettings(next) as Promise<void>,
           startDaemon: startDesktopDaemon,
-          stopDaemon: stopDesktopDaemon,
+          stopDaemon: () => stopDesktopDaemon("settings"),
         });
         if (result.kind === "enabled") {
           const upsertResult = await upsertDesktopDaemonConnection(
@@ -109,8 +122,21 @@ export function useBuiltInDaemonManagement(
       return;
     }
 
-    toggleDaemonManagement();
+    toggleDaemonManagement({ forceEnable: false });
   }, [isUpdating, toggleDaemonManagement]);
 
-  return { isUpdating, toggle };
+  const enable = useCallback(async () => {
+    if (isUpdating) {
+      return null;
+    }
+
+    try {
+      return await toggleDaemonManagementAsync({ forceEnable: true });
+    } catch {
+      // onError has already surfaced the failure; callers only act on success.
+      return null;
+    }
+  }, [isUpdating, toggleDaemonManagementAsync]);
+
+  return { isUpdating, toggle, enable };
 }

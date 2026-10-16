@@ -1,29 +1,28 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { createPaseoDaemon } from "./bootstrap.js";
+import { createPaseoDaemon, formatListenTarget } from "./bootstrap.js";
 import { loadConfig } from "./config.js";
 import { resolvePaseoHome } from "./paseo-home.js";
 import { createRootLogger } from "./logger.js";
 import type { DaemonLifecycleIntent } from "./bootstrap.js";
+import { getProcessDiagnostics } from "./process-diagnostics.js";
 
 process.title = "Paseo Daemon";
 
 type SupervisorLifecycleMessage =
   | {
       type: "paseo:shutdown";
+      reason: string;
     }
   | {
       type: "paseo:ready";
       listen: string;
+      serverId: string;
     }
   | {
       type: "paseo:restart";
       reason?: string;
     };
-
-interface SupervisorHeartbeatMessage {
-  type: "paseo:supervisor-heartbeat";
-}
 
 interface BootstrapResult {
   paseoHome: string;
@@ -82,17 +81,50 @@ function bootstrapFromEnvironment(): BootstrapResult {
 }
 
 function applyCliFlagOverrides(config: ReturnType<typeof loadConfig>): void {
+  const configReload = config.configReload;
+  if (!configReload) throw new Error("Loaded daemon config is missing reload metadata");
+  const cli = (configReload.cli ??= {});
+  const override = (configPath: string) => {
+    if (!configReload.overrideControlledPaths.includes(configPath)) {
+      configReload.overrideControlledPaths.push(configPath);
+    }
+  };
+  if (process.argv.includes("--relay")) {
+    config.relayEnabled = true;
+    config.relayEnabledMutable = false;
+    cli.relayEnabled = true;
+    override("daemon.relay.enabled");
+  }
   if (process.argv.includes("--no-relay")) {
     config.relayEnabled = false;
+    config.relayEnabledMutable = false;
+    cli.relayEnabled = false;
+    override("daemon.relay.enabled");
   }
   if (process.argv.includes("--relay-use-tls")) {
     config.relayUseTls = true;
+    cli.relayUseTls = true;
+    override("daemon.relay.useTls");
   }
   if (process.argv.includes("--no-mcp")) {
     config.mcpEnabled = false;
+    cli.mcpEnabled = false;
+    override("daemon.mcp.enabled");
   }
   if (process.argv.includes("--no-inject-mcp")) {
     config.mcpInjectIntoAgents = false;
+    cli.mcpInjectIntoAgents = false;
+    override("daemon.mcp.injectIntoAgents");
+  }
+  if (process.argv.includes("--web-ui")) {
+    config.webUi = { ...(config.webUi ?? { distDir: null }), enabled: true };
+    cli.webUiEnabled = true;
+    override("features.webUi.enabled");
+  }
+  if (process.argv.includes("--no-web-ui")) {
+    config.webUi = { ...(config.webUi ?? { distDir: null }), enabled: false };
+    cli.webUiEnabled = false;
+    override("features.webUi.enabled");
   }
 }
 
@@ -117,15 +149,23 @@ async function main() {
   const beginShutdown = (
     signal: string,
     options?: {
+      reason?: string;
       successExitCode?: number;
     },
   ) => {
+    const reason = options?.reason ?? `worker_received_${signal}`;
     if (!shutdownPromise) {
-      logger.info(`${signal} received, shutting down gracefully...`);
+      logger.info(
+        { signal, reason, ...getProcessDiagnostics() },
+        `${signal} received, shutting down gracefully...`,
+      );
 
       shutdownPromise = (async () => {
         const forceExit = setTimeout(() => {
-          logger.warn("Forcing shutdown - HTTP server didn't close in time");
+          logger.warn(
+            { signal, reason, ...getProcessDiagnostics() },
+            "Forcing shutdown - HTTP server didn't close in time",
+          );
           process.exit(1);
         }, 10000);
 
@@ -146,7 +186,10 @@ async function main() {
         }
       })();
     } else {
-      logger.info(`${signal} received while shutdown is already in progress`);
+      logger.info(
+        { signal, reason, ...getProcessDiagnostics() },
+        `${signal} received while shutdown is already in progress`,
+      );
     }
 
     installExitHook();
@@ -168,13 +211,13 @@ async function main() {
   const handleLifecycleIntent = (intent: DaemonLifecycleIntent) => {
     if (intent.type === "shutdown") {
       logger.warn(
-        { clientId: intent.clientId, requestId: intent.requestId },
+        { clientId: intent.clientId, requestId: intent.requestId, reason: intent.reason },
         "Shutdown requested via websocket",
       );
-      if (sendSupervisorLifecycleMessage({ type: "paseo:shutdown" })) {
+      if (sendSupervisorLifecycleMessage({ type: "paseo:shutdown", reason: intent.reason })) {
         return;
       }
-      beginShutdown("shutdown lifecycle intent");
+      beginShutdown("shutdown lifecycle intent", { reason: intent.reason });
       return;
     }
 
@@ -190,7 +233,10 @@ async function main() {
     ) {
       return;
     }
-    beginShutdown("restart lifecycle intent", { successExitCode: 0 });
+    beginShutdown("restart lifecycle intent", {
+      reason: intent.reason,
+      successExitCode: 0,
+    });
   };
 
   const installSupervisorLivenessGuard = () => {
@@ -209,6 +255,7 @@ async function main() {
 
       writeWorkerLifecycleLog(paseoHome, "Supervisor liveness lost; worker exiting", {
         reason,
+        ...getProcessDiagnostics(),
         supervisorPid,
         currentParentPid: process.ppid,
         ipcConnected: typeof process.connected === "boolean" ? process.connected : null,
@@ -222,13 +269,19 @@ async function main() {
     };
 
     process.on("message", (message: unknown) => {
-      if (
-        typeof message === "object" &&
-        message !== null &&
-        "type" in message &&
-        (message as SupervisorHeartbeatMessage).type === "paseo:supervisor-heartbeat"
-      ) {
+      if (typeof message !== "object" || message === null || !("type" in message)) {
+        return;
+      }
+      const type = (message as { type?: unknown }).type;
+      if (type === "paseo:supervisor-heartbeat") {
         lastSupervisorHeartbeatAt = Date.now();
+        return;
+      }
+      if (type === "paseo:graceful-shutdown") {
+        const reason = (message as { reason?: unknown }).reason;
+        beginShutdown("Supervisor shutdown request", {
+          reason: typeof reason === "string" ? reason : "supervisor_requested_shutdown",
+        });
       }
     });
     process.on("disconnect", () => exitAfterSupervisorLoss("ipc_disconnect_event"));
@@ -271,14 +324,15 @@ async function main() {
   try {
     await daemon.start();
     const listenTarget = daemon.getListenTarget();
-    const listen =
-      listenTarget?.type === "tcp"
-        ? `${listenTarget.host}:${listenTarget.port}`
-        : listenTarget?.path;
+    const listen = formatListenTarget(listenTarget);
     if (!listen) {
       throw new Error("Daemon did not expose a listen target after startup");
     }
-    sendSupervisorLifecycleMessage({ type: "paseo:ready", listen });
+    sendSupervisorLifecycleMessage({
+      type: "paseo:ready",
+      listen,
+      serverId: daemon.getServerId(),
+    });
   } catch (err) {
     logger.fatal({ err }, "Daemon failed to start listening");
     throw err;

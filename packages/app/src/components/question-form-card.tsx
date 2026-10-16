@@ -1,12 +1,6 @@
-import { useState, useCallback, useMemo } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  Pressable,
-  ActivityIndicator,
-  type PressableStateCallbackType,
-} from "react-native";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { useState, useCallback, useMemo, useRef, type RefObject } from "react";
+import { View, Text, Pressable, type PressableStateCallbackType } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { Check, X } from "lucide-react-native";
@@ -14,6 +8,8 @@ import { useTranslation } from "react-i18next";
 import type { PendingPermission } from "@/types/shared";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { isWeb } from "@/constants/platform";
+import { EditingTextInput as TextInput } from "@/components/ui/text-input";
+import type { EditingTextInputHandle } from "@/components/ui/text-input/types";
 import {
   areQuestionsAnswered,
   buildQuestionFormAnswers,
@@ -85,37 +81,59 @@ function QuestionOptionRow({
   );
 
   const optionLabelStyle = useMemo(
-    () => [styles.optionLabel, { color: theme.colors.foreground }],
-    [theme.colors.foreground],
+    () => [
+      styles.optionLabel,
+      { color: isSelected ? theme.colors.foreground : theme.colors.foregroundMuted },
+    ],
+    [isSelected, theme.colors.foreground, theme.colors.foregroundMuted],
   );
   const optionDescriptionStyle = useMemo(
     () => [styles.optionDescription, { color: theme.colors.foregroundMuted }],
     [theme.colors.foregroundMuted],
   );
-  const accessibilityState = useMemo(() => ({ selected: isSelected }), [isSelected]);
+  const accessibilityState = useMemo(() => ({ checked: isSelected }), [isSelected]);
+
+  // Static left-side control: square for multi-select, circle for single-select.
+  // Always rendered so toggling only swaps fill/border — the row never reflows.
+  const controlStyle = useMemo(
+    () => [
+      styles.selectionControl,
+      multiSelect ? styles.selectionControlCheckbox : styles.selectionControlRadio,
+      {
+        borderColor: isSelected ? theme.colors.accent : theme.colors.foregroundExtraMuted,
+        backgroundColor: isSelected && multiSelect ? theme.colors.accent : "transparent",
+      },
+    ],
+    [isSelected, multiSelect, theme.colors.accent, theme.colors.foregroundExtraMuted],
+  );
+  const radioDotStyle = useMemo(
+    () => [styles.selectionRadioDot, { backgroundColor: theme.colors.accent }],
+    [theme.colors.accent],
+  );
 
   return (
     <Pressable
       style={pressableStyle}
       onPress={handlePress}
       disabled={isResponding}
-      accessibilityRole="button"
+      accessibilityRole={multiSelect ? "checkbox" : "radio"}
       accessibilityLabel={option.label}
       accessibilityState={accessibilityState}
-      aria-selected={isSelected}
+      aria-checked={isSelected}
     >
       <View style={styles.optionItemContent}>
+        <View style={controlStyle}>
+          {isSelected && multiSelect ? (
+            <Check size={12} color={theme.colors.accentForeground} />
+          ) : null}
+          {isSelected && !multiSelect ? <View style={radioDotStyle} /> : null}
+        </View>
         <View style={styles.optionTextBlock}>
           <Text style={optionLabelStyle}>{option.label}</Text>
           {option.description ? (
             <Text style={optionDescriptionStyle}>{option.description}</Text>
           ) : null}
         </View>
-        {isSelected ? (
-          <View style={styles.optionCheckSlot}>
-            <Check size={16} color={theme.colors.foregroundMuted} />
-          </View>
-        ) : null}
       </View>
     </Pressable>
   );
@@ -124,7 +142,9 @@ function QuestionOptionRow({
 interface QuestionNavButtonProps {
   index: number;
   total: number;
+  header: string;
   isActive: boolean;
+  isAnswered: boolean;
   isResponding: boolean;
   onSelect: (index: number) => void;
 }
@@ -132,7 +152,9 @@ interface QuestionNavButtonProps {
 function QuestionNavButton({
   index,
   total,
+  header,
   isActive,
+  isAnswered,
   isResponding,
   onSelect,
 }: QuestionNavButtonProps) {
@@ -171,7 +193,7 @@ function QuestionNavButton({
 
   return (
     <Pressable
-      accessibilityRole="button"
+      accessibilityRole="tab"
       accessibilityLabel={`Question ${index + 1} of ${total}`}
       accessibilityState={accessibilityState}
       aria-selected={isActive}
@@ -180,13 +202,64 @@ function QuestionNavButton({
       onPress={handlePress}
       disabled={isResponding}
     >
-      <Text style={textStyle}>{index + 1}</Text>
+      {isAnswered ? (
+        <Check
+          size={12}
+          color={isActive ? theme.colors.foreground : theme.colors.foregroundMuted}
+        />
+      ) : null}
+      <Text style={textStyle} numberOfLines={1}>
+        {header}
+      </Text>
     </Pressable>
+  );
+}
+
+interface QuestionNavProps {
+  questions: QuestionFormQuestion[];
+  activeIndex: number;
+  isAnswered: (qIndex: number) => boolean;
+  isResponding: boolean;
+  onSelect: (index: number) => void;
+}
+
+// Titled tabs (one per question header) with a check on answered ones. Hidden for
+// a lone question — a single "1 of 1" tab carries no information.
+function QuestionNav({
+  questions,
+  activeIndex,
+  isAnswered,
+  isResponding,
+  onSelect,
+}: QuestionNavProps) {
+  if (questions.length <= 1) {
+    return null;
+  }
+  return (
+    <View
+      style={styles.questionNav}
+      testID="question-form-question-nav"
+      accessibilityRole="tablist"
+    >
+      {questions.map((question, qIndex) => (
+        <QuestionNavButton
+          key={question.header}
+          index={qIndex}
+          total={questions.length}
+          header={question.header}
+          isActive={qIndex === activeIndex}
+          isAnswered={isAnswered(qIndex)}
+          isResponding={isResponding}
+          onSelect={onSelect}
+        />
+      ))}
+    </View>
   );
 }
 
 interface QuestionOtherInputProps {
   qIndex: number;
+  inputRef: RefObject<EditingTextInputHandle | null>;
   accessibilityLabel: string;
   value: string;
   placeholder: string;
@@ -197,6 +270,7 @@ interface QuestionOtherInputProps {
 
 function QuestionOtherInput({
   qIndex,
+  inputRef,
   accessibilityLabel,
   value,
   placeholder,
@@ -232,12 +306,13 @@ function QuestionOtherInput({
   );
   return (
     <TextInput
+      ref={inputRef}
       // @ts-expect-error - outlineStyle is web-only
       style={otherInputStyle}
       accessibilityLabel={accessibilityLabel}
       placeholder={placeholder}
       placeholderTextColor={theme.colors.foregroundMuted}
-      value={value}
+      initialValue={value}
       onChangeText={handleChange}
       onSubmitEditing={onSubmit}
       editable={!isResponding}
@@ -257,6 +332,7 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
 
   const [selections, setSelections] = useState<Record<number, Set<number>>>({});
   const [otherTexts, setOtherTexts] = useState<Record<number, string>>({});
+  const otherInputRef = useRef<EditingTextInputHandle | null>(null);
   const [respondingAction, setRespondingAction] = useState<"submit" | "dismiss" | null>(null);
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
 
@@ -278,29 +354,40 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
       }
 
       setSelections((prev) => ({ ...prev, [qIndex]: next }));
-      setOtherTexts((prev) => {
-        if (!prev[qIndex]) return prev;
-        const nextTexts = { ...prev };
-        delete nextTexts[qIndex];
-        return nextTexts;
-      });
+
+      // Single-select: an option and a custom answer replace each other, as in Claude Code.
+      // Multi-select keeps both. The editing surface owns its text and never replays state
+      // (docs/forms.md), so clearing state alone would leave stale text on screen that
+      // submit ignores; clear the surface explicitly.
+      if (!multiSelect && otherTexts[qIndex]) {
+        setOtherTexts((prev) => {
+          const nextTexts = { ...prev };
+          delete nextTexts[qIndex];
+          return nextTexts;
+        });
+        otherInputRef.current?.replaceText("");
+      }
 
       if (!multiSelect && next.size > 0 && qIndex === activeQuestionIndex && questions) {
         setActiveQuestionIndex(Math.min(qIndex + 1, questions.length - 1));
       }
     },
-    [activeQuestionIndex, questions, selections],
+    [activeQuestionIndex, otherTexts, questions, selections],
   );
 
-  const setOtherText = useCallback((qIndex: number, text: string) => {
-    setOtherTexts((prev) => ({ ...prev, [qIndex]: text }));
-    if (text.length > 0) {
-      setSelections((prev) => {
-        if (!prev[qIndex] || prev[qIndex].size === 0) return prev;
-        return { ...prev, [qIndex]: new Set<number>() };
-      });
-    }
-  }, []);
+  const setOtherText = useCallback(
+    (qIndex: number, text: string) => {
+      setOtherTexts((prev) => ({ ...prev, [qIndex]: text }));
+      const multiSelect = questions?.[qIndex]?.multiSelect ?? false;
+      if (!multiSelect && text.length > 0) {
+        setSelections((prev) => {
+          if (!prev[qIndex] || prev[qIndex].size === 0) return prev;
+          return { ...prev, [qIndex]: new Set<number>() };
+        });
+      }
+    },
+    [questions],
+  );
 
   const allAnswered = areQuestionsAnswered(questions, selections, otherTexts);
   const resolvedActiveQuestionIndex = questions
@@ -355,6 +442,12 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
     setActiveQuestionIndex(index);
   }, []);
 
+  const navIsAnswered = useCallback(
+    (qIndex: number) =>
+      questions ? isQuestionAnswered(questions[qIndex], qIndex, selections, otherTexts) : false,
+    [questions, selections, otherTexts],
+  );
+
   const handlePrimaryAction = useCallback(() => {
     if (!isLastQuestion) {
       if (!activeQuestionAnswered || isResponding) return;
@@ -407,9 +500,16 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
     () => [styles.questionText, { color: theme.colors.foreground }],
     [theme.colors.foreground],
   );
-  const questionNavStyle = useMemo(
-    () => [styles.questionNav, isMobile && styles.questionNavMobile],
-    [isMobile],
+  // Single-select radios need a group; checkboxes are valid standalone.
+  const optionsGroupAccessibility = useMemo(
+    () =>
+      activeQuestion && !activeQuestion.multiSelect
+        ? ({
+            accessibilityRole: "radiogroup",
+            accessibilityLabel: activeQuestion.question,
+          } as const)
+        : {},
+    [activeQuestion],
   );
   const actionsContainerStyle = useMemo(
     () => [styles.actionsContainer, !isMobile && styles.actionsContainerDesktop],
@@ -436,33 +536,23 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
 
   return (
     <View style={containerStyle} testID="question-form-card">
-      <View style={styles.questionTopRow}>
-        <View style={styles.questionHeader}>
-          <Text testID="question-form-current-question" style={questionTextStyle}>
-            {activeQuestion?.question}
-          </Text>
-        </View>
-        <View style={questionNavStyle} testID="question-form-question-nav">
-          {questions.map((question, qIndex) => {
-            const isActive = qIndex === resolvedActiveQuestionIndex;
-            return (
-              <QuestionNavButton
-                key={question.header}
-                index={qIndex}
-                total={questions.length}
-                isActive={isActive}
-                isResponding={isResponding}
-                onSelect={handleSelectQuestion}
-              />
-            );
-          })}
-        </View>
+      <QuestionNav
+        questions={questions}
+        activeIndex={resolvedActiveQuestionIndex}
+        isAnswered={navIsAnswered}
+        isResponding={isResponding}
+        onSelect={handleSelectQuestion}
+      />
+      <View style={styles.questionHeader}>
+        <Text testID="question-form-current-question" style={questionTextStyle}>
+          {activeQuestion?.question}
+        </Text>
       </View>
 
       {activeQuestion ? (
         <View key={activeQuestion.question} style={styles.questionBlock}>
           {activeQuestion.options.length > 0 ? (
-            <View style={styles.optionsWrap}>
+            <View style={styles.optionsWrap} {...optionsGroupAccessibility}>
               {activeQuestion.options.map((opt, optIndex) => (
                 <QuestionOptionRow
                   key={opt.label}
@@ -480,6 +570,7 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
           {showTextInput ? (
             <QuestionOtherInput
               qIndex={resolvedActiveQuestionIndex}
+              inputRef={otherInputRef}
               accessibilityLabel={activeQuestion.question}
               value={otherText}
               placeholder={getQuestionInputPlaceholder({
@@ -505,7 +596,7 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
           testID="question-form-dismiss"
         >
           {respondingAction === "dismiss" ? (
-            <ActivityIndicator size="small" color={theme.colors.foregroundMuted} />
+            <LoadingSpinner size="small" color={theme.colors.foregroundMuted} />
           ) : (
             <View style={styles.actionContent}>
               <X size={14} color={theme.colors.foregroundMuted} />
@@ -523,7 +614,7 @@ export function QuestionFormCard({ permission, onRespond, isResponding }: Questi
           testID="question-form-primary-action"
         >
           {respondingAction === "submit" ? (
-            <ActivityIndicator size="small" color={theme.colors.accentForeground} />
+            <LoadingSpinner size="small" color={theme.colors.accentForeground} />
           ) : (
             <View style={styles.actionContent}>
               <Check size={14} color={submitActionTextColor} />
@@ -546,12 +637,6 @@ const styles = StyleSheet.create((theme) => ({
   questionBlock: {
     gap: theme.spacing[2],
   },
-  questionTopRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: theme.spacing[3],
-  },
   questionHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -563,7 +648,7 @@ const styles = StyleSheet.create((theme) => ({
   questionText: {
     flex: 1,
     fontSize: theme.fontSize.base,
-    fontWeight: theme.fontWeight.medium,
+    fontWeight: theme.fontWeight.normal,
     lineHeight: 22,
   },
   optionsWrap: {
@@ -571,24 +656,24 @@ const styles = StyleSheet.create((theme) => ({
   },
   questionNav: {
     flexDirection: "row",
+    flexWrap: "wrap",
     alignItems: "center",
-    justifyContent: "flex-end",
     gap: theme.spacing[1],
-  },
-  questionNavMobile: {
-    paddingRight: theme.spacing[1],
+    paddingHorizontal: theme.spacing[3],
   },
   questionNavButton: {
-    minWidth: 28,
-    height: 28,
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 999,
+    gap: theme.spacing[1],
+    minHeight: 28,
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
+    borderRadius: theme.borderRadius.md,
     borderWidth: theme.borderWidth[1],
   },
   questionNavText: {
-    fontSize: theme.fontSize.xs,
-    fontWeight: "700",
+    fontSize: theme.fontSize.base,
+    fontWeight: theme.fontWeight.normal,
   },
   optionItem: {
     flexDirection: "row",
@@ -603,32 +688,47 @@ const styles = StyleSheet.create((theme) => ({
   optionItemContent: {
     flex: 1,
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: theme.spacing[2],
   },
   optionTextBlock: {
     flex: 1,
-    gap: 2,
+    gap: theme.spacing[1],
   },
   optionLabel: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
+    fontWeight: theme.fontWeight.normal,
+    lineHeight: 22,
   },
   optionDescription: {
-    fontSize: theme.fontSize.xs,
-    lineHeight: 16,
+    fontSize: theme.fontSize.base,
+    lineHeight: 20,
   },
-  optionCheckSlot: {
-    width: 16,
+  selectionControl: {
+    width: 18,
+    height: 18,
     alignItems: "center",
     justifyContent: "center",
-    marginLeft: "auto",
+    borderWidth: theme.borderWidth[1],
+    marginTop: 2, // optical-align 18px control to the 22px label first line
+  },
+  selectionControlCheckbox: {
+    borderRadius: theme.borderRadius.base,
+  },
+  selectionControlRadio: {
+    borderRadius: 999,
+  },
+  selectionRadioDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
   },
   otherInput: {
     borderWidth: 1,
     borderRadius: theme.borderRadius.lg,
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[3],
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
   actionsContainer: {
     gap: theme.spacing[2],
@@ -651,6 +751,6 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
   },
   actionText: {
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
   },
 }));

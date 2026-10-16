@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  formatAgentModeLabel,
   getFeatureHighlightColor,
   getFeatureTooltip,
   getAgentControlHintKey,
-  formatThinkingOptionLabel,
+  isFeatureActive,
   normalizeModelId,
   resolveAgentModelSelection,
 } from "./utils";
@@ -37,8 +36,31 @@ describe("feature metadata helpers", () => {
 
   it("maps feature highlight colors by feature id", () => {
     expect(getFeatureHighlightColor("fast_mode")).toBe("yellow");
+    expect(getFeatureHighlightColor("service_tier")).toBe("yellow");
     expect(getFeatureHighlightColor("plan_mode")).toBe("blue");
     expect(getFeatureHighlightColor("other")).toBe("default");
+  });
+
+  it("treats a select feature as active when a non-default option is selected", () => {
+    const speed = {
+      type: "select" as const,
+      id: "service_tier",
+      label: "Speed",
+      options: [
+        { id: "default", label: "Normal", isDefault: true },
+        { id: "fast", label: "Fast" },
+      ],
+    };
+    expect(isFeatureActive({ ...speed, value: "default" })).toBe(false);
+    expect(isFeatureActive({ ...speed, value: "fast" })).toBe(true);
+    expect(
+      isFeatureActive({
+        type: "toggle",
+        id: "fast_mode",
+        label: "Fast",
+        value: true,
+      }),
+    ).toBe(true);
   });
 });
 
@@ -54,37 +76,30 @@ describe("normalizeModelId", () => {
   });
 });
 
-describe("formatAgentModeLabel", () => {
-  it("sentence-cases provider mode labels", () => {
-    expect(formatAgentModeLabel({ id: "plan", label: "Plan" })).toBe("Plan");
-    expect(formatAgentModeLabel({ id: "full-access", label: "Full Access" })).toBe("Full access");
-    expect(formatAgentModeLabel({ id: "auto-review", label: "Auto-review" })).toBe("Auto-review");
-    expect(formatAgentModeLabel({ id: "read_only", label: "read_only" })).toBe("Read only");
-    expect(formatAgentModeLabel({ id: "acceptEdits", label: "acceptEdits" })).toBe("Accept edits");
-  });
-
-  it("splits compact mode ids when no provider label is available", () => {
-    expect(formatAgentModeLabel({ id: "auto-review" })).toBe("Auto review");
-  });
-});
-
-describe("formatThinkingOptionLabel", () => {
-  it("formats compact thinking option labels for display", () => {
-    expect(formatThinkingOptionLabel({ id: "none", label: "none" })).toBe("None");
-    expect(formatThinkingOptionLabel({ id: "low", label: "low" })).toBe("Low");
-    expect(formatThinkingOptionLabel({ id: "medium", label: "medium" })).toBe("Medium");
-    expect(formatThinkingOptionLabel({ id: "high", label: "high" })).toBe("High");
-    expect(formatThinkingOptionLabel({ id: "xhigh", label: "xhigh" })).toBe("Extra high");
-  });
-
-  it("sentence-cases split provider labels", () => {
-    expect(formatThinkingOptionLabel({ id: "extra_high", label: "extra_high" })).toBe("Extra high");
-    expect(formatThinkingOptionLabel({ id: "think-hard", label: "think-hard" })).toBe("Think hard");
-    expect(formatThinkingOptionLabel({ id: "xhigh", label: "XHigh" })).toBe("Extra high");
-  });
-});
-
 describe("resolveAgentModelSelection", () => {
+  it("resolves a configured model alias to its canonical catalog model", () => {
+    const selection = resolveAgentModelSelection({
+      models: [
+        {
+          provider: "claude",
+          id: "claude-fable-5",
+          aliases: ["claude-fable-5[1m]"],
+          label: "Fable 5",
+          thinkingOptions: [{ id: "high", label: "High" }],
+          defaultThinkingOptionId: "high",
+        },
+      ],
+      runtimeModelId: null,
+      configuredModelId: "claude-fable-5[1m]",
+      runtimeThinkingOptionId: null,
+      explicitThinkingOptionId: null,
+    });
+
+    expect(selection.activeModelId).toBe("claude-fable-5");
+    expect(selection.displayModel).toBe("Fable 5");
+    expect(selection.selectedThinkingId).toBe("high");
+  });
+
   it("prefers runtime model over configured model", () => {
     const selection = resolveAgentModelSelection({
       models: [
@@ -98,6 +113,7 @@ describe("resolveAgentModelSelection", () => {
       ],
       runtimeModelId: "a",
       configuredModelId: "b",
+      runtimeThinkingOptionId: null,
       explicitThinkingOptionId: null,
     });
 
@@ -122,11 +138,60 @@ describe("resolveAgentModelSelection", () => {
       ],
       runtimeModelId: "a",
       configuredModelId: null,
+      runtimeThinkingOptionId: null,
       explicitThinkingOptionId: "high",
     });
 
     expect(selection.selectedThinkingId).toBe("high");
     expect(selection.displayThinking).toBe("High");
+  });
+
+  it("shows the thinking level the agent runs on when none was chosen", () => {
+    const selection = resolveAgentModelSelection({
+      models: [
+        {
+          id: "openrouter/google/gemini-3.6-flash",
+          provider: "pi",
+          label: "Gemini 3.6 Flash",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium", isDefault: true },
+            { id: "high", label: "High" },
+          ],
+          defaultThinkingOptionId: "medium",
+        },
+      ],
+      runtimeModelId: "openrouter/google/gemini-3.6-flash",
+      configuredModelId: null,
+      runtimeThinkingOptionId: "high",
+      explicitThinkingOptionId: null,
+    });
+
+    expect(selection.selectedThinkingId).toBe("high");
+    expect(selection.displayThinking).toBe("High");
+  });
+
+  it("falls back to the chosen thinking level when the runtime level is not a model option", () => {
+    const selection = resolveAgentModelSelection({
+      models: [
+        {
+          id: "a",
+          provider: "codex",
+          label: "Model A",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "high", label: "High" },
+          ],
+          defaultThinkingOptionId: "low",
+        },
+      ],
+      runtimeModelId: "a",
+      configuredModelId: null,
+      runtimeThinkingOptionId: "xhigh",
+      explicitThinkingOptionId: "high",
+    });
+
+    expect(selection.selectedThinkingId).toBe("high");
   });
 
   it("formats raw thinking labels in the selected model display", () => {
@@ -144,6 +209,7 @@ describe("resolveAgentModelSelection", () => {
       ],
       runtimeModelId: "a",
       configuredModelId: null,
+      runtimeThinkingOptionId: null,
       explicitThinkingOptionId: "xhigh",
     });
 
@@ -165,6 +231,7 @@ describe("resolveAgentModelSelection", () => {
       ],
       runtimeModelId: null,
       configuredModelId: null,
+      runtimeThinkingOptionId: null,
       explicitThinkingOptionId: null,
     });
 
@@ -188,6 +255,7 @@ describe("resolveAgentModelSelection", () => {
       ],
       runtimeModelId: "claude-sonnet-4-6-20260101",
       configuredModelId: "default",
+      runtimeThinkingOptionId: null,
       explicitThinkingOptionId: null,
     });
 
@@ -195,5 +263,32 @@ describe("resolveAgentModelSelection", () => {
     expect(selection.displayModel).toBe("Default (Sonnet 4.6)");
     expect(selection.selectedThinkingId).toBe("low");
     expect(selection.displayThinking).toBe("Low");
+  });
+
+  it("shows the agent's own model when the catalog does not list it", () => {
+    const selection = resolveAgentModelSelection({
+      models: [
+        {
+          id: "gpt-6-sol",
+          provider: "codex",
+          label: "GPT-6-Sol",
+          isDefault: true,
+          thinkingOptions: [
+            { id: "medium", label: "medium" },
+            { id: "max", label: "max" },
+          ],
+          defaultThinkingOptionId: "medium",
+        },
+      ],
+      runtimeModelId: "gpt-6.1-sol",
+      configuredModelId: "gpt-6.1-sol",
+      runtimeThinkingOptionId: null,
+      explicitThinkingOptionId: "max",
+    });
+
+    expect(selection.selectedModel).toBeNull();
+    expect(selection.activeModelId).toBe("gpt-6.1-sol");
+    expect(selection.displayModel).toBe("gpt-6.1-sol");
+    expect(selection.displayThinking).toBe("Max");
   });
 });

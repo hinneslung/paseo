@@ -178,7 +178,7 @@ describe("daemon E2E - timeline window", () => {
     }
   });
 
-  test("canonical after fetch returns only committed rows after the cursor", async () => {
+  test("legacy canonical requests return full projected items after the cursor", async () => {
     const cwd = tmpCwd();
     try {
       const agent = await ctx.client.createAgent({
@@ -201,13 +201,16 @@ describe("daemon E2E - timeline window", () => {
         projection: "canonical",
       });
 
-      expect(timeline.projection).toBe("canonical");
+      expect(timeline.projection).toBe("projected");
       expect(timeline.entries).toHaveLength(1);
       expect(timeline.startCursor?.seq).toBe(250);
       expect(timeline.endCursor?.seq).toBe(250);
-      expect(timeline.entries[0]?.seqStart).toBe(250);
+      expect(timeline.entries[0]?.seqStart).toBe(1);
       expect(timeline.entries[0]?.seqEnd).toBe(250);
-      expect(timeline.entries[0]?.sourceSeqRanges).toEqual([{ startSeq: 250, endSeq: 250 }]);
+      expect(timeline.entries[0]?.sourceSeqRanges).toEqual([
+        { startSeq: 1, endSeq: 1 },
+        { startSeq: 250, endSeq: 250 },
+      ]);
       expect(timeline.entries[0]?.item.type).toBe("tool_call");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
@@ -301,7 +304,6 @@ describe("daemon E2E - timeline window", () => {
         });
       }
 
-      const fetchSpy = vi.spyOn(ctx.daemon.daemon.agentManager, "fetchTimeline");
       const timeline = await ctx.client.fetchAgentTimeline(agent.id, {
         direction: "tail",
         limit: 100,
@@ -311,11 +313,6 @@ describe("daemon E2E - timeline window", () => {
       expect(timeline.startCursor?.seq).toBe(501);
       expect(timeline.endCursor?.seq).toBe(600);
       expect(timeline.hasOlder).toBe(true);
-      expect(
-        fetchSpy.mock.calls.some(
-          ([, options]) => options?.direction === "tail" && options.limit === 0,
-        ),
-      ).toBe(false);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -341,7 +338,6 @@ describe("daemon E2E - timeline window", () => {
         limit: 1,
       }).epoch;
 
-      const fetchSpy = vi.spyOn(ctx.daemon.daemon.agentManager, "fetchTimeline");
       const timeline = await ctx.client.fetchAgentTimeline(agent.id, {
         direction: "after",
         cursor: { epoch, seq: 300 },
@@ -352,11 +348,75 @@ describe("daemon E2E - timeline window", () => {
       expect(timeline.startCursor?.seq).toBe(301);
       expect(timeline.endCursor?.seq).toBe(400);
       expect(timeline.hasNewer).toBe(true);
-      expect(
-        fetchSpy.mock.calls.some(
-          ([, options]) => options?.direction === "tail" && options.limit === 0,
-        ),
-      ).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("projected after limit returns 100 projected entries with their canonical coverage", async () => {
+    const cwd = tmpCwd();
+    try {
+      const agent = await ctx.client.createAgent({
+        provider: "codex",
+        cwd,
+        title: "Timeline Projected Page Limit Test",
+        modeId: "full-access",
+      });
+      for (let seq = 1; seq <= 200; seq += 1) {
+        await ctx.daemon.daemon.agentManager.appendTimelineItem(agent.id, {
+          type: "assistant_message",
+          text: "x",
+        });
+      }
+      for (let seq = 201; seq <= 350; seq += 1) {
+        await ctx.daemon.daemon.agentManager.appendTimelineItem(agent.id, {
+          type: "user_message",
+          text: `message ${seq - 200}`,
+        });
+      }
+      const epoch = ctx.daemon.daemon.agentManager.fetchTimeline(agent.id, {
+        direction: "tail",
+        limit: 1,
+      }).epoch;
+
+      const timeline = await ctx.client.fetchAgentTimeline(agent.id, {
+        direction: "after",
+        cursor: { epoch, seq: 0 },
+        limit: 100,
+        projection: "projected",
+      });
+
+      expect({
+        entryCount: timeline.entries.length,
+        firstEntry: timeline.entries[0],
+        lastEntry: timeline.entries.at(-1),
+        startCursor: timeline.startCursor,
+        endCursor: timeline.endCursor,
+        hasNewer: timeline.hasNewer,
+      }).toEqual({
+        entryCount: 100,
+        firstEntry: {
+          provider: "codex",
+          item: { type: "assistant_message", text: "x".repeat(200) },
+          timestamp: expect.any(String),
+          seqStart: 1,
+          seqEnd: 200,
+          sourceSeqRanges: [{ startSeq: 1, endSeq: 200 }],
+          collapsed: ["assistant_merge"],
+        },
+        lastEntry: {
+          provider: "codex",
+          item: { type: "user_message", text: "message 99" },
+          timestamp: expect.any(String),
+          seqStart: 299,
+          seqEnd: 299,
+          sourceSeqRanges: [{ startSeq: 299, endSeq: 299 }],
+          collapsed: [],
+        },
+        startCursor: { epoch, seq: 1 },
+        endCursor: { epoch, seq: 299 },
+        hasNewer: true,
+      });
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -421,7 +481,6 @@ describe("daemon E2E - timeline window", () => {
         limit: 1,
       }).epoch;
 
-      const fetchSpy = vi.spyOn(ctx.daemon.daemon.agentManager, "fetchTimeline");
       const timeline = await ctx.client.fetchAgentTimeline(agent.id, {
         direction: "before",
         cursor: { epoch, seq: 501 },
@@ -432,11 +491,6 @@ describe("daemon E2E - timeline window", () => {
       expect(timeline.startCursor?.seq).toBe(401);
       expect(timeline.endCursor?.seq).toBe(500);
       expect(timeline.hasOlder).toBe(true);
-      expect(
-        fetchSpy.mock.calls.some(
-          ([, options]) => options?.direction === "tail" && options.limit === 0,
-        ),
-      ).toBe(false);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

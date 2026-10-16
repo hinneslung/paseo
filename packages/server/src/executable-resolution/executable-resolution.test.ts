@@ -1,14 +1,10 @@
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
-import {
-  executableExists,
-  findExecutable,
-  quoteWindowsArgument,
-  quoteWindowsCommand,
-} from "./executable-resolution.js";
+import { executableExists, findExecutable } from "./executable-resolution.js";
+import { windowsExecutableResolution } from "./windows.js";
 import { isPlatform } from "../test-utils/platform.js";
 
 const originalEnv = {
@@ -57,6 +53,15 @@ afterEach(() => {
 });
 
 describe("findExecutable", () => {
+  test.runIf(isPlatform("linux"))(
+    "propagates a failed lookup process instead of reporting a missing executable",
+    async () => {
+      await expect(findExecutable("x".repeat(1024 * 1024))).rejects.toMatchObject({
+        code: "E2BIG",
+      });
+    },
+  );
+
   describe.skipIf(isPlatform("win32"))("POSIX", () => {
     test("finds an extensionless executable and skips an earlier non-executable candidate", async () => {
       const executableDir = makeTempDir();
@@ -109,6 +114,13 @@ describe("findExecutable", () => {
       expectWindowsPathsEqual(await findExecutable(command), cmd);
     });
 
+    test("does not probe fabricated absolute path extensions that do not exist", async () => {
+      const dir = makeTempDir();
+      const command = path.join(dir, "missing-command");
+
+      await expect(findExecutable(command)).resolves.toBeNull();
+    });
+
     test("finds a winget portable executable outside PATH", async () => {
       const originalLocalAppData = process.env.LOCALAPPDATA;
       const localAppData = makeTempDir();
@@ -149,6 +161,20 @@ describe("findExecutable", () => {
 
     await expect(findExecutable("paseo-definitely-missing-command")).resolves.toBeNull();
   });
+
+  test("Windows resolution skips literal path candidates that do not exist", async () => {
+    const probeExecutable = vi.fn(async () => true);
+
+    await expect(
+      windowsExecutableResolution.find("C:\\tools\\missing-command", {
+        enumeratePathCandidates: async () => [],
+        probeExecutable,
+        exists: () => false,
+        probeTimeoutMs: 100,
+      }),
+    ).resolves.toBeNull();
+    expect(probeExecutable).not.toHaveBeenCalled();
+  });
 });
 
 describe("executableExists", () => {
@@ -184,120 +210,5 @@ describe("executableExists", () => {
 
   test("returns null when no matching path exists", () => {
     expect(executableExists("/missing/codex", () => false)).toBeNull();
-  });
-});
-
-describe("quoteWindowsCommand", () => {
-  const originalPlatform = process.platform;
-
-  function setPlatform(value: string) {
-    Object.defineProperty(process, "platform", { value, writable: true });
-  }
-
-  afterEach(() => {
-    setPlatform(originalPlatform);
-  });
-
-  test("quotes a Windows path with spaces", () => {
-    setPlatform("win32");
-    expect(quoteWindowsCommand("C:\\Program Files\\Anthropic\\claude.exe")).toBe(
-      '"C:\\Program Files\\Anthropic\\claude.exe"',
-    );
-  });
-
-  test("does not double-quote an already-quoted path", () => {
-    setPlatform("win32");
-    expect(quoteWindowsCommand('"C:\\Program Files\\Anthropic\\claude.exe"')).toBe(
-      '"C:\\Program Files\\Anthropic\\claude.exe"',
-    );
-  });
-
-  test("returns the command unchanged when there are no spaces", () => {
-    setPlatform("win32");
-    expect(quoteWindowsCommand("C:\\nvm4w\\nodejs\\codex")).toBe("C:\\nvm4w\\nodejs\\codex");
-  });
-
-  test("escapes ampersands", () => {
-    setPlatform("win32");
-    expect(quoteWindowsCommand("feature&bugfix")).toBe("feature^&bugfix");
-  });
-
-  test("escapes pipes", () => {
-    setPlatform("win32");
-    expect(quoteWindowsCommand("feature|bugfix")).toBe("feature^|bugfix");
-  });
-
-  test("does not double percent signs", () => {
-    setPlatform("win32");
-    // cmd.exe only collapses %% → % inside batch files; on the command line
-    // it stays literal, which corrupts git --format atoms etc.
-    expect(quoteWindowsCommand("100%")).toBe("100%");
-  });
-
-  test("preserves git --format atoms verbatim", () => {
-    setPlatform("win32");
-    expect(quoteWindowsCommand("--format=%(refname)%09%(committerdate:unix)")).toBe(
-      "--format=%^(refname^)%09%^(committerdate:unix^)",
-    );
-  });
-
-  test("escapes carets", () => {
-    setPlatform("win32");
-    expect(quoteWindowsCommand("feature^bugfix")).toBe("feature^^bugfix");
-  });
-
-  test("escapes multiple metacharacters", () => {
-    setPlatform("win32");
-    expect(quoteWindowsCommand("build&(test|deploy)!<output>")).toBe(
-      "build^&^(test^|deploy^)^!^<output^>",
-    );
-  });
-
-  test("quotes commands with spaces after escaping metacharacters", () => {
-    setPlatform("win32");
-    expect(quoteWindowsCommand("C:\\Program Files\\My Tool&Stuff\\run 100%.cmd")).toBe(
-      '"C:\\Program Files\\My Tool^&Stuff\\run 100%.cmd"',
-    );
-  });
-
-  test("returns the command unchanged on non-Windows platforms", () => {
-    setPlatform("darwin");
-    expect(quoteWindowsCommand("/usr/local/bin/claude code")).toBe("/usr/local/bin/claude code");
-  });
-});
-
-describe("quoteWindowsArgument", () => {
-  const originalPlatform = process.platform;
-
-  function setPlatform(value: string) {
-    Object.defineProperty(process, "platform", { value, writable: true });
-  }
-
-  afterEach(() => {
-    setPlatform(originalPlatform);
-  });
-
-  test("quotes a Windows argument with spaces", () => {
-    setPlatform("win32");
-    expect(quoteWindowsArgument("C:\\Program Files\\Anthropic\\cli.js")).toBe(
-      '"C:\\Program Files\\Anthropic\\cli.js"',
-    );
-  });
-
-  test("does not double-quote an already-quoted argument", () => {
-    setPlatform("win32");
-    expect(quoteWindowsArgument('"C:\\Program Files\\Anthropic\\cli.js"')).toBe(
-      '"C:\\Program Files\\Anthropic\\cli.js"',
-    );
-  });
-
-  test("returns the argument unchanged when there are no spaces", () => {
-    setPlatform("win32");
-    expect(quoteWindowsArgument("--version")).toBe("--version");
-  });
-
-  test("returns the argument unchanged on non-Windows platforms", () => {
-    setPlatform("darwin");
-    expect(quoteWindowsArgument("/usr/local/bin/claude code")).toBe("/usr/local/bin/claude code");
   });
 });

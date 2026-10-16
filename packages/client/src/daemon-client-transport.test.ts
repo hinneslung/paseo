@@ -7,7 +7,7 @@ import {
   describeTransportClose,
   describeTransportError,
   encodeUtf8String,
-  extractRelayMessageData,
+  extractRelayMessage,
 } from "./daemon-client-transport.js";
 
 const createClientChannelMock = vi.hoisted(() => vi.fn());
@@ -21,7 +21,7 @@ describe("daemon-client transport helpers", () => {
     createClientChannelMock.mockReset();
     createClientChannelMock.mockRejectedValueOnce(new Error("handshake failed"));
 
-    let openHandler: (() => void) | null = null;
+    const connection: { open: (() => void) | null } = { open: null };
     const close = vi.fn();
 
     createEncryptedTransport(
@@ -29,10 +29,10 @@ describe("daemon-client transport helpers", () => {
         send: vi.fn(),
         close,
         onOpen: (handler) => {
-          openHandler = handler;
+          connection.open = handler;
           return () => {
-            if (openHandler === handler) {
-              openHandler = null;
+            if (connection.open === handler) {
+              connection.open = null;
             }
           };
         },
@@ -44,8 +44,8 @@ describe("daemon-client transport helpers", () => {
       { warn: vi.fn() },
     );
 
-    expect(openHandler).not.toBeNull();
-    openHandler?.();
+    expect(connection.open).not.toBeNull();
+    connection.open?.();
 
     await vi.waitFor(() => {
       expect(close).toHaveBeenCalledWith(4001, "E2EE handshake failed");
@@ -130,7 +130,7 @@ describe("daemon-client transport helpers", () => {
 
     const message = { data: "payload" };
     listeners.get("message")?.(message);
-    expect(onMessage).toHaveBeenCalledWith(message);
+    expect(onMessage).toHaveBeenCalledWith("payload", false);
 
     unsubscribe();
     expect(ws.removeEventListener).toHaveBeenCalledWith("message", expect.any(Function));
@@ -165,13 +165,16 @@ describe("daemon-client transport helpers", () => {
     expect(describeTransportError()).toBe("Transport error");
   });
 
-  test("extractRelayMessageData returns strings and array buffers", () => {
-    expect(extractRelayMessageData({ data: "hello" })).toBe("hello");
+  test("extractRelayMessage preserves browser and Node WebSocket frame kind", () => {
+    expect(extractRelayMessage({ data: "hello" })).toEqual({ data: "hello", isBinary: false });
 
     const view = new Uint8Array([1, 2, 3]);
-    const extracted = extractRelayMessageData({ data: view });
-    expect(extracted).toBeInstanceOf(ArrayBuffer);
-    expect(Array.from(new Uint8Array(extracted as ArrayBuffer))).toEqual([1, 2, 3]);
+    const binary = extractRelayMessage(view, true);
+    expect(binary.isBinary).toBe(true);
+    expect(Array.from(new Uint8Array(binary.data as ArrayBuffer))).toEqual([1, 2, 3]);
+
+    const text = extractRelayMessage(view, false);
+    expect(text).toEqual({ data: "\u0001\u0002\u0003", isBinary: false });
   });
 
   test("decodeMessageData decodes strings, array buffers, and typed arrays", () => {

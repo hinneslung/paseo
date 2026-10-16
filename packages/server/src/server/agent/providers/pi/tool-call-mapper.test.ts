@@ -1,11 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import {
-  mapToolDetail,
-  parseToolArgs,
-  parseToolResult,
-  resolveToolCallName,
-} from "./tool-call-mapper.js";
+import { mapToolDetail, parseToolArgs, parseToolResult } from "./tool-call-mapper.js";
 
 describe("Pi tool call mapper", () => {
   test("maps bash args and result to shell detail", () => {
@@ -37,6 +32,19 @@ describe("Pi tool call mapper", () => {
     });
   });
 
+  test("preserves ordinary writes as write details", () => {
+    const toolCall = parseToolArgs("write", {
+      path: "notes.txt",
+      content: "unchanged\n",
+    });
+
+    expect(mapToolDetail(toolCall, parseToolResult({ text: "Wrote notes.txt" }))).toEqual({
+      type: "write",
+      filePath: "notes.txt",
+      content: "unchanged\n",
+    });
+  });
+
   test("preserves unknown tool input and parsed output", () => {
     const toolCall = parseToolArgs("custom_tool", { value: 42 });
     const result = parseToolResult({ text: "custom result" });
@@ -46,31 +54,5 @@ describe("Pi tool call mapper", () => {
       input: { value: 42 },
       output: { text: "custom result" },
     });
-  });
-
-  test("normalizes Pi MCP proxy calls from requested tool args while running", () => {
-    const toolCall = parseToolArgs("mcp", {
-      tool: "paseo_list_models",
-      args: '{"provider":"pi"}',
-    });
-
-    expect(resolveToolCallName(toolCall, null)).toBe("paseo.list_models");
-  });
-
-  test("normalizes Pi MCP proxy calls from result details when completed", () => {
-    const toolCall = parseToolArgs("mcp", {
-      tool: "paseo_list_models",
-      args: '{"provider":"pi"}',
-    });
-    const result = parseToolResult({
-      content: [{ type: "text", text: "(empty result)" }],
-      details: {
-        mode: "call",
-        server: "paseo",
-        tool: "list_models",
-      },
-    });
-
-    expect(resolveToolCallName(toolCall, result)).toBe("paseo.list_models");
   });
 });

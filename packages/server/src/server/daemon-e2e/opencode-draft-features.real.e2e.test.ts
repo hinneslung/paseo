@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -30,7 +29,7 @@ async function withConnectedOpenCodeDaemon(
   try {
     await client.connect();
     await client.fetchAgents({
-      subscribe: { subscriptionId: `opencode-draft-features-${randomUUID()}` },
+      subscribe: {},
     });
     await run({ client });
   } finally {
@@ -109,7 +108,8 @@ describe("daemon E2E (real opencode) - draft feature discovery", () => {
       expect(await provider.listImportableSessions?.({ cwd })).toEqual([]);
 
       await withConnectedOpenCodeDaemon(provider, async ({ client }) => {
-        const response = await client.listCommands("draft-opencode-agent", {
+        const response = await client.listCommands({
+          agentId: "draft-opencode-agent",
           draftConfig: {
             provider: "opencode",
             cwd,

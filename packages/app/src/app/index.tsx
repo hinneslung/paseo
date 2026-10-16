@@ -13,6 +13,8 @@ import {
   useLastWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
 import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
+import { getIsVscode } from "@/constants/platform";
+import { useVscodeStartupGate } from "@/desktop/vscode/startup-gate";
 
 const isDesktop = shouldUseDesktopDaemon();
 
@@ -31,6 +33,8 @@ export default function Index() {
     workspaceSelectionServerId,
     workspaceSelectionWorkspaceId,
   );
+  const isVscodeRuntime = getIsVscode();
+  const vscodeStartup = useVscodeStartupGate({ anyOnlineHostServerId, hosts });
 
   const startupRoute = resolveStartupRoute({
     route: { kind: "index", pathname },
@@ -45,7 +49,13 @@ export default function Index() {
     }),
     isWorkspaceSelectionLoaded,
     hasGivenUpWaitingForHost: bootstrapState.hasGivenUpWaitingForHost,
+    isVscodeRuntime,
+    vscodeWorkspaceMatchState: vscodeStartup.workspaceMatchState,
   });
+
+  if (vscodeStartup.startupElement) {
+    return vscodeStartup.startupElement;
+  }
 
   if (startupRoute.kind === "redirect") {
     return <Redirect href={startupRoute.href} />;

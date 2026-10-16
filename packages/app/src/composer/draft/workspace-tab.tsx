@@ -1,53 +1,55 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { Keyboard, ScrollView, Text, View } from "react-native";
+import { Keyboard, ScrollView, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
-import ReanimatedAnimated from "react-native-reanimated";
 import { StyleSheet } from "react-native-unistyles";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useKeyboardShiftStyle } from "@/hooks/use-keyboard-shift-style";
+import { ComposerDock } from "@/composer/dock";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
 import invariant from "tiny-invariant";
 import { Composer } from "@/composer";
-import { DraftAgentModeControl } from "@/composer/agent-controls/mode-control";
+import { FileDropZone } from "@/components/file-drop/file-drop-zone";
 import { ComposerImportPill } from "@/composer/draft/import-pill";
-import { FileDropZone } from "@/components/file-drop-zone";
+import { COMPOSER_PILL_CLEARANCE } from "@/composer/pill-styles";
 import { AgentStreamView } from "@/agent-stream/view";
 import { composerWorkspaceAttachment } from "@/composer/attachments/workspace";
-import type { ImageAttachment } from "@/composer/types";
 import { useAgentInputDraft } from "@/composer/draft/input-draft";
 import type { CreateAgentInitialValues } from "@/hooks/use-agent-form-state";
 import { useDraftAgentCreateFlow, type DraftCreateAttempt } from "@/composer/draft/create-flow";
-import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
+import { resolveTurnPresentation, TURN_LIVENESS_IDLE } from "@/timeline/turn-liveness";
+import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { buildWorkspaceDraftAgentConfig } from "@/screens/workspace/workspace-draft-agent-config";
 import { buildDraftStoreKey } from "@/stores/draft-keys";
-import { usePanelStore } from "@/stores/panel-store";
 import { useCreateFlowStore } from "@/stores/create-flow-store";
 import type { Agent } from "@/stores/session-store";
 import { useWorkspaceFields } from "@/stores/session-store-hooks";
 import { useWorkspaceDraftSubmissionStore } from "@/stores/workspace-draft-submission-store";
+import { useAgentControlCommandCenterActions } from "@/command-center/agent-control-registration";
 import { encodeImages } from "@/utils/encode-images";
 import type { WorkspaceFileOpenRequest } from "@/workspace/file-open";
 import { shouldAutoFocusWorkspaceDraftComposer } from "@/screens/workspace/workspace-draft-pane-focus";
-import { validateDraftSubmission } from "@/composer/draft/workspace-tab-core";
+import {
+  shouldAllowEmptyDraftText,
+  validateDraftSubmission,
+} from "@/composer/draft/workspace-tab-core";
 import type { AgentCapabilityFlags } from "@getpaseo/protocol/agent-types";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { WorkspaceComposerAttachment } from "@/attachments/types";
 import {
-  useWorkspaceAttachments,
+  useDraftWorkspaceAttachmentScopeKey,
   useWorkspaceAttachmentScopeKey,
+  useWorkspaceAttachmentsStore,
 } from "@/attachments/workspace-attachments-store";
 import type { UserMessageImageAttachment } from "@/types/stream";
-import {
-  COMPACT_FORM_FACTOR_WIDTH,
-  MAX_CONTENT_WIDTH,
-  useIsCompactFormFactor,
-} from "@/constants/layout";
+import { COMPACT_FORM_FACTOR_WIDTH, useIsCompactFormFactor } from "@/constants/layout";
 import { isWeb } from "@/constants/platform";
-import type { WorkspaceDraftTabSetup } from "@/stores/workspace-tabs-store";
+import {
+  buildWorkspaceTabPersistenceKey,
+  type WorkspaceDraftTabSetup,
+} from "@/workspace-tabs/model";
+import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
+import { useSettings } from "@/hooks/use-settings";
 
 const EMPTY_PENDING_PERMISSIONS = new Map();
-const EMPTY_ONLINE_SERVER_IDS: string[] = [];
 const DRAFT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: false,
@@ -84,41 +86,57 @@ function resolveAutoSubmitConfig(
   };
 }
 
+// Reconcile the form's selected mode against the currently discovered modes.
+// The mode picker displays modeOptions[0] when the stored mode isn't in the
+// list (e.g. a globally-remembered "plan" that this workspace's OpenCode config
+// no longer defines), so the submitted mode must match that display — otherwise
+// we'd send a stale mode the provider rejects while the UI showed a valid one.
+function reconcileSelectedMode(modeOptionIds: readonly string[], selectedMode: string): string {
+  if (modeOptionIds.length === 0) {
+    return "";
+  }
+  return modeOptionIds.includes(selectedMode) ? selectedMode : (modeOptionIds[0] ?? "");
+}
+
 function resolveDraftModeIdOverride(input: {
   autoSubmitConfig: AutoSubmitConfig | null;
-  modeOptionsCount: number;
+  modeOptionIds: readonly string[];
   selectedMode: string;
 }): { modeId: string } | Record<string, never> {
-  const { autoSubmitConfig, modeOptionsCount, selectedMode } = input;
+  const { autoSubmitConfig, modeOptionIds, selectedMode } = input;
   if (autoSubmitConfig?.modeId) {
     return { modeId: autoSubmitConfig.modeId };
   }
-  if (modeOptionsCount > 0 && selectedMode !== "") {
-    return { modeId: selectedMode };
+  const reconciled = reconcileSelectedMode(modeOptionIds, selectedMode);
+  if (reconciled !== "") {
+    return { modeId: reconciled };
   }
   return {};
 }
 
 function resolveDraftModeId(input: {
   autoSubmitConfig: AutoSubmitConfig | null;
-  modeOptionsCount: number;
+  modeOptionIds: readonly string[];
   selectedMode: string;
 }): string | null {
-  const { autoSubmitConfig, modeOptionsCount, selectedMode } = input;
+  const { autoSubmitConfig, modeOptionIds, selectedMode } = input;
   if (autoSubmitConfig?.modeId !== undefined) {
     return autoSubmitConfig.modeId;
   }
-  if (modeOptionsCount > 0 && selectedMode !== "") {
-    return selectedMode;
+  const reconciled = reconcileSelectedMode(modeOptionIds, selectedMode);
+  if (reconciled !== "") {
+    return reconciled;
   }
   return null;
 }
 
 async function submitDraftCreateRequest(input: {
+  draftId: string;
   attempt: { clientMessageId: string };
   text: string;
   images?: UserMessageImageAttachment[];
   attachments?: unknown;
+  cwd: string;
   client: DaemonClient | null;
   workspaceDirectory: string | null;
   workspaceId: string | null;
@@ -126,7 +144,7 @@ async function submitDraftCreateRequest(input: {
   composerState: {
     selectedProvider: string | null;
     selectedMode: string;
-    modeOptions: unknown[];
+    modeOptions: readonly { id: string }[];
     effectiveModelId: string | null;
     effectiveThinkingOptionId: string | null;
     featureValues: Record<string, unknown> | undefined;
@@ -139,6 +157,7 @@ async function submitDraftCreateRequest(input: {
     text,
     images,
     attachments,
+    cwd,
     client,
     workspaceDirectory,
     workspaceId,
@@ -158,12 +177,12 @@ async function submitDraftCreateRequest(input: {
   }
   const modeIdOverride = resolveDraftModeIdOverride({
     autoSubmitConfig,
-    modeOptionsCount: composerState.modeOptions.length,
+    modeOptionIds: composerState.modeOptions.map((mode) => mode.id),
     selectedMode: composerState.selectedMode,
   });
   const config = buildWorkspaceDraftAgentConfig({
     provider,
-    cwd: workspaceDirectory,
+    cwd,
     ...modeIdOverride,
     model: autoSubmitConfig?.model ?? (composerState.effectiveModelId || undefined),
     thinkingOptionId:
@@ -171,16 +190,19 @@ async function submitDraftCreateRequest(input: {
     featureValues: autoSubmitConfig?.featureValues ?? composerState.featureValues,
   });
 
-  const imagesData = await encodeImages(images);
   const attachmentsArray = Array.isArray(attachments) ? attachments : undefined;
-  const result = await client.createAgent({
+  const imagesData = await encodeImages(images);
+  const options = {
+    idempotencyKey: input.draftId,
     config,
     workspaceId,
-    ...(text ? { initialPrompt: text } : {}),
+    initialPrompt: text,
     clientMessageId: attempt.clientMessageId,
     ...(imagesData && imagesData.length > 0 ? { images: imagesData } : {}),
     ...(attachmentsArray && attachmentsArray.length > 0 ? { attachments: attachmentsArray } : {}),
-  });
+  };
+  const creation = useWorkspaceDraftSubmissionStore.getState().creationByDraftId[input.draftId];
+  const result = creation ? await creation.retry(options) : await client.createAgent(options);
 
   return {
     agentId: result.id,
@@ -197,7 +219,7 @@ function buildDraftAgentSnapshot(input: {
   composerState: {
     effectiveModelId: string | null;
     effectiveThinkingOptionId: string | null;
-    modeOptions: unknown[];
+    modeOptions: readonly { id: string }[];
     selectedMode: string;
     selectedProvider: string | null;
     agentControls: { features?: Agent["features"] };
@@ -212,7 +234,7 @@ function buildDraftAgentSnapshot(input: {
     autoSubmitConfig?.thinkingOptionId ?? (composerState.effectiveThinkingOptionId || null);
   const modeId = resolveDraftModeId({
     autoSubmitConfig,
-    modeOptionsCount: composerState.modeOptions.length,
+    modeOptionIds: composerState.modeOptions.map((mode) => mode.id),
     selectedMode: composerState.selectedMode,
   });
   const provider = autoSubmitConfig?.provider ?? composerState.selectedProvider;
@@ -224,6 +246,7 @@ function buildDraftAgentSnapshot(input: {
     id: tabId,
     provider,
     status: "running",
+    turn: { phase: "idle", cancellationRequestId: null },
     createdAt: now,
     updatedAt: now,
     lastUserMessageAt: now,
@@ -245,17 +268,10 @@ function buildDraftAgentSnapshot(input: {
 }
 
 function buildDraftInitialValues(input: {
-  workingDir: string | null;
   initialSetup: WorkspaceDraftTabSetup | null;
 }): CreateAgentInitialValues | undefined {
-  if (!input.workingDir) {
-    return undefined;
-  }
-  if (!input.initialSetup) {
-    return { workingDir: input.workingDir };
-  }
+  if (!input.initialSetup) return undefined;
   return {
-    workingDir: input.workingDir,
     provider: input.initialSetup.provider,
     modeId: input.initialSetup.modeId,
     model: input.initialSetup.model,
@@ -271,13 +287,6 @@ function resolveDraftWorkingDirectory(input: {
     return input.initialSetup.cwd;
   }
   return input.workspaceDirectory;
-}
-
-function resolveOnlineServerIds(input: { isConnected: boolean; serverId: string }): string[] {
-  if (!input.isConnected) {
-    return EMPTY_ONLINE_SERVER_IDS;
-  }
-  return [input.serverId];
 }
 
 interface WorkspaceDraftAgentTabProps {
@@ -314,9 +323,7 @@ export function WorkspaceDraftAgentTab({
   onOpenImportSheet,
 }: WorkspaceDraftAgentTabProps) {
   const { t } = useTranslation();
-  const insets = useSafeAreaInsets();
   const client = useHostRuntimeClient(serverId);
-  const isConnected = useHostRuntimeIsConnected(serverId);
   const workspaceFields = useWorkspaceFields(serverId, workspaceId, (w) => ({
     workspaceDirectory: w.workspaceDirectory,
     id: w.id,
@@ -328,11 +335,8 @@ export function WorkspaceDraftAgentTab({
     initialSetup: draftSetup,
   });
   const draftInitialValues = buildDraftInitialValues({
-    workingDir: draftWorkingDirectory,
     initialSetup: draftSetup,
   });
-  const onlineServerIds = resolveOnlineServerIds({ isConnected, serverId });
-  const addImagesRef = useRef<((images: ImageAttachment[]) => void) | null>(null);
   const draftStoreKey = useMemo(
     () =>
       buildDraftStoreKey({
@@ -349,7 +353,6 @@ export function WorkspaceDraftAgentTab({
       initialValues: draftInitialValues,
       initialFeatureValues: draftSetup?.featureValues,
       isVisible: true,
-      onlineServerIds,
       lockedWorkingDir: draftWorkingDirectory ?? undefined,
     },
   });
@@ -357,8 +360,20 @@ export function WorkspaceDraftAgentTab({
   if (!composerState) {
     throw new Error("Workspace draft composer state is required");
   }
+
+  const draftProvider = composerState.selectedProvider;
+  const draftProviderDefinitions = composerState.providerDefinitions;
+  const draftThinkingOptions = composerState.availableThinkingOptions;
+  const draftSelectedThinkingId = composerState.selectedThinkingOptionId;
+  const draftSetThinkingOption = composerState.setThinkingOptionFromUser;
+  const draftModeOptions = composerState.modeOptions;
+  const draftSelectedMode = composerState.selectedMode;
+  const draftSetMode = composerState.setModeFromUser;
+  const draftFeatures = composerState.agentControls.features;
+  const draftOnSetFeature = composerState.agentControls.onSetFeature;
+
   const clearDraftInput = draftInput.clear;
-  const setDraftText = draftInput.setText;
+  const replaceDraftText = draftInput.replaceText;
   const setDraftAttachments = draftInput.setAttachments;
   const pendingAutoSubmit = useWorkspaceDraftSubmissionStore((state) => {
     const pending = state.pendingByDraftId[draftId] ?? null;
@@ -373,10 +388,7 @@ export function WorkspaceDraftAgentTab({
   );
   const autoSubmitConfig = resolveAutoSubmitConfig(pendingAutoSubmit);
   const initialCreateAttempt = useMemo<DraftCreateAttempt | null>(() => {
-    if (!pendingAutoSubmit || !pendingCreateAttempt) {
-      return null;
-    }
-    if (pendingAutoSubmit.clientMessageId !== pendingCreateAttempt.clientMessageId) {
+    if (!pendingCreateAttempt) {
       return null;
     }
     return {
@@ -390,7 +402,7 @@ export function WorkspaceDraftAgentTab({
         ? { attachments: pendingCreateAttempt.attachments }
         : {}),
     };
-  }, [pendingAutoSubmit, pendingCreateAttempt]);
+  }, [pendingCreateAttempt]);
   const allowsEmptyAutoSubmit = pendingAutoSubmit?.allowEmptyText === true;
   const isCompactFormFactor = useIsCompactFormFactor();
   const { onLayout: onInputAreaLayout, isBelow: isCompactComposerLayout } = useContainerWidthBelow(
@@ -402,35 +414,35 @@ export function WorkspaceDraftAgentTab({
     cwd: composerState.workingDir,
     workspaceId,
   });
-  const workspaceAttachments = useWorkspaceAttachments(workspaceAttachmentScopeKey);
-  const openFileExplorerForCheckout = usePanelStore((state) => state.openFileExplorerForCheckout);
-  const setExplorerTabForCheckout = usePanelStore((state) => state.setExplorerTabForCheckout);
+  const draftAttachmentScopeKey = useDraftWorkspaceAttachmentScopeKey(draftId);
+  const openInSidePane = useSettings((settings) => settings.openInSidePane);
+  const attachmentScopeKeys = useMemo(
+    () => [draftAttachmentScopeKey, workspaceAttachmentScopeKey].filter(Boolean),
+    [draftAttachmentScopeKey, workspaceAttachmentScopeKey],
+  );
+  const clearWorkspaceAttachments = useWorkspaceAttachmentsStore(
+    (state) => state.clearWorkspaceAttachments,
+  );
   const handleOpenWorkspaceAttachment = useCallback(
     (attachment: WorkspaceComposerAttachment) => {
       if (attachment.kind !== "review") {
         return;
       }
-      const checkout = {
-        serverId,
-        cwd: attachment.attachment.cwd,
-        isGit: true,
-      };
-      openFileExplorerForCheckout({
-        checkout,
+      openWorkspaceChanges({
         isCompact: isCompactFormFactor,
-      });
-      setExplorerTabForCheckout({
-        ...checkout,
-        tab: "changes",
+        workspaceKey: buildWorkspaceTabPersistenceKey({ serverId, workspaceId: workspaceId ?? "" }),
+        checkout: { serverId, cwd: composerState.workingDir, isGit: true },
+        preferences: openInSidePane,
       });
     },
-    [isCompactFormFactor, openFileExplorerForCheckout, serverId, setExplorerTabForCheckout],
+    [composerState.workingDir, isCompactFormFactor, openInSidePane, serverId, workspaceId],
   );
 
   const {
     formErrorMessage,
     isSubmitting,
-    optimisticStreamItems,
+    submittedStreamItems,
+    pendingMessageSubmissions,
     draftAgent,
     handleCreateFromInput,
     continueCreateFromAttempt,
@@ -439,15 +451,20 @@ export function WorkspaceDraftAgentTab({
     getPendingServerId: () => serverId,
     initialAttempt: initialCreateAttempt,
     allowEmptyText: allowsEmptyAutoSubmit,
-    validateBeforeSubmit: ({ text }) =>
-      validateDraftSubmission({
-        text,
+    validateBeforeSubmit: ({ text, attachments }) => {
+      const allowsEmptyDraftText = shouldAllowEmptyDraftText({
         allowsEmptyAutoSubmit,
+        attachments,
+      });
+      return validateDraftSubmission({
+        text,
+        allowsEmptyAutoSubmit: allowsEmptyDraftText,
         composerState,
         autoSubmitConfig,
         workspaceDirectory: draftWorkingDirectory,
         hasClient: Boolean(client),
-      }),
+      });
+    },
     onBeforeSubmit: async () => {
       await composerState.persistFormPreferences();
       if (isWeb) {
@@ -465,12 +482,18 @@ export function WorkspaceDraftAgentTab({
         composerState,
         selectModelMessage: t("workspaceSetup.errors.selectModel"),
       }),
-    createRequest: async ({ attempt, text, images, attachments }) =>
-      submitDraftCreateRequest({
+    createRequest: async ({ attempt, text, images, attachments, cwd }) => {
+      if (pendingAutoSubmit?.agentCreation) {
+        const result = await pendingAutoSubmit.agentCreation.result;
+        return { agentId: result.id, result };
+      }
+      return submitDraftCreateRequest({
+        draftId,
         attempt,
         text,
         images,
         attachments,
+        cwd,
         client,
         workspaceDirectory: draftWorkingDirectory,
         workspaceId: workspaceFields?.id ?? null,
@@ -478,13 +501,49 @@ export function WorkspaceDraftAgentTab({
         composerState,
         hostDisconnectedMessage: t("workspace.terminal.hostDisconnected"),
         selectModelMessage: t("workspaceSetup.errors.selectModel"),
-      }),
+      });
+    },
     onCreateSuccess: ({ result }) => {
       clearDraftInput("sent");
+      clearWorkspaceAttachments({ scopeKey: draftAttachmentScopeKey });
+      useWorkspaceDraftSubmissionStore.getState().clearDraftSetup({ draftId });
       onCreated(result);
     },
   });
-
+  const turnPresentation = useMemo(
+    () => resolveTurnPresentation(TURN_LIVENESS_IDLE, pendingMessageSubmissions.length > 0),
+    [pendingMessageSubmissions],
+  );
+  useAgentControlCommandCenterActions({
+    sourceId: `draft:${serverId}:${tabId}`,
+    enabled: isPaneFocused && !isSubmitting,
+    controls: {
+      serverId,
+      ownerKey: tabId,
+      provider: draftProvider,
+      providerDefinitions: draftProviderDefinitions,
+      models: {
+        providers: composerState.modelSelectorProviders,
+        selectedProvider: draftProvider,
+        selectedModelId: composerState.effectiveModelId,
+        select: composerState.setProviderAndModelFromUser,
+      },
+      thinking: {
+        options: draftThinkingOptions,
+        selectedId: draftSelectedThinkingId,
+        select: draftSetThinkingOption,
+      },
+      modes: {
+        options: draftModeOptions,
+        selectedId: draftSelectedMode,
+        select: draftSetMode,
+      },
+      features: {
+        list: draftFeatures,
+        set: draftOnSetFeature,
+      },
+    },
+  });
   const isReadyForPendingAutoSubmit = Boolean(
     pendingAutoSubmit &&
     draftInput.isHydrated &&
@@ -506,7 +565,7 @@ export function WorkspaceDraftAgentTab({
       return;
     }
     autoSubmitKeyRef.current = submitKey;
-    setDraftText("");
+    replaceDraftText("");
     setDraftAttachments([]);
     const preparedAttempt =
       initialCreateAttempt?.clientMessageId === submission.clientMessageId
@@ -523,7 +582,7 @@ export function WorkspaceDraftAgentTab({
           cwd: submission.cwd,
         });
     void createPromise.catch(() => {
-      setDraftText(submission.text);
+      replaceDraftText(submission.text);
       setDraftAttachments(composerWorkspaceAttachment.userAttachmentsOnly(submission.attachments));
       autoSubmitKeyRef.current = null;
     });
@@ -536,83 +595,15 @@ export function WorkspaceDraftAgentTab({
     isReadyForPendingAutoSubmit,
     serverId,
     setDraftAttachments,
-    setDraftText,
+    replaceDraftText,
     workspaceId,
   ]);
-
-  const handleFilesDropped = useCallback((files: ImageAttachment[]) => {
-    addImagesRef.current?.(files);
-  }, []);
-
-  const handleAddImagesCallback = useCallback((addImages: (images: ImageAttachment[]) => void) => {
-    addImagesRef.current = addImages;
-  }, []);
 
   const focusInputRef = useRef<(() => void) | null>(null);
 
   const handleFocusInputCallback = useCallback((focus: () => void) => {
     focusInputRef.current = focus;
   }, []);
-
-  const handleProviderSelectWithFocus = useCallback(
-    (provider: Parameters<typeof composerState.setProviderFromUser>[0]) => {
-      composerState.setProviderFromUser(provider);
-      focusInputRef.current?.();
-    },
-    [composerState],
-  );
-
-  const handleModeSelectWithFocus = useCallback(
-    (modeId: string) => {
-      composerState.setModeFromUser(modeId);
-      focusInputRef.current?.();
-    },
-    [composerState],
-  );
-
-  const handleModelSelectWithFocus = useCallback(
-    (modelId: string) => {
-      composerState.setModelFromUser(modelId);
-      focusInputRef.current?.();
-    },
-    [composerState],
-  );
-
-  const handleProviderAndModelSelectWithFocus = useCallback(
-    (
-      provider: Parameters<typeof composerState.setProviderAndModelFromUser>[0],
-      modelId: string,
-    ) => {
-      composerState.setProviderAndModelFromUser(provider, modelId);
-      focusInputRef.current?.();
-    },
-    [composerState],
-  );
-
-  const handleThinkingOptionSelectWithFocus = useCallback(
-    (optionId: string) => {
-      composerState.setThinkingOptionFromUser(optionId);
-      focusInputRef.current?.();
-    },
-    [composerState],
-  );
-
-  const handleSetFeatureWithFocus = useCallback(
-    (featureId: string, value: unknown) => {
-      composerState.agentControls.onSetFeature?.(featureId, value);
-      focusInputRef.current?.();
-    },
-    [composerState],
-  );
-
-  const { style: composerKeyboardStyle } = useKeyboardShiftStyle({
-    mode: "translate",
-  });
-
-  const inputAreaWrapperStyle = useMemo(
-    () => [styles.inputAreaWrapper, { paddingBottom: insets.bottom }, composerKeyboardStyle],
-    [insets.bottom, composerKeyboardStyle],
-  );
 
   const handleDropdownCloseFocus = useCallback(() => {
     focusInputRef.current?.();
@@ -621,71 +612,45 @@ export function WorkspaceDraftAgentTab({
   const composerAgentControls = useMemo(
     () => ({
       ...composerState.agentControls,
-      onSelectProvider: handleProviderSelectWithFocus,
-      onSelectMode: handleModeSelectWithFocus,
-      onSelectModel: handleModelSelectWithFocus,
-      onSelectProviderAndModel: handleProviderAndModelSelectWithFocus,
-      onSelectThinkingOption: handleThinkingOptionSelectWithFocus,
-      onSetFeature: handleSetFeatureWithFocus,
       onDropdownClose: handleDropdownCloseFocus,
       disabled: isSubmitting,
     }),
-    [
-      composerState.agentControls,
-      handleProviderSelectWithFocus,
-      handleModeSelectWithFocus,
-      handleModelSelectWithFocus,
-      handleProviderAndModelSelectWithFocus,
-      handleThinkingOptionSelectWithFocus,
-      handleSetFeatureWithFocus,
-      handleDropdownCloseFocus,
-      isSubmitting,
-    ],
+    [composerState.agentControls, handleDropdownCloseFocus, isSubmitting],
   );
-  const composerFooter = useMemo(
-    () =>
-      isCompactComposerLayout ? (
-        <DraftAgentModeControl
-          placement="footer"
-          {...composerAgentControls}
-          isCompactLayout={isCompactComposerLayout}
-        />
-      ) : undefined,
-    [isCompactComposerLayout, composerAgentControls],
+  const dockContent = (
+    <View style={styles.contentContainer}>
+      {isSubmitting && draftAgent ? (
+        <View style={styles.streamContainer}>
+          <AgentStreamView
+            agentId={tabId}
+            serverId={serverId}
+            context={draftAgent}
+            streamItems={submittedStreamItems}
+            pendingMessageSubmissions={pendingMessageSubmissions}
+            turnPresentation={turnPresentation}
+            pendingPermissions={EMPTY_PENDING_PERMISSIONS}
+            onOpenWorkspaceFile={onOpenWorkspaceFile}
+          />
+        </View>
+      ) : (
+        <ScrollView style={styles.scrollView} contentContainerStyle={styles.configScrollContent}>
+          <View style={styles.configSection}>
+            {formErrorMessage ? (
+              <View style={styles.errorContainer}>
+                <Text style={styles.errorText}>{formErrorMessage}</Text>
+              </View>
+            ) : null}
+          </View>
+        </ScrollView>
+      )}
+    </View>
   );
 
   return (
-    <FileDropZone onFilesDropped={handleFilesDropped}>
-      <View style={styles.container}>
-        <View style={styles.contentContainer}>
-          {isSubmitting && draftAgent ? (
-            <View style={styles.streamContainer}>
-              <AgentStreamView
-                agentId={tabId}
-                serverId={serverId}
-                agent={draftAgent}
-                streamItems={optimisticStreamItems}
-                pendingPermissions={EMPTY_PENDING_PERMISSIONS}
-                onOpenWorkspaceFile={onOpenWorkspaceFile}
-              />
-            </View>
-          ) : (
-            <ScrollView
-              style={styles.scrollView}
-              contentContainerStyle={styles.configScrollContent}
-            >
-              <View style={styles.configSection}>
-                {formErrorMessage ? (
-                  <View style={styles.errorContainer}>
-                    <Text style={styles.errorText}>{formErrorMessage}</Text>
-                  </View>
-                ) : null}
-              </View>
-            </ScrollView>
-          )}
-        </View>
-
-        <ReanimatedAnimated.View style={inputAreaWrapperStyle} onLayout={onInputAreaLayout}>
+    <FileDropZone style={styles.container}>
+      <ComposerDock>
+        {dockContent}
+        <View style={animatedStaticStyles.inputAreaWrapper} onLayout={onInputAreaLayout}>
           {importPillPress ? (
             <View style={styles.importPillRow}>
               <View style={styles.importPillContent}>
@@ -696,32 +661,39 @@ export function WorkspaceDraftAgentTab({
           <Composer
             agentId={tabId}
             serverId={serverId}
-            externalKeyboardShift
+            workspaceId={workspaceId}
             isPaneFocused={isPaneFocused}
             onSubmitMessage={handleCreateFromInput}
             isSubmitLoading={isSubmitting}
             blurOnSubmit={true}
-            value={draftInput.text}
-            onChangeText={draftInput.setText}
+            textSource={draftInput.textSource}
+            onChangeText={draftInput.editText}
+            textReplacement={draftInput.textReplacement}
             attachments={draftInput.attachments}
-            workspaceAttachments={workspaceAttachments}
+            attachmentScopeKeys={attachmentScopeKeys}
             onOpenWorkspaceAttachment={handleOpenWorkspaceAttachment}
             onChangeAttachments={draftInput.setAttachments}
             cwd={composerState.workingDir}
             clearDraft={draftInput.clear}
             autoFocus={shouldAutoFocusWorkspaceDraftComposer({ isPaneFocused, isSubmitting })}
-            onAddImages={handleAddImagesCallback}
+            autoFocusKey={String(draftInput.attachmentFocusRequestId)}
             onFocusInput={handleFocusInputCallback}
-            commandDraftConfig={composerState.commandDraftConfig}
+            commandDraft={composerState.commandDraft}
             agentControls={composerAgentControls}
-            footer={composerFooter}
             isCompactLayout={isCompactComposerLayout}
           />
-        </ReanimatedAnimated.View>
-      </View>
+        </View>
+      </ComposerDock>
     </FileDropZone>
   );
 }
+
+const animatedStaticStyles = RNStyleSheet.create({
+  inputAreaWrapper: {
+    width: "100%",
+    flexShrink: 1,
+  },
+});
 
 const styles = StyleSheet.create((theme) => ({
   container: {
@@ -746,20 +718,22 @@ const styles = StyleSheet.create((theme) => ({
   configSection: {
     gap: theme.spacing[3],
   },
-  inputAreaWrapper: {
-    width: "100%",
-    backgroundColor: theme.colors.surface0,
-  },
   importPillRow: {
     width: "100%",
     paddingHorizontal: theme.spacing[4],
-    paddingTop: theme.spacing[3],
-    paddingBottom: theme.spacing[3],
+    paddingTop: {
+      xs: COMPOSER_PILL_CLEARANCE.compact,
+      md: COMPOSER_PILL_CLEARANCE.wide,
+    },
+    paddingBottom: {
+      xs: COMPOSER_PILL_CLEARANCE.compact,
+      md: COMPOSER_PILL_CLEARANCE.wide,
+    },
     alignItems: "center",
   },
   importPillContent: {
     width: "100%",
-    maxWidth: MAX_CONTENT_WIDTH,
+    maxWidth: theme.contentMaxWidth,
     flexDirection: "row",
   },
   errorContainer: {

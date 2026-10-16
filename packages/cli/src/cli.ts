@@ -1,18 +1,24 @@
+import { pairCommand } from "./commands/daemon/pair.js";
 import { Command, Option } from "commander";
 import { createAgentCommand } from "./commands/agent/index.js";
 import { createDaemonCommand } from "./commands/daemon/index.js";
-import { createChatCommand } from "./commands/chat/index.js";
-import { createLoopCommand } from "./commands/loop/index.js";
 import { createPermitCommand } from "./commands/permit/index.js";
 import { createProviderCommand } from "./commands/provider/index.js";
+import { createPluginCommand } from "./commands/plugin/index.js";
+import { createProjectCommand } from "./commands/project/index.js";
 import { createScheduleCommand } from "./commands/schedule/index.js";
 import { createSpeechCommand } from "./commands/speech/index.js";
+import { createScriptCommand } from "./commands/script/index.js";
 import { createTerminalCommand } from "./commands/terminal/index.js";
 import { createWorktreeCommand } from "./commands/worktree/index.js";
+import { createWorkspaceCommand } from "./commands/workspace/index.js";
+import { createHeartbeatCommand } from "./commands/heartbeat/index.js";
+import { createHubCommand } from "./commands/hub/index.js";
 import { createHooksCommand } from "./commands/hooks.js";
 import { startCommand as daemonStartCommand } from "./commands/daemon/start.js";
-import { runStatusCommand as runDaemonStatusCommand } from "./commands/daemon/status.js";
-import { runRestartCommand as runDaemonRestartCommand } from "./commands/daemon/restart.js";
+import { daemonStatusCommand } from "./commands/daemon/status.js";
+import { daemonRestartCommand } from "./commands/daemon/restart.js";
+import { daemonReloadCommand } from "./commands/daemon/reload.js";
 import { addLsOptions, runLsCommand } from "./commands/agent/ls.js";
 import { addRunOptions, runRunCommand } from "./commands/agent/run.js";
 import { addLogsOptions, runLogsCommand } from "./commands/agent/logs.js";
@@ -25,21 +31,16 @@ import { addArchiveOptions, runArchiveCommand } from "./commands/agent/archive.j
 import { addAttachOptions, runAttachCommand } from "./commands/agent/attach.js";
 import { addImportOptions, runImportCommand } from "./commands/agent/import.js";
 import { withOutput } from "./output/index.js";
+import { runCloneCommand } from "./commands/clone.js";
 import { onboardCommand } from "./commands/onboard.js";
 import {
   addDaemonHostOption,
   addJsonAndDaemonHostOptions,
-  addJsonOption,
+  withGlobalOptions,
 } from "./utils/command-options.js";
 import { resolveCliVersion } from "./version.js";
 
 const VERSION = resolveCliVersion();
-
-function resolveHostnamesOption(hostnames: unknown, allowedHosts: unknown): string | undefined {
-  if (typeof hostnames === "string") return hostnames;
-  if (typeof allowedHosts === "string") return allowedHosts;
-  return undefined;
-}
 
 export function createCli(): Command {
   const program = new Command();
@@ -54,6 +55,7 @@ export function createCli(): Command {
     .option("-q, --quiet", "minimal output (IDs only)")
     .option("--no-headers", "omit table headers")
     .option("--no-color", "disable colored output");
+  addDaemonHostOption(program);
 
   // Primary agent commands (top-level)
   addJsonAndDaemonHostOptions(addLsOptions(program.command("ls"))).action(withOutput(runLsCommand));
@@ -66,9 +68,27 @@ export function createCli(): Command {
     withOutput(runImportCommand),
   );
 
-  addDaemonHostOption(addAttachOptions(program.command("attach"))).action(runAttachCommand);
+  addJsonAndDaemonHostOptions(
+    program
+      .command("clone")
+      .description("Clone a GitHub repo and register it as a Paseo workspace")
+      .argument("<repo>", "GitHub repo in owner/repo format or a full git remote URL")
+      .requiredOption("--dir <path>", "Parent directory to clone into (for example: ~/workspace)"),
+  )
+    .addOption(
+      new Option("--protocol <protocol>", "Protocol for owner/repo shorthand repositories").choices(
+        ["https", "ssh"],
+      ),
+    )
+    .action(withOutput(runCloneCommand));
 
-  addDaemonHostOption(addLogsOptions(program.command("logs"))).action(runLogsCommand);
+  addDaemonHostOption(addAttachOptions(program.command("attach"))).action(
+    withGlobalOptions(runAttachCommand),
+  );
+
+  addDaemonHostOption(addLogsOptions(program.command("logs"))).action(
+    withGlobalOptions(runLogsCommand),
+  );
 
   addJsonAndDaemonHostOptions(addStopOptions(program.command("stop"))).action(
     withOutput(runStopCommand),
@@ -99,76 +119,78 @@ export function createCli(): Command {
   program.addCommand(daemonStartCommand());
   program.addCommand(createHooksCommand());
 
-  addJsonOption(
-    program
-      .command("status")
-      .description('Show local daemon status (alias for "paseo daemon status")'),
-  )
-    .option("--home <path>", "Paseo home directory (default: ~/.paseo)")
-    .action(withOutput(runDaemonStatusCommand));
-
-  addJsonOption(
-    program
-      .command("restart")
-      .description('Restart local daemon (alias for "paseo daemon restart")'),
-  )
-    .option("--home <path>", "Paseo home directory (default: ~/.paseo)")
-    .option("--timeout <seconds>", "Wait timeout before force step (default: 15)")
-    .option("--force", "Send SIGKILL if graceful stop times out")
-    .option(
-      "--listen <listen>",
-      "Listen target for restarted daemon (host:port, port, or unix socket)",
-    )
-    .option("--port <port>", "Port for restarted daemon listen target")
-    .option("--no-relay", "Disable relay on restarted daemon")
-    .option("--no-mcp", "Disable Agent MCP on restarted daemon")
-    .option(
-      "--hostnames <hosts>",
-      'Daemon hostnames (comma-separated, e.g. "myhost,.example.com" or "true" for any)',
-    )
-    .addOption(new Option("--allowed-hosts <hosts>").hideHelp())
-    .action(
-      withOutput((...args) => {
-        const [options, command] = args.slice(-2) as [(typeof args)[number], Command];
-        return runDaemonRestartCommand(
-          {
-            ...options,
-            hostnames: resolveHostnamesOption(options.hostnames, options.allowedHosts),
-          },
-          command,
-        );
-      }),
-    );
+  program.addCommand(daemonStatusCommand());
+  program.addCommand(daemonRestartCommand());
+  program.addCommand(daemonReloadCommand());
+  program.addCommand(pairCommand());
 
   // Advanced agent commands (less common operations)
   program.addCommand(createAgentCommand());
 
   // Daemon commands
   program.addCommand(createDaemonCommand());
+  program.addCommand(createHubCommand());
 
   // Chat commands
-  program.addCommand(createChatCommand());
 
   // Terminal commands
   program.addCommand(createTerminalCommand());
 
-  // Loop commands
-  program.addCommand(createLoopCommand());
+  // Workspace script commands
+  program.addCommand(createScriptCommand());
 
   // Schedule commands
   program.addCommand(createScheduleCommand());
+  program.addCommand(createHeartbeatCommand());
 
   // Permission commands
   program.addCommand(createPermitCommand());
 
   // Provider commands
   program.addCommand(createProviderCommand());
+  program.addCommand(createPluginCommand());
 
   // Speech model commands
   program.addCommand(createSpeechCommand());
 
-  // Worktree commands
-  program.addCommand(createWorktreeCommand());
+  // Workspace commands
+  program.addCommand(createProjectCommand());
+  program.addCommand(createWorkspaceCommand());
+  // COMPAT(worktreeCli): legacy command alias added before workspace was the product unit.
+  // Added in v0.2.0; remove after 2027-01-17.
+  program.addCommand(createWorktreeCommand(), { hidden: true });
 
+  // Stop root parsing at the command so `plugin update --version` belongs to update.
+  // Keep global options available after a command, as they were before positional parsing.
+  program.enablePositionalOptions();
+  for (const command of program.commands) {
+    for (const option of program.options) {
+      if (option.long === "--version") continue;
+      if (!command.options.some((local) => local.long === option.long)) command.addOption(option);
+      if (option.long === "--home" || option.long === "--host") continue;
+      command.on(`option:${option.name()}`, () => {
+        const key = option.attributeName();
+        program.setOptionValueWithSource(key, command.opts()[key], "cli");
+      });
+    }
+    if (command.name() !== "plugin")
+      command.version(VERSION, "-v, --version", "output the version number");
+  }
+
+  const enforceSelectorDuplicates = (command: Command) => {
+    for (const option of command.options) {
+      if (option.long !== "--home" && option.long !== "--host") continue;
+      option.argParser((value: string, previous: string | undefined) => {
+        if (previous !== undefined && previous !== value)
+          throw {
+            code: "TARGET_AMBIGUOUS",
+            message: `Conflicting duplicate ${option.long} selectors.`,
+          };
+        return value;
+      });
+    }
+    command.commands.forEach(enforceSelectorDuplicates);
+  };
+  enforceSelectorDuplicates(program);
   return program;
 }

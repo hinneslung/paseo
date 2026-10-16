@@ -1,4 +1,5 @@
 import type { AgentProvider, AgentStreamEvent, AgentTimelineItem } from "./agent-sdk-types.js";
+import { mergeToolCallItems } from "./timeline-projection.js";
 
 export const AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS = 60;
 
@@ -25,6 +26,7 @@ export interface AgentStreamCoalescerFlush {
 export interface AgentStreamCoalescerOptions {
   windowMs?: number;
   timers: AgentStreamCoalescerTimers;
+  now?: () => number;
   onFlush: (payload: AgentStreamCoalescerFlush) => void;
 }
 
@@ -51,6 +53,7 @@ interface PendingAgentStreamBuffer {
   toolCallEntryIndexes: Map<string, number>;
   timer: ReturnType<typeof setTimeout> | null;
   flushing: boolean;
+  lastFlushAt: number | null;
 }
 
 function isCoalescableTimelineEvent(event: AgentStreamEvent): event is CoalescableTimelineEvent {
@@ -73,15 +76,27 @@ function isTerminalToolCall(item: CoalescableTimelineItem): boolean {
   );
 }
 
+function isSameTextStream(previous: PendingTextEntry, next: PendingTextEntry): boolean {
+  if (previous.item.type !== next.item.type) {
+    return false;
+  }
+  if (previous.item.type === "assistant_message" && next.item.type === "assistant_message") {
+    return previous.item.messageId === next.item.messageId;
+  }
+  return true;
+}
+
 export class AgentStreamCoalescer {
   private readonly buffers = new Map<string, PendingAgentStreamBuffer>();
   private readonly onFlush: (payload: AgentStreamCoalescerFlush) => void;
   private readonly timers: AgentStreamCoalescerTimers;
   private readonly windowMs: number;
+  private readonly now: () => number;
 
   constructor(options: AgentStreamCoalescerOptions) {
     this.windowMs = options.windowMs ?? AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS;
     this.timers = options.timers;
+    this.now = options.now ?? Date.now;
     this.onFlush = options.onFlush;
   }
 
@@ -102,7 +117,17 @@ export class AgentStreamCoalescer {
       return true;
     }
 
+    // Leading edge: the first event after an idle window flushes synchronously so
+    // the first token of a turn isn't delayed a full window. Sustained bursts fall
+    // through to the trailing timer, which keeps the message rate at one per
+    // window. Same shape as TerminalOutputCoalescer.
     if (!buffer.timer) {
+      const elapsed =
+        buffer.lastFlushAt === null ? Number.POSITIVE_INFINITY : this.now() - buffer.lastFlushAt;
+      if (elapsed >= this.windowMs) {
+        this.flushBuffer(agentId);
+        return true;
+      }
       this.scheduleFlush(buffer);
     }
 
@@ -140,6 +165,7 @@ export class AgentStreamCoalescer {
       toolCallEntryIndexes: new Map(),
       timer: null,
       flushing: false,
+      lastFlushAt: null,
     };
     this.buffers.set(agentId, buffer);
     return buffer;
@@ -158,9 +184,16 @@ export class AgentStreamCoalescer {
     }
 
     const existingIndex = buffer.toolCallEntryIndexes.get(event.item.callId);
+    const existing = existingIndex !== undefined ? buffer.entries[existingIndex] : undefined;
+    // Merge rather than replace, so an update that carries less (an unknown detail after a
+    // labeled one) cannot erase what the timeline would have kept had both been flushed.
+    let item = event.item;
+    if (existing?.kind === "tool_call") {
+      item = mergeToolCallItems(existing.item, event.item);
+    }
     const entry: PendingToolCallEntry = {
       kind: "tool_call",
-      item: event.item,
+      item,
       provider: event.provider,
       ...(event.turnId !== undefined ? { turnId: event.turnId } : {}),
     };
@@ -211,6 +244,7 @@ export class AgentStreamCoalescer {
     buffer.entries = [];
     buffer.toolCallEntryIndexes.clear();
     buffer.flushing = true;
+    buffer.lastFlushAt = this.now();
 
     try {
       for (const entry of this.collapseEntries(entries)) {
@@ -241,7 +275,7 @@ export class AgentStreamCoalescer {
         previous &&
         previous.kind === "text" &&
         entry.kind === "text" &&
-        previous.item.type === entry.item.type &&
+        isSameTextStream(previous, entry) &&
         previous.provider === entry.provider &&
         previous.turnId === entry.turnId
       ) {

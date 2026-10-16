@@ -1,7 +1,9 @@
-import { getDesktopHost } from "@/desktop/host";
+import { getDesktopHost, type DesktopDialogBridge } from "./host";
 
-export async function pickDirectory(): Promise<string | null> {
-  const open = getDesktopHost()?.dialog?.open;
+export async function pickDirectory(
+  dialog: DesktopDialogBridge | null = getDesktopHost()?.dialog ?? null,
+): Promise<string | null> {
+  const open = dialog?.open;
   if (typeof open !== "function") {
     throw new Error("Desktop dialog open() is unavailable in this environment.");
   }
@@ -9,12 +11,11 @@ export async function pickDirectory(): Promise<string | null> {
   const selection = await open({
     directory: true,
     multiple: false,
+    createDirectory: true,
   });
-
   if (selection === null) {
     return null;
   }
-
   if (typeof selection === "string") {
     return selection;
   }

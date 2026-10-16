@@ -19,7 +19,11 @@ import type {
 } from "./agent-sdk-types.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { JsonValue } from "../json-utils.js";
-import { isStoredAgentProviderAvailable, toAgentPersistenceHandle } from "../persistence-hooks.js";
+import {
+  isStoredAgentProviderAvailable,
+  resolveStoredAgentUpdatedAt,
+  toAgentPersistenceHandle,
+} from "../persistence-hooks.js";
 export type { ManagedAgent };
 
 interface ProjectionOptions {
@@ -93,6 +97,7 @@ export function toStoredAgentRecord(
       ? agent.attention.attentionTimestamp.toISOString()
       : null,
     internal: options?.internal,
+    owner: agent.owner,
   } satisfies StoredAgentRecord;
 }
 
@@ -120,12 +125,18 @@ export function toAgentPayload(
     updatedAt: agent.updatedAt.toISOString(),
     lastUserMessageAt: agent.lastUserMessageAt ? agent.lastUserMessageAt.toISOString() : null,
     status: agent.lifecycle,
+    activeTurn: agent.activeTurnId
+      ? {
+          turnId: agent.activeTurnId,
+          startedAt: agent.activeTurnStartedAt?.toISOString() ?? null,
+        }
+      : null,
     capabilities: cloneCapabilities(agent.capabilities),
     currentModeId: agent.currentModeId,
     availableModes: cloneAvailableModes(agent.availableModes),
     features: normalizeFeatures(agent.features),
     pendingPermissions: sanitizePendingPermissions(agent.pendingPermissions),
-    persistence: sanitizePersistenceHandle(agent.persistence),
+    persistence: projectPersistenceHandleForWire(agent.persistence),
     title: options?.title ?? null,
     labels: agent.labels,
   };
@@ -201,12 +212,14 @@ export function buildStoredAgentPayload(
   } as const;
 
   const createdAt = new Date(record.createdAt);
-  const updatedAt = new Date(resolveStoredAgentPayloadUpdatedAt(record));
+  const updatedAt = new Date(resolveStoredAgentUpdatedAt(record));
   const lastUserMessageAt = record.lastUserMessageAt ? new Date(record.lastUserMessageAt) : null;
 
   const runtimeInfo = buildStoredRuntimeInfo(record);
   const providerAvailable = isStoredAgentProviderAvailable(record, validProviders);
-  const persistence = buildStoredPersistenceHandle(record, validProviders);
+  const persistence = projectPersistenceHandleForWire(
+    buildStoredPersistenceHandle(record, validProviders),
+  );
 
   return {
     id: record.id,
@@ -278,23 +291,6 @@ export function toRecentProviderSessionDescriptorPayload(
   };
 }
 
-export function resolveStoredAgentPayloadUpdatedAt(record: StoredAgentRecord): string {
-  const timestamps = [record.updatedAt, record.lastActivityAt]
-    .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .map((value) => ({
-      raw: value,
-      parsed: Date.parse(value),
-    }))
-    .filter((value) => !Number.isNaN(value.parsed));
-
-  if (timestamps.length === 0) {
-    return record.updatedAt;
-  }
-
-  timestamps.sort((a, b) => b.parsed - a.parsed);
-  return timestamps[0].raw;
-}
-
 function buildSerializableConfig(config: AgentSessionConfig): SerializableAgentConfig | null {
   const serializable: SerializableAgentConfig = {};
   if (config.modeId) {
@@ -312,9 +308,16 @@ function buildSerializableConfig(config: AgentSessionConfig): SerializableAgentC
       serializable.featureValues = featureValues;
     }
   }
-  const extra = sanitizeMetadata(config.extra);
-  if (extra !== undefined) {
-    serializable.extra = extra;
+  if (config.providerOptions !== undefined) {
+    const providerOptions = sanitizeOptionalJson(config.providerOptions);
+    if (providerOptions && isJsonObject(providerOptions)) {
+      serializable.providerOptions = providerOptions;
+    }
+  }
+  if (config.toolPolicy) {
+    serializable.toolPolicy = {
+      preapproved: config.toolPolicy.preapproved.map((grant) => ({ ...grant })),
+    };
   }
   if (config.systemPrompt) {
     serializable.systemPrompt = config.systemPrompt;
@@ -356,6 +359,20 @@ function sanitizePersistenceHandle(
     sanitized.metadata = metadata;
   }
   return sanitized;
+}
+
+function projectPersistenceHandleForWire(
+  handle: AgentPersistenceHandle | null,
+): AgentPersistenceHandle | null {
+  const projected = sanitizePersistenceHandle(handle);
+  if (!projected?.metadata) {
+    return projected;
+  }
+  delete projected.metadata.mcpServers;
+  if (Object.keys(projected.metadata).length === 0) {
+    delete projected.metadata;
+  }
+  return projected;
 }
 
 function cloneCapabilities(capabilities: AgentCapabilityFlags): AgentCapabilityFlags {

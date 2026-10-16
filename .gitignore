@@ -41,6 +41,7 @@ tsconfig.tsbuildinfo
 
 # Testing
 coverage/
+.vscode-test/
 
 # Playwright
 test-results/
@@ -84,8 +85,15 @@ valknut-report.json/
 .plans/
 packages/server/src/server/fixtures/dictation/dictation-debug-largest.wav
 packages/server/src/server/fixtures/dictation/dictation-debug-largest.transcript.txt
+packages/protocol/src/generated/validation/*.aot.ts
 
 /artifacts
 packages/desktop/.cache/
 packages/desktop/src-tauri/resources/managed-runtime/
 app.json
+
+# Heap snapshots dumped by --heapsnapshot-near-heap-limit; keep them for debugging.
+*.heapsnapshot
+
+# Project-local Serena configuration and memories.
+.serena/

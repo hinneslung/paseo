@@ -118,6 +118,8 @@ try {
     join(paseoHome, "paseo.pid"),
     JSON.stringify({
       pid: ownerProcess.pid,
+      hostname: "test",
+      uid: process.getuid?.() ?? -1,
       listen: "127.0.0.1:1",
       startedAt: new Date().toISOString(),
     }),
@@ -144,18 +146,20 @@ try {
   const parsed = JSON.parse(stopResult.stdout) as {
     action?: unknown;
     forced?: unknown;
+    usedLifecycleRpc?: unknown;
+    reason?: unknown;
     message?: unknown;
   };
   assert.deepStrictEqual(
     {
       action: parsed.action,
       forced: parsed.forced,
-      message: parsed.message,
+      usedLifecycleRpc: parsed.usedLifecycleRpc,
     },
     {
       action: "stopped",
       forced: true,
-      message: "Daemon owner process was force-stopped",
+      usedLifecycleRpc: false,
     },
     `stop should report forced tree cleanup: ${stopResult.stdout}`,
   );

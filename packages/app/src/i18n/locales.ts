@@ -1,4 +1,4 @@
-export type SupportedLocale = "ar" | "en" | "es" | "fr" | "ja" | "ru" | "zh-CN";
+export type SupportedLocale = "ar" | "en" | "es" | "fr" | "ja" | "ko" | "pt-BR" | "ru" | "zh-CN";
 export type AppLanguage = "system" | SupportedLocale;
 
 export interface LanguageOption {
@@ -15,6 +15,8 @@ export const LANGUAGE_OPTIONS: LanguageOption[] = [
   { value: "es", labelKey: "settings.general.language.options.es" },
   { value: "fr", labelKey: "settings.general.language.options.fr" },
   { value: "ja", labelKey: "settings.general.language.options.ja" },
+  { value: "ko", labelKey: "settings.general.language.options.ko" },
+  { value: "pt-BR", labelKey: "settings.general.language.options.ptBR" },
   { value: "ru", labelKey: "settings.general.language.options.ru" },
   { value: "zh-CN", labelKey: "settings.general.language.options.zhCN" },
 ];
@@ -26,6 +28,8 @@ const SUPPORTED_LANGUAGES = new Set<AppLanguage>([
   "es",
   "fr",
   "ja",
+  "ko",
+  "pt-BR",
   "ru",
   "zh-CN",
 ]);
@@ -35,6 +39,8 @@ const LANGUAGE_NATIVE_NAMES: Record<SupportedLocale, string> = {
   es: "Español",
   fr: "Français",
   ja: "日本語",
+  ko: "한국어",
+  "pt-BR": "Português brasileiro",
   ru: "Русский",
   "zh-CN": "简体中文",
 };
@@ -45,6 +51,8 @@ const LANGUAGE_NAMES_BY_LOCALE: Record<SupportedLocale, Record<SupportedLocale, 
     es: "الإسبانية",
     fr: "الفرنسية",
     ja: "اليابانية",
+    ko: "الكورية",
+    "pt-BR": "البرتغالية البرازيلية",
     ru: "الروسية",
     "zh-CN": "الصينية المبسطة",
   },
@@ -54,6 +62,8 @@ const LANGUAGE_NAMES_BY_LOCALE: Record<SupportedLocale, Record<SupportedLocale, 
     es: "Spanish",
     fr: "French",
     ja: "Japanese",
+    ko: "Korean",
+    "pt-BR": "Brazilian Portuguese",
     ru: "Russian",
     "zh-CN": "Simplified Chinese",
   },
@@ -63,6 +73,8 @@ const LANGUAGE_NAMES_BY_LOCALE: Record<SupportedLocale, Record<SupportedLocale, 
     es: "español",
     fr: "francés",
     ja: "japonés",
+    ko: "coreano",
+    "pt-BR": "portugués brasileño",
     ru: "ruso",
     "zh-CN": "chino simplificado",
   },
@@ -72,6 +84,8 @@ const LANGUAGE_NAMES_BY_LOCALE: Record<SupportedLocale, Record<SupportedLocale, 
     es: "espagnol",
     fr: "français",
     ja: "japonais",
+    ko: "coréen",
+    "pt-BR": "portugais brésilien",
     ru: "russe",
     "zh-CN": "chinois simplifié",
   },
@@ -81,8 +95,32 @@ const LANGUAGE_NAMES_BY_LOCALE: Record<SupportedLocale, Record<SupportedLocale, 
     es: "スペイン語",
     fr: "フランス語",
     ja: "日本語",
+    ko: "韓国語",
+    "pt-BR": "ブラジルポルトガル語",
     ru: "ロシア語",
     "zh-CN": "簡体字中国語",
+  },
+  ko: {
+    ar: "아랍어",
+    en: "영어",
+    es: "스페인어",
+    fr: "프랑스어",
+    ja: "일본어",
+    ko: "한국어",
+    "pt-BR": "브라질 포르투갈어",
+    ru: "러시아어",
+    "zh-CN": "중국어 간체",
+  },
+  "pt-BR": {
+    ar: "árabe",
+    en: "inglês",
+    es: "espanhol",
+    fr: "francês",
+    ja: "japonês",
+    ko: "coreano",
+    "pt-BR": "Português brasileiro",
+    ru: "russo",
+    "zh-CN": "chinês simplificado",
   },
   ru: {
     ar: "арабский",
@@ -90,6 +128,8 @@ const LANGUAGE_NAMES_BY_LOCALE: Record<SupportedLocale, Record<SupportedLocale, 
     es: "испанский",
     fr: "французский",
     ja: "японский",
+    ko: "корейский",
+    "pt-BR": "бразильский португальский",
     ru: "русский",
     "zh-CN": "упрощенный китайский",
   },
@@ -99,9 +139,21 @@ const LANGUAGE_NAMES_BY_LOCALE: Record<SupportedLocale, Record<SupportedLocale, 
     es: "西班牙语",
     fr: "法语",
     ja: "日语",
+    ko: "韩语",
+    "pt-BR": "巴西葡萄牙语",
     ru: "俄语",
     "zh-CN": "简体中文",
   },
+};
+
+const REGIONAL_LANGUAGE_LOCALES: Readonly<Record<string, SupportedLocale>> = {
+  ar: "ar",
+  en: "en",
+  es: "es",
+  fr: "fr",
+  ja: "ja",
+  ko: "ko",
+  ru: "ru",
 };
 
 export function parseAppLanguage(value: unknown): AppLanguage | null {
@@ -138,23 +190,13 @@ export function resolveSupportedLocale(
 
   for (const locale of systemLocales) {
     const normalized = locale.toLowerCase();
-    if (normalized === "ar" || normalized.startsWith("ar-")) {
-      return "ar";
+    const baseLanguage = normalized.split("-", 1)[0];
+    const regionalLocale = REGIONAL_LANGUAGE_LOCALES[baseLanguage];
+    if (regionalLocale) {
+      return regionalLocale;
     }
-    if (normalized === "en" || normalized.startsWith("en-")) {
-      return "en";
-    }
-    if (normalized === "es" || normalized.startsWith("es-")) {
-      return "es";
-    }
-    if (normalized === "fr" || normalized.startsWith("fr-")) {
-      return "fr";
-    }
-    if (normalized === "ja" || normalized.startsWith("ja-")) {
-      return "ja";
-    }
-    if (normalized === "ru" || normalized.startsWith("ru-")) {
-      return "ru";
+    if (normalized === "pt" || normalized === "pt-br") {
+      return "pt-BR";
     }
     if (normalized === "zh" || normalized === "zh-cn" || normalized.startsWith("zh-hans")) {
       return "zh-CN";

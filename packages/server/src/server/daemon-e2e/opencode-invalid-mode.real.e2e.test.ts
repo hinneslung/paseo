@@ -23,7 +23,7 @@ async function createHarness(): Promise<{
   });
   const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
   await client.connect();
-  await client.fetchAgents({ subscribe: { subscriptionId: "opencode-invalid-mode" } });
+  await client.fetchAgents({ subscribe: {} });
   return { client, daemon };
 }
 
@@ -57,7 +57,7 @@ describe("daemon E2E (real opencode) - invalid mode handling", () => {
       expect(finish.status).toBe("error");
       expect(finish.error).toBeTruthy();
 
-      const snapshot = await client.fetchAgent(agent.id);
+      const snapshot = await client.fetchAgent({ agentId: agent.id });
       expect(snapshot.agent?.status).toBe("error");
     } finally {
       await client.close().catch(() => undefined);

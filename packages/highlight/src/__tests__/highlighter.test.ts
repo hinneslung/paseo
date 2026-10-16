@@ -62,6 +62,179 @@ describe("highlightCode", () => {
     expect(stringToken?.style).toBe("string");
   });
 
+  it("highlights C# code", () => {
+    const code = 'class Greeter {\n    string message = "hello";\n}';
+    const result = highlightCode(code, "test.cs");
+
+    expect(result).toHaveLength(3);
+
+    const classToken = result[0].find((t) => t.text === "class");
+    expect(classToken?.style).toBe("keyword");
+
+    const stringToken = result[1].find((t) => t.text.includes("hello"));
+    expect(stringToken?.style).toBe("string");
+  });
+
+  it("highlights Nix code", () => {
+    const code = 'let message = "hello"; in message';
+    const result = highlightCode(code, "default.nix");
+
+    const letToken = result[0].find((token) => token.text === "let");
+    expect(letToken?.style).toBe("keyword");
+
+    const stringToken = result[0].find((token) => token.text.includes("hello"));
+    expect(stringToken?.style).toBe("string");
+  });
+
+  it("highlights Svelte components across script, markup, and style", () => {
+    const code = [
+      '<script lang="ts">',
+      "  let count: number = 1;",
+      "</script>",
+      "",
+      "{#if count > 0}",
+      '  <span class="badge">{count}</span>',
+      "{/if}",
+      "",
+      "<style>",
+      "  .badge {",
+      "    color: red;",
+      "  }",
+      "</style>",
+    ].join("\n");
+    const result = highlightCode(code, "Counter.svelte");
+
+    expect(result[1].find((t) => t.text === "let")?.style).toBe("keyword");
+    expect(result[1].find((t) => t.text === "number")?.style).toBe("type");
+
+    expect(result[4].find((t) => t.text === "if")?.style).toBe("keyword");
+    expect(result[4].find((t) => t.text === "count")?.style).toBe("variable");
+
+    expect(result[5].find((t) => t.text === "span")?.style).toBe("tag");
+    expect(result[5].find((t) => t.text === "class")?.style).toBe("attribute");
+    expect(result[5].find((t) => t.text === "count")?.style).toBe("variable");
+
+    expect(result[9].find((t) => t.text === "badge")?.style).toBe("class");
+    expect(result[10].find((t) => t.text === "color")?.style).toBe("property");
+  });
+
+  it("highlights Astro components across frontmatter, markup, and style", () => {
+    const code = `---
+const title = "Hello";
+---
+<main class="page">
+  <h1>{title}</h1>
+</main>
+<style>
+  .page { color: red; }
+</style>`;
+
+    const tokens = highlightCode(code, "Page.astro").flat();
+
+    expect(tokens).toEqual(
+      expect.arrayContaining([
+        { text: "const", style: "keyword" },
+        { text: '"Hello"', style: "string" },
+        { text: "main", style: "tag" },
+        { text: "class", style: "attribute" },
+        { text: "title", style: "variable" },
+        { text: "page", style: "class" },
+        { text: "color", style: "property" },
+      ]),
+    );
+  });
+
+  it("keeps an Astro expression open through nested template strings", () => {
+    const code = "<p>{`a ${`}`} b`}</p>";
+
+    const tokens = highlightCode(code, "Nested.astro").flat();
+
+    expect(tokens).toEqual(
+      expect.arrayContaining([
+        { text: "`}`", style: "string" },
+        { text: " b`", style: "string" },
+      ]),
+    );
+  });
+
+  it("highlights Vue SFCs across script, template, and style", () => {
+    const code = [
+      '<script lang="ts">',
+      "  let count: number = 1;",
+      "</script>",
+      "",
+      "<template>",
+      '  <p v-if="count > 0" :class="badge">{{ { count: 1 } }}</p>',
+      "  <span>{{ 'a}}b' }} {{ { inner: 2 }}}</span>",
+      "</template>",
+      "",
+      "<style>",
+      "  .badge {",
+      "    color: red;",
+      "  }",
+      "</style>",
+    ].join("\n");
+
+    const tokens = highlightCode(code, "Counter.vue").flat();
+
+    expect(tokens).toEqual(
+      expect.arrayContaining([
+        { text: "let", style: "keyword" },
+        { text: "number", style: "type" },
+        { text: "template", style: "tag" },
+        { text: "v-if", style: "attribute" },
+        { text: "count", style: "definition" },
+        { text: "1", style: "number" },
+        { text: "'a}}b'", style: "string" },
+        { text: "inner", style: "definition" },
+        { text: "2", style: "number" },
+        { text: "badge", style: "class" },
+        { text: "color", style: "property" },
+      ]),
+    );
+  });
+
+  it("highlights a Vue SFC that contains an empty interpolation", () => {
+    const code = ["<template>", "  <p>{{}} {{ count }}</p>", "</template>"].join("\n");
+
+    const tokens = highlightCode(code, "Empty.vue").flat();
+
+    expect(tokens).toEqual(
+      expect.arrayContaining([
+        { text: "template", style: "tag" },
+        { text: "count", style: "variable" },
+      ]),
+    );
+  });
+
+  it("highlights quoted Vue directive values as code", () => {
+    const code = "<template><p v-if=\"count > 0\" :class='badge'>x</p></template>";
+
+    const tokens = highlightCode(code, "Directive.vue").flat();
+
+    expect(tokens).toEqual(
+      expect.arrayContaining([
+        { text: "count", style: "variable" },
+        { text: "0", style: "number" },
+        { text: "badge", style: "variable" },
+      ]),
+    );
+    expect(tokens).not.toContainEqual({ text: '"count > 0"', style: "string" });
+  });
+
+  it("keeps a Vue interpolation open through nested template strings", () => {
+    const code = "<template><p>{{ `a ${`}}`} b` }}</p></template>";
+
+    const tokens = highlightCode(code, "Nested.vue").flat();
+
+    expect(tokens).toEqual(
+      expect.arrayContaining([
+        { text: "`}}`", style: "string" },
+        { text: " b`", style: "string" },
+      ]),
+    );
+  });
+
   it("highlights TSX code with correct dialect", () => {
     const code = 'const el = <div className="test">hello</div>;';
     const result = highlightCode(code, "test.tsx");

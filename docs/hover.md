@@ -96,6 +96,21 @@ Any gap between A and B (margins between siblings inside the same parent) is par
 
 If A and B genuinely can't share a parent — B portals into a different layer, floats above other content — see [Section: real gaps](#real-gaps-with-floating-panels) below.
 
+### Failure mode 4 — A hover-revealed trigger unmounts its own open menu
+
+A kebab that only exists while its row is hovered opens a menu, and that menu takes the pointer
+off the row: a sheet slides up over it, a popover covers it. The row un-hovers, the trailing
+overlay unmounts, and the trigger goes with it — taking the menu's open state, which lived
+inside the trigger's subtree. The surface itself is already presented in a portal, so nothing
+unmounts it and nothing is left that can close it. On a bottom sheet that means a full-screen
+backdrop swallowing every click until reload.
+
+Lift the menu's open state to whatever decides to render the trigger, and keep the trigger
+rendered while the menu is up. `useOpenKebabMenuVisibility`
+(`packages/app/src/components/sidebar/use-open-kebab-menu-visibility.ts`) is that shape for the
+sidebar rows: it owns `open`, hands the menu its controlled props, and ORs `open` into the
+row's own `showKebab`.
+
 ## Native fallback
 
 Hover doesn't exist on touch devices. Anything you hide behind hover must have a non-hover path on native and compact layouts:
@@ -120,7 +135,7 @@ Heuristic: if your hover state is going to be `useState`'d and read by anything 
 
 Sometimes the revealed content can't live inside the trigger — a hover card portals into a different layer, a tooltip floats above other content, a popover renders into a `Portal`. There's a real visual gap the user has to cross with the cursor.
 
-For this case, use `useHoverSafeZone` (`packages/app/src/hooks/use-hover-safe-zone.ts`). It computes a rectangular "bridge" between the trigger and the content; while the pointer is inside trigger, content, or the bridge, the card stays open. A short grace timer absorbs jitter at the edges. The canonical caller is `packages/app/src/components/workspace-hover-card.tsx`.
+For a card whose content the user can point at or press, use `HoverCard` (`packages/app/src/components/ui/hover-card.tsx`). It is built on `useHoverSafeZone` (`packages/app/src/hooks/use-hover-safe-zone.ts`), which computes a rectangular "bridge" across the gap between the trigger and the content, whether the card sits beside, above, or below the trigger. While the pointer is inside trigger, content, or the bridge, the card stays open. A short grace timer absorbs jitter at the edges. `Tooltip` takes no pointer events and closes as soon as the pointer leaves the trigger. If the trigger has no focusable child, give `HoverCardTrigger` `focusable` and an accessible label so keyboard users can open the same content.
 
 Don't roll your own. The math is annoying, the edge cases (pointer leaves window, drag in progress, content unmounts) are subtle, and we already paid for the hook.
 
@@ -134,5 +149,6 @@ Before opening a PR that touches hover:
 - [ ] Hovered state does **not** change the trigger's outer geometry (`width`, `height`, `padding`, `borderWidth`, mount/unmount of siblings that shift it). Internal swaps fit inside a fixed `minHeight` / `minWidth`.
 - [ ] Revealed content inside the trigger uses `opacity` + `pointerEvents`, not conditional rendering, if mounting it would reflow the trigger.
 - [ ] Visibility on native and compact layouts works without hover (`isHovered || isNative || isCompact`).
-- [ ] If the revealed content sits in a separate layer (portal, floating panel), `useHoverSafeZone` is wired up.
+- [ ] A menu opened from the revealed trigger keeps the trigger rendered while it is open, so losing hover can't strand it.
+- [ ] If the revealed content sits in a separate layer (portal, floating panel) and the user can point at it, it is a `HoverCard`.
 - [ ] You opened the dev server, hovered the trigger, and slowly moved the mouse along **every** revealed element — including any visible gaps — without losing hover state.

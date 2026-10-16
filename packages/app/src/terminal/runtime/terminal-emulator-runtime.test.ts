@@ -78,7 +78,11 @@ vi.mock("@xterm/xterm", () => ({
   },
 }));
 
-import { encodeTerminalOutput, TerminalEmulatorRuntime } from "./terminal-emulator-runtime";
+import {
+  createTerminalResizeEvent,
+  encodeTerminalOutput,
+  TerminalEmulatorRuntime,
+} from "./terminal-emulator-runtime";
 
 interface StubTerminal {
   write: (data: string | Uint8Array, callback?: () => void) => void;
@@ -92,7 +96,11 @@ interface StubTerminal {
 }
 
 interface RuntimeFitProbe {
-  fitAndEmitResize: (input?: { force?: boolean; shouldClaim?: boolean }) => void;
+  fitAndEmitResize: (input?: {
+    forceRefresh?: boolean;
+    shouldClaim?: boolean;
+    forceClaim?: boolean;
+  }) => void;
 }
 
 function createRuntimeWithTerminal(): {
@@ -184,6 +192,65 @@ describe("terminal-emulator-runtime", () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    { isMac: true, ctrlKey: true, metaKey: false, opensFind: false },
+    { isMac: true, ctrlKey: false, metaKey: true, opensFind: true },
+    { isMac: false, ctrlKey: true, metaKey: false, opensFind: true },
+    { isMac: false, ctrlKey: false, metaKey: true, opensFind: false },
+    { isMac: true, ctrlKey: false, metaKey: true, shiftKey: true, opensFind: false },
+    { isMac: true, ctrlKey: false, metaKey: true, altKey: true, opensFind: false },
+    { isMac: false, ctrlKey: true, metaKey: false, shiftKey: true, opensFind: false },
+    { isMac: false, ctrlKey: true, metaKey: false, altKey: true, opensFind: false },
+    { isMac: true, ctrlKey: true, metaKey: true, opensFind: false },
+    { isMac: false, ctrlKey: true, metaKey: true, opensFind: false },
+  ])(
+    "routes Find with isMac=$isMac ctrl=$ctrlKey meta=$metaKey shift=$shiftKey alt=$altKey",
+    ({ isMac, ctrlKey, metaKey, shiftKey = false, altKey = false, opensFind }) => {
+      const runtime = new TerminalEmulatorRuntime({ isMac });
+      let findRequests = 0;
+      let prevented = false;
+      let stopped = false;
+      runtime.setCallbacks({
+        callbacks: {
+          onFindRequest: () => {
+            findRequests += 1;
+          },
+        },
+      });
+      const event = {
+        type: "keydown",
+        key: "f",
+        ctrlKey,
+        metaKey,
+        shiftKey,
+        altKey,
+        isComposing: false,
+        preventDefault: () => {
+          prevented = true;
+        },
+        stopPropagation: () => {
+          stopped = true;
+        },
+      } as KeyboardEvent;
+
+      let passedToXterm: boolean | undefined;
+      runtime.attachKeyEventHandler({
+        attachCustomKeyEventHandler: (handler) => {
+          passedToXterm = handler(event);
+        },
+        hasSelection: () => false,
+        getSelection: () => "",
+        paste: () => {},
+        input: () => {},
+        scrollToBottom: () => {},
+      });
+      expect(passedToXterm).toBe(!opensFind);
+      expect(findRequests).toBe(opensFind ? 1 : 0);
+      expect(prevented).toBe(opensFind);
+      expect(stopped).toBe(opensFind);
+    },
+  );
+
   it("drains contiguous plain writes without waiting for each commit, gating a clear behind them", () => {
     const { runtime, terminal, writeCallbacks, writeTexts } = createRuntimeWithTerminal();
     const committed: string[] = [];
@@ -258,11 +325,19 @@ describe("terminal-emulator-runtime", () => {
 
   it("reports input mode changes from terminal output and resets them on snapshots", () => {
     const { runtime, writeCallbacks } = createRuntimeWithTerminal();
-    const inputModeChanges: Array<{ kittyKeyboardFlags: number; win32InputMode: boolean }> = [];
+    const inputModeChanges: Array<{
+      kittyKeyboardFlags: number;
+      win32InputMode: boolean;
+      bracketedPaste: boolean;
+    }> = [];
     runtime.setCallbacks({
       callbacks: {
         onInputModeChange: (state) => {
-          inputModeChanges.push(state);
+          inputModeChanges.push({
+            kittyKeyboardFlags: state.kittyKeyboardFlags,
+            win32InputMode: state.win32InputMode,
+            bracketedPaste: Boolean(state.bracketedPaste),
+          });
         },
       },
     });
@@ -282,16 +357,29 @@ describe("terminal-emulator-runtime", () => {
     });
     // The plain write reports kitty flags synchronously during drain; the snapshot resets
     // them only after its barrier gate (the sentinel write callback) resolves.
-    expect(inputModeChanges).toEqual([{ kittyKeyboardFlags: 7, win32InputMode: false }]);
+    expect(inputModeChanges).toEqual([
+      { kittyKeyboardFlags: 7, win32InputMode: false, bracketedPaste: false },
+    ]);
 
-    // The plain write carries no onCommitted, so it registers no callback; writeCallbacks[0]
-    // is the barrier gate sentinel.
-    writeCallbacks[0]?.();
+    // Commit the plain write, then the sentinel that gates the snapshot.
+    writeCallbacks[0]();
+    expect(inputModeChanges).toHaveLength(1);
+    writeCallbacks[1]();
 
     expect(inputModeChanges).toEqual([
-      { kittyKeyboardFlags: 7, win32InputMode: false },
-      { kittyKeyboardFlags: 0, win32InputMode: false },
+      { kittyKeyboardFlags: 7, win32InputMode: false, bracketedPaste: false },
+      { kittyKeyboardFlags: 0, win32InputMode: false, bracketedPaste: false },
     ]);
+  });
+
+  it("exposes the tracked input mode state", () => {
+    const { runtime } = createRuntimeWithTerminal();
+
+    runtime.write({ data: terminalOutput("\x1b[?2004h") });
+
+    expect(runtime.getInputModeState()).toMatchObject({
+      bracketedPaste: true,
+    });
   });
 
   it("commits each drained plain write through its own xterm callback", () => {
@@ -385,14 +473,15 @@ describe("terminal-emulator-runtime", () => {
     runtime.write({ data: terminalOutput("output") });
     runtime.restoreOutput({ data: terminalOutput("snapshot") });
 
-    // The plain write carries no onCommitted so it registers no callback; writeCallbacks[0]
-    // is the sentinel gate. suppressInput only flips once the gate resolves the barrier.
+    // The plain write commits first. Only the following sentinel opens the barrier.
     expect(readSuppressInput()).toBe(false);
-    writeCallbacks[0]?.();
+    writeCallbacks[0]();
+    expect(readSuppressInput()).toBe(false);
+    writeCallbacks[1]();
     expect(readSuppressInput()).toBe(true);
 
-    // writeCallbacks[1] is the barrier's own snapshot write; committing it restores input.
-    writeCallbacks[1]?.();
+    // Committing the barrier's snapshot write restores input.
+    writeCallbacks[2]();
     expect(readSuppressInput()).toBe(false);
   });
 
@@ -476,10 +565,29 @@ describe("terminal-emulator-runtime", () => {
     (runtime as unknown as RuntimeFitProbe).fitAndEmitResize = fitAndEmitResize;
 
     runtime.resize();
-    runtime.resize({ force: true });
+    runtime.resize({ forceRefresh: true, shouldClaim: false });
 
     expect(fitAndEmitResize).toHaveBeenNthCalledWith(1, undefined);
-    expect(fitAndEmitResize).toHaveBeenNthCalledWith(2, { force: true });
+    expect(fitAndEmitResize).toHaveBeenNthCalledWith(2, {
+      forceRefresh: true,
+      shouldClaim: false,
+    });
+  });
+
+  it("marks explicit resize claims as forced so another client can reclaim the same size", () => {
+    expect(
+      createTerminalResizeEvent({
+        rows: 34,
+        cols: 181,
+        shouldClaim: true,
+        forceClaim: true,
+      }),
+    ).toEqual({
+      rows: 34,
+      cols: 181,
+      shouldClaim: true,
+      forceClaim: true,
+    });
   });
 
   it("updates terminal theme without remounting", () => {
@@ -539,14 +647,16 @@ describe("terminal-emulator-runtime", () => {
       cols: 40,
     };
     (runtime as unknown as { terminal: StubTerminal }).terminal = terminal;
-    (runtime as unknown as { fitAndEmitResize: (force: boolean) => void }).fitAndEmitResize =
-      fitAndEmitResize;
+    (runtime as unknown as RuntimeFitProbe).fitAndEmitResize = fitAndEmitResize;
 
     runtime.setFont({ fontFamily: "  Menlo  ", fontSize: 18 });
 
     expect(terminal.options?.fontFamily).toBe("Menlo");
     expect(terminal.options?.fontSize).toBe(18);
-    expect(fitAndEmitResize).toHaveBeenCalledWith({ force: true });
+    expect(fitAndEmitResize).toHaveBeenCalledWith({
+      forceRefresh: true,
+      shouldClaim: false,
+    });
     expect(refresh).toHaveBeenCalledWith(0, 11);
   });
 
@@ -565,7 +675,10 @@ describe("terminal-emulator-runtime", () => {
       }
     ).handleVisibilityRestore();
 
-    expect(fitAndEmitResize).toHaveBeenCalledWith({ force: true, shouldClaim: false });
+    expect(fitAndEmitResize).toHaveBeenCalledWith({
+      forceRefresh: true,
+      shouldClaim: false,
+    });
   });
 
   it("does not refit while the page is still hidden", () => {

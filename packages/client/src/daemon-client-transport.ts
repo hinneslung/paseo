@@ -10,13 +10,14 @@ export {
   describeTransportClose,
   describeTransportError,
   encodeUtf8String,
-  extractRelayMessageData,
+  extractRelayMessage,
   normalizeTransportPayload,
   safeRandomId,
 } from "./daemon-client-transport-utils.js";
 export {
   createEncryptedTransport,
   createRelayE2eeTransportFactory,
+  createRelayTransportFactory,
 } from "./daemon-client-relay-e2ee-transport.js";
 export {
   bindWsHandler,

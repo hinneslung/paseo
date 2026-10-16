@@ -3,6 +3,7 @@ import type { ListResult } from "../../output/index.js";
 import { scheduleLogSchema, toScheduleLogRow, type ScheduleLogRow } from "./schema.js";
 import {
   connectScheduleClient,
+  requireNewAgentSchedule,
   toScheduleCommandError,
   type ScheduleCommandOptions,
 } from "./shared.js";
@@ -12,8 +13,9 @@ export async function runLogsCommand(
   options: ScheduleCommandOptions,
   _command: Command,
 ): Promise<ListResult<ScheduleLogRow>> {
-  const { client } = await connectScheduleClient(options.host);
+  const { client } = await connectScheduleClient(options.daemonTarget);
   try {
+    await requireNewAgentSchedule(client, id);
     const payload = await client.scheduleLogs({ id });
     if (payload.error) {
       throw new Error(payload.error);

@@ -1,6 +1,6 @@
 import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { resolvePaseoHome } from "@getpaseo/server";
+import { resolvePaseoHome } from "@getpaseo/server/daemon-control";
 
 const ATTACHMENTS_DIRNAME = "desktop-attachments";
 const ATTACHMENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -40,10 +40,11 @@ function normalizeExtension(value: unknown): string {
     throw new Error("Attachment extension must be a string.");
   }
   const normalized = value.trim().toLowerCase();
-  if (!EXTENSION_PATTERN.test(normalized)) {
+  const extension = normalized.startsWith(".") ? normalized : `.${normalized}`;
+  if (!EXTENSION_PATTERN.test(extension)) {
     throw new Error(`Invalid attachment extension: ${value}`);
   }
-  return normalized;
+  return extension;
 }
 
 async function buildManagedAttachmentPath(input: {

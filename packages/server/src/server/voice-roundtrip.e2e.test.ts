@@ -161,7 +161,7 @@ let ctx: DaemonTestContext;
 beforeAll(async () => {
   ctx = await createDaemonTestContext({
     agentClients: {},
-    openai: { apiKey: openaiApiKey! },
+    openai: { stt: { apiKey: openaiApiKey! }, tts: { apiKey: openaiApiKey! } },
     speech: {
       providers: {
         dictationStt: { provider: "openai", explicit: true },
@@ -225,7 +225,7 @@ for (const targetProvider of [
       const timelineToolAgentIds = new Set<string>();
       const activityErrors: string[] = [];
 
-      const offStream = ctx.client.on("agent_stream", (message) => {
+      const offStream = ctx.client.subscribeAgentTimeline(voiceAgentId, (message) => {
         if (message.type !== "agent_stream") {
           return;
         }

@@ -1,30 +1,40 @@
-import { useMemo, type ReactNode } from "react";
-import { Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
-import Markdown, { type ASTNode } from "react-native-markdown-display";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
+import {
+  Pressable,
+  Text,
+  View,
+  type StyleProp,
+  type TextStyle,
+  type ViewStyle,
+} from "react-native";
+import { type ASTNode } from "react-native-markdown-display";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
-import { createMarkdownStyles } from "@/styles/markdown-styles";
+import { MarkdownRenderer } from "@/components/markdown/renderer";
+import { ChevronRight } from "lucide-react-native";
+import { isWeb } from "@/constants/platform";
+import type { Theme } from "@/styles/theme";
 import { getMarkdownListMarker } from "@/utils/markdown-list";
+import { createMarkdownParser } from "@/utils/markdown-parser";
+
+// Without this prop react-native-markdown-display builds its own parser with
+// `typographer: true`, which would render a plan's literal `(c)` as ©. Its
+// default also leaves linkify off, so this one keeps bare URLs as plain text.
+const planMarkdownParser = createMarkdownParser({ linkify: false });
 
 type MarkdownRuleStyles = Record<string, TextStyle & ViewStyle & { [key: string]: unknown }>;
 
 function MarkdownInlineText({
-  textKey,
   inheritedStyle,
   ruleStyle,
   children,
 }: {
-  textKey: string;
   inheritedStyle: StyleProp<TextStyle>;
   ruleStyle: StyleProp<TextStyle>;
   children: ReactNode;
 }) {
   const style = useMemo(() => [inheritedStyle, ruleStyle], [inheritedStyle, ruleStyle]);
-  return (
-    <Text key={textKey} style={style}>
-      {children}
-    </Text>
-  );
+  return <Text style={style}>{children}</Text>;
 }
 
 function MarkdownListItemContent({
@@ -39,12 +49,10 @@ function MarkdownListItemContent({
 }
 
 function MarkdownParagraph({
-  textKey,
   paragraphStyle,
   isLastChild,
   children,
 }: {
-  textKey: string;
   paragraphStyle: StyleProp<ViewStyle>;
   isLastChild: boolean;
   children: ReactNode;
@@ -53,11 +61,7 @@ function MarkdownParagraph({
     () => [paragraphStyle, isLastChild ? PARAGRAPH_LAST_CHILD : null],
     [paragraphStyle, isLastChild],
   );
-  return (
-    <View key={textKey} style={style}>
-      {children}
-    </View>
-  );
+  return <View style={style}>{children}</View>;
 }
 
 function createPlanMarkdownRules() {
@@ -69,11 +73,7 @@ function createPlanMarkdownRules() {
       styles: MarkdownRuleStyles,
       inheritedStyles: TextStyle = {},
     ) => (
-      <MarkdownInlineText
-        textKey={node.key}
-        inheritedStyle={inheritedStyles}
-        ruleStyle={styles.text}
-      >
+      <MarkdownInlineText key={node.key} inheritedStyle={inheritedStyles} ruleStyle={styles.text}>
         {node.content}
       </MarkdownInlineText>
     ),
@@ -85,7 +85,7 @@ function createPlanMarkdownRules() {
       inheritedStyles: TextStyle = {},
     ) => (
       <MarkdownInlineText
-        textKey={node.key}
+        key={node.key}
         inheritedStyle={inheritedStyles}
         ruleStyle={styles.textgroup}
       >
@@ -100,7 +100,7 @@ function createPlanMarkdownRules() {
       inheritedStyles: TextStyle = {},
     ) => (
       <MarkdownInlineText
-        textKey={node.key}
+        key={node.key}
         inheritedStyle={inheritedStyles}
         ruleStyle={styles.code_block}
       >
@@ -114,11 +114,7 @@ function createPlanMarkdownRules() {
       styles: MarkdownRuleStyles,
       inheritedStyles: TextStyle = {},
     ) => (
-      <MarkdownInlineText
-        textKey={node.key}
-        inheritedStyle={inheritedStyles}
-        ruleStyle={styles.fence}
-      >
+      <MarkdownInlineText key={node.key} inheritedStyle={inheritedStyles} ruleStyle={styles.fence}>
         {node.content}
       </MarkdownInlineText>
     ),
@@ -130,7 +126,7 @@ function createPlanMarkdownRules() {
       inheritedStyles: TextStyle = {},
     ) => (
       <MarkdownInlineText
-        textKey={node.key}
+        key={node.key}
         inheritedStyle={inheritedStyles}
         ruleStyle={styles.code_inline}
       >
@@ -183,7 +179,7 @@ function createPlanMarkdownRules() {
       const isLastChild = parent[0]?.children?.at(-1)?.key === node.key;
       return (
         <MarkdownParagraph
-          textKey={node.key}
+          key={node.key}
           paragraphStyle={styles.paragraph}
           isLastChild={isLastChild}
         >
@@ -194,54 +190,81 @@ function createPlanMarkdownRules() {
   };
 }
 
-export function PlanCard({
-  title,
-  description,
-  text,
-  footer,
-  disableOuterSpacing = false,
-  testID,
-}: {
+export type PlanOutcome = "pending" | "approved" | "rejected" | "canceled";
+
+interface PlanCardProps {
   title?: string;
   description?: string;
   text: string;
+  outcome?: PlanOutcome;
   footer?: ReactNode;
   disableOuterSpacing?: boolean;
   testID?: string;
-}) {
-  const { theme } = useUnistyles();
-  const { t } = useTranslation();
-  const markdownStyles = createMarkdownStyles(theme);
-  const markdownRules = createPlanMarkdownRules();
-  const resolvedTitle = title ?? t("agentStream.permission.plan");
+}
 
+const ThemedChevron = withUnistyles(ChevronRight);
+const chevronColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const markdownRules = createPlanMarkdownRules();
+
+export function PlanCard(props: PlanCardProps) {
+  // A resolution starts its own presentation state; subsequent taps stay local.
+  return <PlanCardContent key={props.outcome ?? "proposed"} {...props} />;
+}
+
+function PlanCardContent({
+  title,
+  description,
+  text,
+  outcome,
+  footer,
+  disableOuterSpacing = false,
+  testID,
+}: PlanCardProps) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(outcome !== "rejected" && outcome !== "canceled");
+  const labels = {
+    pending: title ?? t("agentStream.permission.plan"),
+    rejected: t("agentStream.permission.rejectedPlan"),
+    approved: t("agentStream.permission.approvedPlan"),
+    canceled: t("agentStream.permission.canceledPlan"),
+  };
+  const resolvedTitle = labels[outcome ?? "pending"];
+  const accessibilityState = useMemo(() => ({ expanded }), [expanded]);
+  const webExpandedState = useMemo(
+    () => (isWeb ? ({ "aria-expanded": expanded } as const) : null),
+    [expanded],
+  );
+  const toggleExpanded = useCallback(() => setExpanded((value) => !value), []);
   const containerStyle = useMemo(
-    () => [
-      styles.container,
-      disableOuterSpacing && styles.containerCompact,
-      {
-        backgroundColor: theme.colors.surface1,
-        borderColor: theme.colors.border,
-      },
-    ],
-    [disableOuterSpacing, theme.colors.surface1, theme.colors.border],
+    () => [styles.container, disableOuterSpacing && styles.containerCompact],
+    [disableOuterSpacing],
   );
-  const titleStyle = useMemo(
-    () => [styles.title, { color: theme.colors.foreground }],
-    [theme.colors.foreground],
-  );
-  const descriptionStyle = useMemo(
-    () => [styles.description, { color: theme.colors.foregroundMuted }],
-    [theme.colors.foregroundMuted],
+  const chevronStyle = useMemo(
+    () => [styles.chevron, expanded && styles.chevronExpanded],
+    [expanded],
   );
 
   return (
     <View testID={testID} style={containerStyle}>
-      <Text style={titleStyle}>{resolvedTitle}</Text>
-      {description ? <Text style={descriptionStyle}>{description}</Text> : null}
-      <Markdown style={markdownStyles} rules={markdownRules}>
-        {text}
-      </Markdown>
+      <Pressable
+        {...webExpandedState}
+        accessibilityRole="button"
+        accessibilityLabel={resolvedTitle}
+        accessibilityState={accessibilityState}
+        onPress={toggleExpanded}
+        style={styles.header}
+      >
+        <View style={chevronStyle}>
+          <ThemedChevron size={16} uniProps={chevronColor} />
+        </View>
+        <Text style={styles.title}>{resolvedTitle}</Text>
+      </Pressable>
+      {expanded ? (
+        <View style={styles.body}>
+          {description ? <Text style={styles.description}>{description}</Text> : null}
+          <MarkdownRenderer text={text} rules={markdownRules} markdownit={planMarkdownParser} />
+        </View>
+      ) : null}
       {footer ? <View style={styles.footer}>{footer}</View> : null}
     </View>
   );
@@ -253,17 +276,31 @@ const styles = StyleSheet.create((theme) => ({
     padding: theme.spacing[3],
     borderRadius: theme.spacing[2],
     borderWidth: 1,
+    backgroundColor: theme.colors.surface1,
+    borderColor: theme.colors.border,
     gap: theme.spacing[2],
   },
   containerCompact: {
     marginVertical: 0,
   },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    minHeight: 24,
+  },
+  chevron: {},
+  chevronExpanded: { transform: [{ rotate: "90deg" }] },
+  body: { gap: theme.spacing[2] },
   title: {
+    color: theme.colors.foreground,
+    flexShrink: 1,
     fontSize: theme.fontSize.base,
     lineHeight: 22,
   },
   description: {
-    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.base,
     lineHeight: 20,
   },
   footer: {

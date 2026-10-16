@@ -9,6 +9,7 @@ import { i18n } from "@/i18n/i18next";
 export interface AssistantFileLinkSource {
   href: string;
   text?: string;
+  title?: string;
   markup?: string;
   sourceInfo?: string;
   sourceType?: "inline-code";
@@ -193,7 +194,11 @@ export function shouldResolveDirectFileThroughSuggestions(input: {
 
   const normalizedRoot = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "");
   const normalizedPath = input.target.path.replace(/\\/g, "/");
-  return normalizedPath.startsWith(`${normalizedRoot}/`);
+  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) {
+    return false;
+  }
+
+  return !getAmbiguousSuggestionQuery(input.target, normalizedRoot).includes("/");
 }
 
 function isAbsoluteInlineCodeToken(token: string): boolean {

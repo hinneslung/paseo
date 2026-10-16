@@ -1,4 +1,5 @@
 import type { SessionOutboundMessage, WSOutboundMessage } from "../messages.js";
+import type { ProcessMemoryDiagnostics } from "../process-diagnostics.js";
 
 export interface WebSocketRuntimeCounters {
   connectedAwaitingHello: number;
@@ -16,6 +17,8 @@ export interface WebSocketRuntimeCounters {
   relayExternalSocketAttached: number;
   originRejected: number;
   hostRejected: number;
+  applicationJsonRejected: number;
+  applicationBinaryRejected: number;
 }
 
 export interface WebSocketRuntimeMetricsSnapshot {
@@ -40,6 +43,34 @@ export interface WebSocketRuntimeMetricsSnapshot {
     p50Ms: number;
     totalMs: number;
   }>;
+}
+
+export interface WebSocketRuntimeDiagnosticSnapshot<
+  TRuntime = unknown,
+  TAgents = unknown,
+  TGit = unknown,
+> extends WebSocketRuntimeMetricsSnapshot {
+  collectedAt: string;
+  final: boolean;
+  sessions: {
+    activeConnections: number;
+    externalSessionKeys: number;
+    reconnectGraceSessions: number;
+  };
+  sockets: {
+    activeSockets: number;
+    pendingConnections: number;
+  };
+  eventLoopDelay: {
+    p50Ms: number;
+    p99Ms: number;
+    maxMs: number;
+  } | null;
+  uptimeSeconds: number;
+  memory: ProcessMemoryDiagnostics;
+  runtime: TRuntime;
+  agents: TAgents;
+  git: TGit;
 }
 
 type Clock = () => number;
@@ -203,6 +234,8 @@ function createRuntimeCounters(): WebSocketRuntimeCounters {
     relayExternalSocketAttached: 0,
     originRejected: 0,
     hostRejected: 0,
+    applicationJsonRejected: 0,
+    applicationBinaryRejected: 0,
   };
 }
 

@@ -22,21 +22,30 @@ import Markdown, {
   type RenderRules,
 } from "react-native-markdown-display";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { AppearanceStyleBoundary } from "@/components/appearance-style-boundary";
 import { HighlightedCodeBlock } from "@/components/highlighted-code-block";
+import { MarkdownFenceBlock } from "@/components/markdown/fence";
 import { MarkdownParagraphView, MarkdownTextSpan } from "@/components/markdown-text";
+import { MarkdownTableCellText } from "@/components/markdown-text-selection";
 import { getMarkdownListMarker, getMarkdownListSpacing } from "@/utils/markdown-list";
 import { markdownNodeContainsType } from "@/utils/markdown-ast";
+import { createMarkdownParser } from "@/utils/markdown-parser";
 import { createCompactMarkdownStyles, createMarkdownStyles } from "@/styles/markdown-styles";
 import type { Theme } from "@/styles/theme";
 import { openExternalUrl } from "@/utils/open-external-url";
+import { isNative } from "@/constants/platform";
 import {
   splitHtmlishMarkdown,
   type MarkdownDisplayPart,
   type MarkdownInlineImagePart,
 } from "./html-ish";
 import { resolveInlineImageSize, type InlineImageDimensions } from "./inline-image-size";
+import {
+  getAssistantImageMetadata,
+  setAssistantImageMetadata,
+} from "@/utils/assistant-image-metadata";
 import { groupMarkdownParts, type MarkdownPartGroup } from "./part-groups";
+import { colorMarkdownLinkChildren } from "./link-children";
+import { MarkdownLinkText } from "./link-text";
 
 export type MarkdownStyles = Record<string, TextStyle & ViewStyle & { [key: string]: unknown }>;
 
@@ -61,7 +70,9 @@ function compactMarkdownStyleMapping(theme: Theme): Partial<MarkdownWithStableRe
   return { style: createCompactMarkdownStyles(theme) };
 }
 
-const defaultMarkdownParser = MarkdownIt({ typographer: true, linkify: true });
+// Serves PR comment bodies and the markdown file preview; agent chat passes its
+// own parser. The preview has to show the bytes on disk, so no typographer.
+const defaultMarkdownParser = createMarkdownParser({ linkify: true });
 const EMPTY_TEXT_STYLE: TextStyle = {};
 const MARKDOWN_LIST_ITEM_CONTENT_FLEX: ViewStyle = { flex: 1, flexShrink: 1, minWidth: 0 };
 export interface MarkdownRendererProps {
@@ -109,11 +120,7 @@ export function MarkdownRenderer({
     ],
   );
 
-  return (
-    <AppearanceStyleBoundary>
-      <MarkdownPartList parts={parts} rendererProps={rendererProps} />
-    </AppearanceStyleBoundary>
-  );
+  return <MarkdownPartList parts={parts} rendererProps={rendererProps} />;
 }
 
 type MarkdownPartRendererProps = Omit<MarkdownRendererProps, "text" | "enableHtmlish"> & {
@@ -144,26 +151,7 @@ function MarkdownPartList({
 function keyMarkdownGroups(
   groups: MarkdownPartGroup[],
 ): { key: string; group: MarkdownPartGroup }[] {
-  const seen = new Map<string, number>();
-  return groups.map((group) => {
-    const identity =
-      group.kind === "part"
-        ? getMarkdownPartIdentity(group.part)
-        : `imageText:${group.images.map((i) => i.src).join(",")}:${group.lead.slice(0, 80)}`;
-    const seenCount = seen.get(identity) ?? 0;
-    seen.set(identity, seenCount + 1);
-    return { key: `${identity}:${seenCount}`, group };
-  });
-}
-
-function getMarkdownPartIdentity(part: MarkdownDisplayPart): string {
-  if (part.kind === "markdown") {
-    return `markdown:${part.text.slice(0, 80)}`;
-  }
-  if (part.kind === "inlineImage") {
-    return `inlineImage:${part.src}:${part.alt}`;
-  }
-  return `details:${part.summary.slice(0, 80)}:${part.body.slice(0, 80)}`;
+  return groups.map((group, index) => ({ key: `${group.kind}:${index}`, group }));
 }
 
 function MarkdownPart({
@@ -217,11 +205,16 @@ function useNaturalImageDimensions(part: MarkdownInlineImagePart): {
   failed: boolean;
   setFailed: (failed: boolean) => void;
 } {
-  const [natural, setNatural] = useState<InlineImageDimensions | null>(null);
+  const cached = useMemo(() => getAssistantImageMetadata({ source: part.src }), [part.src]);
+  const [resolved, setResolved] = useState<{
+    source: string;
+    dimensions: InlineImageDimensions;
+  } | null>(null);
+  const natural = resolved?.source === part.src ? resolved.dimensions : cached;
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    if (part.width && part.height) {
+    if ((part.width && part.height) || cached) {
       return;
     }
 
@@ -229,8 +222,9 @@ function useNaturalImageDimensions(part: MarkdownInlineImagePart): {
     Image.getSize(
       part.src,
       (width, height) => {
+        setAssistantImageMetadata({ source: part.src }, { width, height });
         if (!cancelled) {
-          setNatural({ width, height });
+          setResolved({ source: part.src, dimensions: { width, height } });
         }
       },
       () => {
@@ -243,7 +237,7 @@ function useNaturalImageDimensions(part: MarkdownInlineImagePart): {
     return () => {
       cancelled = true;
     };
-  }, [part.height, part.src, part.width]);
+  }, [cached, part.height, part.src, part.width]);
 
   return { natural, failed, setFailed };
 }
@@ -481,6 +475,15 @@ function SharedMarkdownLink({
     if (onLinkPress?.(href) === false) return;
     void openExternalUrl(href);
   }, [href, onLinkPress]);
+  const style = useMemo(() => [inheritedStyles, linkStyle], [inheritedStyles, linkStyle]);
+
+  if (!isNative) {
+    return (
+      <MarkdownLinkText style={style} onPress={handlePress}>
+        {children}
+      </MarkdownLinkText>
+    );
+  }
 
   return (
     <MarkdownInheritedText
@@ -568,8 +571,26 @@ export function createSharedMarkdownRules(): RenderRules {
         {children}
       </MarkdownInheritedText>
     ),
-    hardbreak: (node: ASTNode) => <MarkdownTextSpan key={node.key}>{"\n"}</MarkdownTextSpan>,
-    softbreak: (node: ASTNode) => <MarkdownTextSpan key={node.key}>{"\n"}</MarkdownTextSpan>,
+    hardbreak: (
+      node: ASTNode,
+      _children: ReactNode[],
+      _parent: ASTNode[],
+      styles: MarkdownStyles,
+    ) => (
+      <MarkdownTextSpan key={node.key} style={styles.hardbreak}>
+        {"\n"}
+      </MarkdownTextSpan>
+    ),
+    softbreak: (
+      node: ASTNode,
+      _children: ReactNode[],
+      _parent: ASTNode[],
+      styles: MarkdownStyles,
+    ) => (
+      <MarkdownTextSpan key={node.key} style={styles.softbreak}>
+        {"\n"}
+      </MarkdownTextSpan>
+    ),
     code_block: (
       node: ASTNode,
       _children: ReactNode[],
@@ -592,10 +613,11 @@ export function createSharedMarkdownRules(): RenderRules {
       styles: MarkdownStyles,
       inheritedStyles: TextStyle = {},
     ) => (
-      <HighlightedCodeBlock
+      <MarkdownFenceBlock
         key={node.key}
         code={node.content}
-        language={node.sourceInfo}
+        info={node.sourceInfo}
+        phase="complete"
         inheritedStyles={inheritedStyles}
         textStyle={styles.fence}
       />
@@ -661,6 +683,16 @@ export function createSharedMarkdownRules(): RenderRules {
         </View>
       );
     },
+    th: (node: ASTNode, children: ReactNode[], _parent: ASTNode[], styles: MarkdownStyles) => (
+      <MarkdownTableCellText key={node.key}>
+        <View style={styles._VIEW_SAFE_th}>{children}</View>
+      </MarkdownTableCellText>
+    ),
+    td: (node: ASTNode, children: ReactNode[], _parent: ASTNode[], styles: MarkdownStyles) => (
+      <MarkdownTableCellText key={node.key}>
+        <View style={styles._VIEW_SAFE_td}>{children}</View>
+      </MarkdownTableCellText>
+    ),
     paragraph: (
       node: ASTNode,
       children: ReactNode[],
@@ -689,7 +721,7 @@ export function createSharedMarkdownRules(): RenderRules {
         linkStyle={styles.link}
         onLinkPress={onLinkPress}
       >
-        {children}
+        {colorMarkdownLinkChildren(children, styles.link.color)}
       </SharedMarkdownLink>
     ),
   };
@@ -718,7 +750,7 @@ const detailsStyles = StyleSheet.create((theme) => ({
     flex: 1,
     minWidth: 0,
     color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.normal,
     lineHeight: 18,
   },

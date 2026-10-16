@@ -1,9 +1,12 @@
+import type { ProjectedTimelineRow } from "./timeline-projection.js";
 import type { AgentTimelineItem } from "./agent-sdk-types.js";
 
 export interface AgentTimelineRow {
   seq: number;
   timestamp: string;
   item: AgentTimelineItem;
+  readonly turnId?: string;
+  readonly providerMessageId?: string;
 }
 
 export interface AgentTimelineCursor {
@@ -17,7 +20,7 @@ export interface AgentTimelineFetchOptions {
   direction?: AgentTimelineFetchDirection;
   cursor?: AgentTimelineCursor;
   /**
-   * Number of canonical rows to return.
+   * Number of projected items to return.
    * - undefined: store default
    * - 0: all rows in the selected window
    */
@@ -39,14 +42,16 @@ export interface AgentTimelineFetchResult {
   window: AgentTimelineWindow;
   hasOlder: boolean;
   hasNewer: boolean;
-  rows: AgentTimelineRow[];
+  startSeq: number | null;
+  endSeq: number | null;
+  rows: ProjectedTimelineRow[];
 }
 
 export interface AgentTimelineStore {
   appendCommitted(
     agentId: string,
     item: AgentTimelineItem,
-    options?: { timestamp?: string },
+    options?: { timestamp?: string; turnId?: string },
   ): Promise<AgentTimelineRow>;
   fetchCommitted(
     agentId: string,
@@ -58,4 +63,5 @@ export interface AgentTimelineStore {
   getLastAssistantMessage(agentId: string): Promise<string | null>;
   deleteAgent(agentId: string): Promise<void>;
   bulkInsert(agentId: string, rows: readonly AgentTimelineRow[]): Promise<void>;
+  updateCommittedRow(agentId: string, row: AgentTimelineRow): Promise<void>;
 }

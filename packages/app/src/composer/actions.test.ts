@@ -1,26 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AgentAttachment, GitHubSearchItem } from "@getpaseo/protocol/messages";
+import type { AgentAttachment, ForgeSearchItem } from "@getpaseo/protocol/messages";
 import type {
   AttachmentMetadata,
   ComposerAttachment,
   UserComposerAttachment,
   WorkspaceComposerAttachment,
 } from "@/attachments/types";
-import type { StreamItem } from "@/types/stream";
 import {
+  appendSubmittedUserMessage,
+  removeSubmittedUserMessage,
+  type StreamItem,
+} from "@/types/stream";
+import {
+  acceptMessageSubmission,
+  beginMessageSubmission,
+  rejectMessageSubmission,
+  type MessageSubmissionRecord,
+} from "@/composer/submission/model";
+import {
+  uploadFileAttachments,
   cancelComposerAgent,
   dispatchComposerAgentMessage,
   editQueuedComposerMessage,
-  findGithubItemByOption,
-  isAttachmentSelectedForGithubItem,
+  findForgeItemByOption,
+  isAttachmentSelectedForForgeItem,
   openComposerAttachment,
   pickAndPersistImages,
   queueComposerMessage,
   removeComposerAttachmentAtIndex,
   sendQueuedComposerMessageNow,
-  toggleGithubAttachment,
-  toggleGithubAttachmentFromPicker,
-  type AgentStreamWriter,
+  toggleForgeAttachment,
+  toggleForgeAttachmentFromPicker,
+  type MessageSubmissionWriter,
   type AttachmentPersister,
   type ComposerCancelClient,
   type ComposerSendClient,
@@ -38,7 +49,7 @@ const imageMetadata: AttachmentMetadata = {
   createdAt: 1,
 };
 
-const issueItem: GitHubSearchItem = {
+const issueItem: ForgeSearchItem = {
   kind: "issue",
   number: 101,
   title: "Fix composer attachments",
@@ -50,8 +61,8 @@ const issueItem: GitHubSearchItem = {
   headRefName: null,
 };
 
-const prItem: GitHubSearchItem = {
-  kind: "pr",
+const prItem: ForgeSearchItem = {
+  kind: "change_request",
   number: 202,
   title: "Refactor composer attachments",
   url: "https://github.com/acme/paseo/pull/202",
@@ -133,19 +144,26 @@ function browserElementWorkspaceAttachment(): Extract<
 
 function createFakePersister(): AttachmentPersister & {
   blobCalls: Array<{ blob: Blob; mimeType: string; fileName: string | null }>;
+  dataUrlCalls: Array<{ dataUrl: string; mimeType: string; fileName: string | null }>;
   fileUriCalls: Array<{ uri: string; mimeType: string; fileName: string | null }>;
   deletedBatches: AttachmentMetadata[][];
 } {
   const blobCalls: Array<{ blob: Blob; mimeType: string; fileName: string | null }> = [];
+  const dataUrlCalls: Array<{ dataUrl: string; mimeType: string; fileName: string | null }> = [];
   const fileUriCalls: Array<{ uri: string; mimeType: string; fileName: string | null }> = [];
   const deletedBatches: AttachmentMetadata[][] = [];
   return {
     blobCalls,
+    dataUrlCalls,
     fileUriCalls,
     deletedBatches,
     persistFromBlob: async ({ blob, mimeType, fileName }) => {
       blobCalls.push({ blob, mimeType, fileName });
       return { ...imageMetadata, id: `blob-${blobCalls.length}` };
+    },
+    persistFromDataUrl: async ({ dataUrl, mimeType, fileName }) => {
+      dataUrlCalls.push({ dataUrl, mimeType, fileName });
+      return { ...imageMetadata, id: `data-url-${dataUrlCalls.length}` };
     },
     persistFromFileUri: async ({ uri, mimeType, fileName }) => {
       fileUriCalls.push({ uri, mimeType, fileName });
@@ -162,20 +180,23 @@ interface FakeSendCall {
   text: string;
   options: {
     messageId: string;
+    activeTurnBehavior?: "interrupt" | "steer";
     images: Array<{ data: string; mimeType: string }>;
     attachments: AgentAttachment[];
   };
 }
 
 function createFakeSendClient(
-  options: { rejection?: Error } = {},
+  options: { rejection?: Error; beforeRejection?: (call: FakeSendCall) => void } = {},
 ): ComposerSendClient & { calls: FakeSendCall[] } {
   const calls: FakeSendCall[] = [];
   return {
     calls,
     sendAgentMessage: async (agentId, text, opts) => {
-      calls.push({ agentId, text, options: opts });
+      const call = { agentId, text, options: opts };
+      calls.push(call);
       if (options.rejection) {
+        options.beforeRejection?.(call);
         throw options.rejection;
       }
     },
@@ -183,7 +204,7 @@ function createFakeSendClient(
   };
 }
 
-interface FakeStream extends AgentStreamWriter {
+interface FakeStream extends MessageSubmissionWriter {
   head: Map<string, StreamItem[]>;
   tail: Map<string, StreamItem[]>;
 }
@@ -192,16 +213,67 @@ function createFakeStream(initialHead: Map<string, StreamItem[]> = new Map()): F
   const fake: FakeStream = {
     head: new Map(initialHead),
     tail: new Map(),
-    getTail: (agentId) => fake.tail.get(agentId),
-    getHead: (agentId) => fake.head.get(agentId),
-    setHead: (updater) => {
-      fake.head = updater(fake.head);
+    begin: (agentId, message) => {
+      const current = readSubmission(fake, agentId);
+      const stream = appendSubmittedUserMessage({
+        tail: current.tail,
+        head: current.head,
+        message,
+      });
+      writeSubmission(fake, agentId, {
+        ...stream,
+        submissions: beginMessageSubmission(current.submissions, {
+          clientMessageId: message.clientMessageId!,
+        }),
+      });
     },
-    setTail: (updater) => {
-      fake.tail = updater(fake.tail);
+    accept: (agentId, clientMessageId) => {
+      const current = readSubmission(fake, agentId);
+      writeSubmission(fake, agentId, {
+        ...current,
+        submissions: acceptMessageSubmission(current.submissions, clientMessageId),
+      });
+    },
+    reject: (agentId, clientMessageId) => {
+      const current = readSubmission(fake, agentId);
+      const result = rejectMessageSubmission(current.submissions, clientMessageId);
+      const stream =
+        result.outcome === "rejected"
+          ? removeSubmittedUserMessage({
+              tail: current.tail,
+              head: current.head,
+              clientMessageId,
+            })
+          : current;
+      writeSubmission(fake, agentId, { ...stream, submissions: result.submissions });
+      return result.outcome;
     },
   };
   return fake;
+}
+
+const submissionsByFakeStream = new WeakMap<FakeStream, Map<string, MessageSubmissionRecord[]>>();
+
+interface FakeSubmissionState {
+  tail: StreamItem[];
+  head: StreamItem[];
+  submissions: MessageSubmissionRecord[];
+}
+
+function readSubmission(fake: FakeStream, agentId: string): FakeSubmissionState {
+  return {
+    tail: fake.tail.get(agentId) ?? [],
+    head: fake.head.get(agentId) ?? [],
+    submissions: submissionsByFakeStream.get(fake)?.get(agentId) ?? [],
+  };
+}
+
+function writeSubmission(fake: FakeStream, agentId: string, state: FakeSubmissionState): void {
+  fake.tail = new Map(fake.tail).set(agentId, state.tail);
+  fake.head = new Map(fake.head).set(agentId, state.head);
+  const submissions = submissionsByFakeStream.get(fake) ?? new Map();
+  submissions.set(agentId, state.submissions);
+  submissionsByFakeStream.set(fake, submissions);
 }
 
 function createFakeQueue(
@@ -243,31 +315,42 @@ describe("cancelComposerAgent", () => {
     };
   }
 
-  it("issues a cancel and reports true when the agent is running, connected, and not already canceling", () => {
+  it("returns the cancel request when the agent is running, connected, and not already canceling", async () => {
     const input = baseInput();
     const result = cancelComposerAgent(input);
-    expect(result).toBe(true);
+    expect(result).not.toBeNull();
+    await result;
     expect(input.client.canceledIds).toEqual(["agent"]);
+  });
+
+  it("returns a rejected cancel request to the composer", async () => {
+    const cancellationError = new Error("Provider rejected the interrupt");
+    const input = baseInput();
+    input.client.cancelAgent = async () => {
+      throw cancellationError;
+    };
+
+    await expect(cancelComposerAgent(input)).rejects.toBe(cancellationError);
   });
 
   it("does nothing when the agent is not running", () => {
     const input = baseInput();
     const result = cancelComposerAgent({ ...input, isAgentRunning: false });
-    expect(result).toBe(false);
+    expect(result).toBeNull();
     expect(input.client.canceledIds).toEqual([]);
   });
 
   it("does nothing when the agent is already being canceled", () => {
     const input = baseInput();
     const result = cancelComposerAgent({ ...input, isCancellingAgent: true });
-    expect(result).toBe(false);
+    expect(result).toBeNull();
     expect(input.client.canceledIds).toEqual([]);
   });
 
   it("does nothing when disconnected or the client is null", () => {
     const input = baseInput();
-    expect(cancelComposerAgent({ ...input, isConnected: false })).toBe(false);
-    expect(cancelComposerAgent({ ...input, client: null })).toBe(false);
+    expect(cancelComposerAgent({ ...input, isConnected: false })).toBeNull();
+    expect(cancelComposerAgent({ ...input, client: null })).toBeNull();
     expect(input.client.canceledIds).toEqual([]);
   });
 });
@@ -301,7 +384,11 @@ describe("pickAndPersistImages", () => {
     const persister = createFakePersister();
     const result = await pickAndPersistImages({
       pickImages: async () => [
-        { source: { kind: "file_uri", uri: "/tmp/x.jpg" }, mimeType: null, fileName: null },
+        {
+          source: { kind: "file_uri", uri: "/tmp/x.jpg" },
+          mimeType: "image/jpeg",
+          fileName: null,
+        },
       ],
       persister,
     });
@@ -310,9 +397,154 @@ describe("pickAndPersistImages", () => {
     ]);
     expect(result).toHaveLength(1);
   });
+
+  it("persists data_url sources via persistFromDataUrl", async () => {
+    const persister = createFakePersister();
+    const dataUrl = "data:image/png;base64,AAEC";
+    const result = await pickAndPersistImages({
+      pickImages: async () => [
+        {
+          source: { kind: "data_url", dataUrl },
+          mimeType: "image/png",
+          fileName: "clipboard.png",
+        },
+      ],
+      persister,
+    });
+    expect(persister.dataUrlCalls).toEqual([
+      { dataUrl, mimeType: "image/png", fileName: "clipboard.png" },
+    ]);
+    expect(result).toHaveLength(1);
+  });
 });
 
 describe("dispatchComposerAgentMessage", () => {
+  it("forwards the configured active-turn intent without provider capability checks", async () => {
+    const client = createFakeSendClient();
+    const stream = createFakeStream();
+
+    await dispatchComposerAgentMessage({
+      client,
+      agentId: "agent",
+      text: "steer this turn",
+      attachments: [],
+      encodeImages: async () => [],
+      submission: stream,
+      activeTurnBehavior: "steer",
+    });
+
+    expect(client.calls[0]?.options.activeTurnBehavior).toBe("steer");
+  });
+
+  it("stamps only a steer optimistic row with the daemon active turn ID", async () => {
+    const client = createFakeSendClient();
+    const stream = createFakeStream();
+    await dispatchComposerAgentMessage({
+      client,
+      agentId: "agent",
+      text: "hello",
+      attachments: [],
+      encodeImages: async () => [],
+      submission: stream,
+      activeTurnBehavior: "steer",
+      activeTurnId: "turn-1",
+    });
+    expect(stream.tail.get("agent")?.[0]).toMatchObject({ turnId: "turn-1" });
+    const legacy = createFakeStream();
+    await dispatchComposerAgentMessage({
+      client,
+      agentId: "legacy",
+      text: "hello",
+      attachments: [],
+      encodeImages: async () => [],
+      submission: legacy,
+      activeTurnBehavior: "steer",
+    });
+    expect(legacy.tail.get("legacy")?.[0]?.turnId).toBeUndefined();
+  });
+
+  it("removes the submitted prompt when the host rejects it", async () => {
+    const rejection = new Error("Host rejected prompt");
+    const client = createFakeSendClient({ rejection });
+    const stream = createFakeStream();
+
+    await expect(
+      dispatchComposerAgentMessage({
+        client,
+        agentId: "agent",
+        text: "rejected prompt",
+        attachments: [],
+        encodeImages: passthroughEncodeImages,
+        submission: stream,
+      }),
+    ).rejects.toBe(rejection);
+
+    expect(stream.head.get("agent")).toEqual([]);
+    expect(stream.tail.get("agent") ?? []).toEqual([]);
+  });
+
+  it("rolls back an already-running force send when its RPC fails", async () => {
+    const stream = createFakeStream();
+    const transportError = new Error("Force send failed while the prior turn was running");
+    const client = createFakeSendClient({ rejection: transportError });
+
+    await expect(
+      dispatchComposerAgentMessage({
+        client,
+        agentId: "agent",
+        text: "force send",
+        attachments: [],
+        encodeImages: passthroughEncodeImages,
+        submission: stream,
+      }),
+    ).rejects.toBe(transportError);
+
+    expect(stream.tail.get("agent") ?? []).toEqual([]);
+  });
+
+  it("does not swallow a transport error when submission state is missing", async () => {
+    const transportError = new Error("Connection lost with unknown submission state");
+    const client = createFakeSendClient({ rejection: transportError });
+    const submission: MessageSubmissionWriter = {
+      begin: () => {},
+      accept: () => {},
+      reject: () => "unknown",
+    };
+
+    await expect(
+      dispatchComposerAgentMessage({
+        client,
+        agentId: "agent",
+        text: "unknown state",
+        attachments: [],
+        encodeImages: passthroughEncodeImages,
+        submission,
+      }),
+    ).rejects.toBe(transportError);
+  });
+
+  it("surfaces an ambiguous failure even when a concurrent canonical echo was observed", async () => {
+    const transportError = new Error("Connection lost after delivery may have occurred");
+    const client = createFakeSendClient({ rejection: transportError });
+    const submission: MessageSubmissionWriter = {
+      begin: () => {},
+      accept: () => {},
+      reject: () => "accepted",
+    };
+
+    await expect(
+      dispatchComposerAgentMessage({
+        client,
+        agentId: "agent",
+        text: "ambiguous steer",
+        attachments: [],
+        encodeImages: passthroughEncodeImages,
+        submission,
+        activeTurnBehavior: "steer",
+      }),
+    ).rejects.toBe(transportError);
+  });
+
   it("sends text + image data + structured attachments and appends user_message to the tail when head is empty", async () => {
     const client = createFakeSendClient();
     const stream = createFakeStream();
@@ -327,7 +559,7 @@ describe("dispatchComposerAgentMessage", () => {
         { kind: "github_pr", item: prItem },
       ],
       encodeImages: passthroughEncodeImages,
-      stream,
+      submission: stream,
     });
 
     expect(client.calls).toHaveLength(1);
@@ -336,6 +568,47 @@ describe("dispatchComposerAgentMessage", () => {
     expect(call.text).toBe("send attachments");
     expect(call.options.images).toEqual([{ data: image.id, mimeType: image.mimeType }]);
     expect(call.options.attachments).toEqual([
+      {
+        type: "forge_change_request",
+        mimeType: "application/paseo-forge-change-request",
+        forge: "github",
+        number: 202,
+        title: "Refactor composer attachments",
+        url: "https://github.com/acme/paseo/pull/202",
+        body: "PR body",
+        baseRefName: "main",
+        headRefName: "composer-attachments",
+      },
+    ]);
+
+    expect(stream.head.get("agent")).toEqual([]);
+    const tail = stream.tail.get("agent");
+    expect(tail).toHaveLength(1);
+    const userMessage = tail?.[0] as Extract<StreamItem, { kind: "user_message" }>;
+    expect(userMessage.kind).toBe("user_message");
+    expect(userMessage.text).toBe("send attachments");
+    expect(userMessage.images).toEqual([image]);
+    expect(userMessage.attachments).toEqual(call.options.attachments);
+    expect(userMessage.id).toBe(call.options.messageId);
+    expect(userMessage.clientMessageId).toBe(call.options.messageId);
+    expect(userMessage.messageId).toBeUndefined();
+  });
+
+  it("can send legacy GitHub attachment payloads for old daemons", async () => {
+    const client = createFakeSendClient();
+    const stream = createFakeStream();
+
+    await dispatchComposerAgentMessage({
+      client,
+      agentId: "agent",
+      text: "send old attachment",
+      attachments: [{ kind: "forge_change_request", item: prItem }],
+      attachmentSubmitFormat: "legacy-github",
+      encodeImages: passthroughEncodeImages,
+      submission: stream,
+    });
+
+    expect(client.calls[0].options.attachments).toEqual([
       {
         type: "github_pr",
         mimeType: "application/github-pr",
@@ -347,17 +620,6 @@ describe("dispatchComposerAgentMessage", () => {
         headRefName: "composer-attachments",
       },
     ]);
-
-    expect(stream.head.get("agent")).toBeUndefined();
-    const tail = stream.tail.get("agent");
-    expect(tail).toHaveLength(1);
-    const userMessage = tail?.[0] as Extract<StreamItem, { kind: "user_message" }>;
-    expect(userMessage.kind).toBe("user_message");
-    expect(userMessage.text).toBe("send attachments");
-    expect(userMessage.images).toEqual([image]);
-    expect(userMessage.attachments).toEqual(call.options.attachments);
-    expect(userMessage.id).toBe(call.options.messageId);
-    expect(userMessage.optimistic).toBe(true);
   });
 
   it("appends to the existing head when one is present", async () => {
@@ -376,11 +638,11 @@ describe("dispatchComposerAgentMessage", () => {
       text: "next message",
       attachments: [],
       encodeImages: passthroughEncodeImages,
-      stream,
+      submission: stream,
     });
 
     expect(stream.head.get("agent")).toHaveLength(2);
-    expect(stream.tail.get("agent")).toBeUndefined();
+    expect(stream.tail.get("agent")).toEqual([]);
   });
 
   it("submits empty wire arrays when no attachments are provided", async () => {
@@ -393,7 +655,7 @@ describe("dispatchComposerAgentMessage", () => {
       text: "plain message",
       attachments: [],
       encodeImages: passthroughEncodeImages,
-      stream,
+      submission: stream,
     });
 
     expect(client.calls[0]?.options).toMatchObject({
@@ -413,7 +675,7 @@ describe("dispatchComposerAgentMessage", () => {
       text: "review this",
       attachments: [review],
       encodeImages: passthroughEncodeImages,
-      stream,
+      submission: stream,
     });
 
     expect(client.calls[0]?.options.attachments).toEqual([review.attachment]);
@@ -431,7 +693,7 @@ describe("dispatchComposerAgentMessage", () => {
       text: "inspect element",
       attachments: [browserElement],
       encodeImages: passthroughEncodeImages,
-      stream,
+      submission: stream,
     });
 
     expect(client.calls[0]?.options.attachments).toEqual([
@@ -669,21 +931,50 @@ describe("openComposerAttachment", () => {
     });
     expect(externalUrlCalls).toEqual([issueItem.url]);
   });
+
+  it("opens plugin resource URLs through the external url opener", () => {
+    const externalUrlCalls: string[] = [];
+    openComposerAttachment({
+      attachment: {
+        kind: "plugin_resource",
+        pluginId: "linear",
+        sourceId: "issues",
+        sourceTitle: "Linear issue",
+        sourceIcon: "CircleDot",
+        item: {
+          id: "issue-uuid",
+          identifier: "ENG-123",
+          title: "Plugin attachments",
+          url: "https://linear.app/acme/issue/ENG-123/plugin-attachments",
+          text: "Linear issue ENG-123: Plugin attachments",
+          resourceType: "issue",
+        },
+      },
+      setLightboxMetadata: () => {
+        throw new Error("unexpected lightbox call");
+      },
+      openWorkspaceAttachment: () => false,
+      openExternalUrl: (url) => {
+        externalUrlCalls.push(url);
+      },
+    });
+    expect(externalUrlCalls).toEqual(["https://linear.app/acme/issue/ENG-123/plugin-attachments"]);
+  });
 });
 
-describe("toggleGithubAttachment", () => {
+describe("toggleForgeAttachment", () => {
   it("appends a GitHub issue when not already attached", () => {
-    const next = toggleGithubAttachment([], issueItem);
-    expect(next).toEqual([{ kind: "github_issue", item: issueItem }]);
+    const next = toggleForgeAttachment([], issueItem);
+    expect(next).toEqual([{ kind: "forge_issue", item: issueItem }]);
   });
 
   it("appends a GitHub PR when not already attached", () => {
-    const next = toggleGithubAttachment([], prItem);
-    expect(next).toEqual([{ kind: "github_pr", item: prItem }]);
+    const next = toggleForgeAttachment([], prItem);
+    expect(next).toEqual([{ kind: "forge_change_request", item: prItem }]);
   });
 
   it("removes an existing GitHub item with the same kind+number", () => {
-    const next = toggleGithubAttachment([{ kind: "github_issue", item: issueItem }], issueItem);
+    const next = toggleForgeAttachment([{ kind: "github_issue", item: issueItem }], issueItem);
     expect(next).toEqual([]);
   });
 
@@ -692,51 +983,51 @@ describe("toggleGithubAttachment", () => {
       { kind: "github_issue", item: issueItem },
       { kind: "github_pr", item: prItem },
     ];
-    const otherIssue: GitHubSearchItem = { ...issueItem, number: 999 };
-    const next = toggleGithubAttachment(start, otherIssue);
+    const otherIssue: ForgeSearchItem = { ...issueItem, number: 999 };
+    const next = toggleForgeAttachment(start, otherIssue);
     expect(next).toEqual([
       { kind: "github_issue", item: issueItem },
       { kind: "github_pr", item: prItem },
-      { kind: "github_issue", item: otherIssue },
+      { kind: "forge_issue", item: otherIssue },
     ]);
   });
 });
 
-describe("toggleGithubAttachmentFromPicker", () => {
+describe("toggleForgeAttachmentFromPicker", () => {
   it("marks an existing GitHub item as removed when picker toggle removes it", () => {
-    const markGithubAttachmentRemoved = vi.fn();
+    const markForgeAttachmentRemoved = vi.fn();
     const attachment: UserComposerAttachment = { kind: "github_pr", item: prItem };
 
-    const next = toggleGithubAttachmentFromPicker({
+    const next = toggleForgeAttachmentFromPicker({
       current: [attachment],
       item: prItem,
-      markGithubAttachmentRemoved,
+      markForgeAttachmentRemoved,
     });
 
     expect(next).toEqual([]);
-    expect(markGithubAttachmentRemoved).toHaveBeenCalledTimes(1);
-    expect(markGithubAttachmentRemoved).toHaveBeenCalledWith(attachment);
+    expect(markForgeAttachmentRemoved).toHaveBeenCalledTimes(1);
+    expect(markForgeAttachmentRemoved).toHaveBeenCalledWith(attachment);
   });
 
   it("does not mark a GitHub item removed when picker toggle adds it", () => {
-    const markGithubAttachmentRemoved = vi.fn();
+    const markForgeAttachmentRemoved = vi.fn();
 
-    const next = toggleGithubAttachmentFromPicker({
+    const next = toggleForgeAttachmentFromPicker({
       current: [],
       item: issueItem,
-      markGithubAttachmentRemoved,
+      markForgeAttachmentRemoved,
     });
 
-    expect(next).toEqual([{ kind: "github_issue", item: issueItem }]);
-    expect(markGithubAttachmentRemoved).not.toHaveBeenCalled();
+    expect(next).toEqual([{ kind: "forge_issue", item: issueItem }]);
+    expect(markForgeAttachmentRemoved).not.toHaveBeenCalled();
   });
 });
 
-describe("findGithubItemByOption / isAttachmentSelectedForGithubItem", () => {
+describe("findForgeItemByOption / isAttachmentSelectedForForgeItem", () => {
   it("locates items via their composite kind:number id", () => {
-    expect(findGithubItemByOption([issueItem, prItem], "issue:101")).toBe(issueItem);
-    expect(findGithubItemByOption([issueItem, prItem], "pr:202")).toBe(prItem);
-    expect(findGithubItemByOption([issueItem], "pr:404")).toBeUndefined();
+    expect(findForgeItemByOption([issueItem, prItem], "issue:101")).toBe(issueItem);
+    expect(findForgeItemByOption([issueItem, prItem], "change_request:202")).toBe(prItem);
+    expect(findForgeItemByOption([issueItem], "change_request:404")).toBeUndefined();
   });
 
   it("recognizes when an attachment list already contains a matching GitHub item", () => {
@@ -745,7 +1036,90 @@ describe("findGithubItemByOption / isAttachmentSelectedForGithubItem", () => {
       { kind: "github_issue", item: issueItem },
       reviewWorkspaceAttachment("ignored"),
     ];
-    expect(isAttachmentSelectedForGithubItem(attachments, issueItem)).toBe(true);
-    expect(isAttachmentSelectedForGithubItem(attachments, prItem)).toBe(false);
+    expect(isAttachmentSelectedForForgeItem(attachments, issueItem)).toBe(true);
+    expect(isAttachmentSelectedForForgeItem(attachments, prItem)).toBe(false);
   });
+});
+
+describe("file upload preparation", () => {
+  it("waits for file bytes and daemon acknowledgement before returning the attachment", async () => {
+    let resolveRead!: (bytes: Uint8Array) => void;
+    const read = new Promise<Uint8Array>((resolve) => {
+      resolveRead = resolve;
+    });
+    let acknowledge!: (result: Awaited<ReturnType<ComposerSendClient["uploadFile"]>>) => void;
+    const response = new Promise<Awaited<ReturnType<ComposerSendClient["uploadFile"]>>>(
+      (resolve) => {
+        acknowledge = resolve;
+      },
+    );
+    const sent: string[] = [];
+    const upload = uploadFileAttachments({
+      client: {
+        sendAgentMessage: async () => {},
+        uploadFile: async (file) => {
+          sent.push(file.fileName);
+          expect(file.bytes).toEqual(new Uint8Array([1, 2]));
+          return response;
+        },
+      },
+      files: [
+        { fileName: "sample.bin", mimeType: "application/octet-stream", readBytes: () => read },
+      ],
+    });
+    let completed = false;
+    void upload.then(() => {
+      completed = true;
+      return undefined;
+    });
+    expect(sent).toEqual([]);
+    resolveRead(new Uint8Array([1, 2]));
+    await Promise.resolve();
+    expect(sent).toEqual(["sample.bin"]);
+    expect(completed).toBe(false);
+    const file = {
+      type: "uploaded_file" as const,
+      id: "file-1",
+      fileName: "sample.bin",
+      mimeType: "application/octet-stream",
+      size: 2,
+      path: "/uploads/sample.bin",
+    };
+    acknowledge({ requestId: "req-1", file, error: null });
+    await expect(upload).resolves.toEqual([{ kind: "file", attachment: file }]);
+  });
+
+  it.each(["unreadable", "oversized"])(
+    "does not upload a batch containing a later %s file",
+    async (failure) => {
+      let sends = 0;
+      await expect(
+        uploadFileAttachments({
+          client: {
+            sendAgentMessage: async () => {},
+            uploadFile: async () => {
+              sends++;
+              throw new Error("unexpected send");
+            },
+          },
+          files: [
+            {
+              fileName: "valid.bin",
+              mimeType: "application/octet-stream",
+              readBytes: async () => new Uint8Array([1]),
+            },
+            {
+              fileName: "missing.bin",
+              mimeType: "application/octet-stream",
+              readBytes: async () => {
+                if (failure === "oversized") return new Uint8Array(50 * 1024 * 1024 + 1);
+                throw new Error("read failed");
+              },
+            },
+          ],
+        }),
+      ).rejects.toThrow(failure === "unreadable" ? "read failed" : "too large");
+      expect(sends).toBe(0);
+    },
+  );
 });

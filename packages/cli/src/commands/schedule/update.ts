@@ -8,6 +8,7 @@ import {
 import {
   connectScheduleClient,
   parseScheduleUpdateInput,
+  requireNewAgentSchedule,
   toScheduleCommandError,
   type ScheduleCommandOptions,
 } from "./shared.js";
@@ -22,10 +23,8 @@ export interface ScheduleUpdateOptions extends ScheduleCommandOptions {
   model?: string;
   mode?: string;
   cwd?: string;
-  maxRuns?: string;
-  noMaxRuns?: boolean;
-  expiresIn?: string;
-  noExpiresIn?: boolean;
+  maxRuns?: string | false;
+  expiresIn?: string | false;
 }
 
 export async function runUpdateCommand(
@@ -44,13 +43,14 @@ export async function runUpdateCommand(
     model: options.model,
     mode: options.mode,
     cwd: options.cwd,
-    maxRuns: options.maxRuns,
-    expiresIn: options.expiresIn,
-    clearMaxRuns: options.noMaxRuns,
-    clearExpires: options.noExpiresIn,
+    maxRuns: options.maxRuns === false ? undefined : options.maxRuns,
+    expiresIn: options.expiresIn === false ? undefined : options.expiresIn,
+    clearMaxRuns: options.maxRuns === false,
+    clearExpires: options.expiresIn === false,
   });
-  const { client } = await connectScheduleClient(options.host);
+  const { client } = await connectScheduleClient(options.daemonTarget);
   try {
+    await requireNewAgentSchedule(client, id);
     const payload = await client.scheduleUpdate(input);
     if (payload.error || !payload.schedule) {
       throw new Error(payload.error ?? `Failed to update schedule: ${id}`);

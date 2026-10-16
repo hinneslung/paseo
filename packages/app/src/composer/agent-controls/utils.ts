@@ -1,5 +1,11 @@
 import type { AgentFeature, AgentModelDefinition } from "@getpaseo/protocol/agent-types";
 import { i18n } from "@/i18n/i18next";
+import { formatThinkingOptionLabel } from "@/agent-controls/labels";
+import {
+  FAST_MODE_FEATURE_ID,
+  PLAN_MODE_FEATURE_ID,
+  SPEED_FEATURE_ID,
+} from "@/agent-controls/policy";
 
 export type ExplainedAgentControl = "mode" | "model" | "thinking";
 export type FeatureHighlightColor = "blue" | "default" | "green" | "yellow";
@@ -33,61 +39,24 @@ export function getFeatureTooltip(feature: Pick<AgentFeature, "label" | "tooltip
   return feature.tooltip ?? feature.label;
 }
 
+export function isFeatureActive(feature: AgentFeature): boolean {
+  if (feature.type === "toggle") return feature.value;
+  const selectedOption = feature.options.find((option) => option.id === feature.value);
+  return selectedOption !== undefined && !selectedOption.isDefault;
+}
+
 export function getFeatureHighlightColor(featureId: string): FeatureHighlightColor {
   switch (featureId) {
-    case "fast_mode":
+    case FAST_MODE_FEATURE_ID:
+    case SPEED_FEATURE_ID:
       return "yellow";
     case "auto_accept":
       return "green";
-    case "plan_mode":
+    case PLAN_MODE_FEATURE_ID:
       return "blue";
     default:
       return "default";
   }
-}
-
-interface ControlLabelInput {
-  id: string;
-  label?: string | null;
-}
-
-function sentenceCase(value: string): string {
-  if (!value) {
-    return value;
-  }
-  return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
-}
-
-function splitCompactLabel(value: string, splitHyphen: boolean): string {
-  const separatorPattern = splitHyphen ? /[_-]+/g : /_+/g;
-
-  return value
-    .replace(separatorPattern, " ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function formatControlLabel(option: ControlLabelInput, splitHyphen: boolean): string {
-  const rawLabel = (option.label ?? option.id).trim();
-  return sentenceCase(splitCompactLabel(rawLabel, splitHyphen));
-}
-
-export function formatAgentModeLabel(mode: ControlLabelInput): string {
-  return formatControlLabel(mode, mode.label == null);
-}
-
-export function formatThinkingOptionLabel(option: ControlLabelInput): string {
-  const rawLabel = (option.label ?? option.id).trim();
-  const compactId = option.id.replace(/[\s_-]+/g, "").toLowerCase();
-  const compactLabel = rawLabel.replace(/[\s_-]+/g, "").toLowerCase();
-
-  if (compactId === "xhigh" || compactLabel === "xhigh") {
-    return i18n.t("agentControls.thinking.extraHigh");
-  }
-
-  return formatControlLabel(option, true);
 }
 
 function findModelById(
@@ -97,7 +66,11 @@ function findModelById(
   if (!models || !modelId) {
     return null;
   }
-  return models.find((model) => model.id === modelId) ?? null;
+  return (
+    models.find((model) => model.id === modelId) ??
+    models.find((model) => model.aliases?.includes(modelId)) ??
+    null
+  );
 }
 
 function getFallbackModel(models: AgentModelDefinition[] | null): AgentModelDefinition | null {
@@ -117,16 +90,23 @@ function pickSelectedModel(
   preferredModelId: string | null,
   fallbackModel: AgentModelDefinition | null,
 ): AgentModelDefinition | null {
-  if (!models || !preferredModelId) {
+  if (!preferredModelId) {
     return fallbackModel;
   }
-  return findModelById(models, preferredModelId) ?? fallbackModel;
+  return findModelById(models, preferredModelId);
 }
 
 function resolveThinkingId(
+  runtimeThinkingOptionId: string | null | undefined,
   explicitThinkingOptionId: string | null | undefined,
   selectedModel: AgentModelDefinition | null,
 ): string | null {
+  const runtimeThinkingOption = selectedModel?.thinkingOptions?.find(
+    (option) => option.id === runtimeThinkingOptionId,
+  );
+  if (runtimeThinkingOption) {
+    return runtimeThinkingOption.id;
+  }
   if (explicitThinkingOptionId && explicitThinkingOptionId !== "default") {
     return explicitThinkingOptionId;
   }
@@ -177,9 +157,16 @@ export function resolveAgentModelSelection(input: {
   models: AgentModelDefinition[] | null;
   runtimeModelId: string | null | undefined;
   configuredModelId: string | null | undefined;
+  runtimeThinkingOptionId: string | null | undefined;
   explicitThinkingOptionId: string | null | undefined;
 }) {
-  const { models, runtimeModelId, configuredModelId, explicitThinkingOptionId } = input;
+  const {
+    models,
+    runtimeModelId,
+    configuredModelId,
+    runtimeThinkingOptionId,
+    explicitThinkingOptionId,
+  } = input;
   const normalizedRuntimeModelId = normalizeModelId(runtimeModelId);
   const normalizedConfiguredModelId = normalizeModelId(configuredModelId);
 
@@ -200,9 +187,13 @@ export function resolveAgentModelSelection(input: {
   );
 
   const thinkingOptions = selectedModel?.thinkingOptions ?? null;
-  const resolvedThinkingId = resolveThinkingId(explicitThinkingOptionId, selectedModel);
+  const resolvedThinkingId = resolveThinkingId(
+    runtimeThinkingOptionId,
+    explicitThinkingOptionId,
+    selectedModel,
+  );
   const effectiveThinking = resolveEffectiveThinking(thinkingOptions, resolvedThinkingId);
-  const selectedThinkingId = effectiveThinking?.id ?? null;
+  const selectedThinkingId = effectiveThinking?.id ?? resolvedThinkingId;
   const displayThinking = resolveThinkingDisplay(
     effectiveThinking,
     selectedThinkingId,

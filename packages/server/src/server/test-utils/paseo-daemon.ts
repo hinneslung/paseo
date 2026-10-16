@@ -1,3 +1,4 @@
+import { BuiltinPluginLoader } from "../plugins/builtin/index.js";
 import os from "node:os";
 import path from "node:path";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -11,18 +12,26 @@ import {
 } from "../bootstrap.js";
 import type { AgentClient, AgentProvider } from "../agent/agent-sdk-types.js";
 import { createTestAgentClients } from "./fake-agent-client.js";
-import type { PushNotificationSender } from "../push/notifications.js";
+import type { PushNotificationSender } from "../push/index.js";
+import type { AgentProfile } from "@getpaseo/protocol/messages";
 
 interface TestPaseoDaemonOptions {
+  daemonVersion?: string;
+  desktopManaged?: boolean;
   downloadTokenTtlMs?: number;
   corsAllowedOrigins?: string[];
   listen?: string;
+  listenPort?: number;
   logger?: Parameters<typeof createPaseoDaemon>[1];
   mcpEnabled?: boolean;
   mcpDebug?: boolean;
   isDev?: boolean;
   relayEnabled?: boolean;
   relayEndpoint?: string;
+  relayUseTls?: boolean;
+  relayPublicUseTls?: boolean;
+  daemonStatusRpcCapability?: boolean;
+  relayConfigCapability?: boolean;
   agentClients?: Partial<Record<AgentProvider, AgentClient>>;
   providerOverrides?: PaseoDaemonConfig["providerOverrides"];
   paseoHomeRoot?: string;
@@ -37,6 +46,13 @@ interface TestPaseoDaemonOptions {
   auth?: PaseoDaemonConfig["auth"];
   pushNotificationSender?: PushNotificationSender;
   serviceProxy?: PaseoDaemonConfig["serviceProxy"];
+  webUi?: PaseoDaemonConfig["webUi"];
+  trustedProxies?: PaseoDaemonConfig["trustedProxies"];
+  agentProfiles?: AgentProfile[];
+  autoArchiveAfterMerge?: boolean;
+  pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
+  builtinPlugins?: BuiltinPluginLoader;
+  plugins?: PaseoDaemonConfig["plugins"];
 }
 
 export interface TestPaseoDaemon {
@@ -84,9 +100,16 @@ export async function createTestPaseoDaemon(
   let lastError: unknown;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const { config, paseoHomeRoot, paseoHome, staticDir } = await prepareTestDaemonConfig(options);
+    const { config, paseoHomeRoot, paseoHome, staticDir, createdDirs } =
+      await prepareTestDaemonConfig(options);
     const logger = options.logger ?? pino({ level: "silent" });
-    const daemon = await createPaseoDaemon(config, logger);
+    const daemon = await createPaseoDaemon(config, logger, {
+      builtinPlugins: options.builtinPlugins ?? new BuiltinPluginLoader(undefined, []),
+      serverFeatureOverrides: {
+        daemonStatusRpc: options.daemonStatusRpcCapability,
+        relayConfig: options.relayConfigCapability,
+      },
+    });
     try {
       await startDaemonWithTimeout(daemon, TEST_DAEMON_START_TIMEOUT_MS);
       const listenTarget = daemon.getListenTarget();
@@ -99,10 +122,7 @@ export async function createTestPaseoDaemon(
         await daemon.agentManager.flush().catch(() => undefined);
         if (options.cleanup ?? true) {
           await new Promise((r) => setTimeout(r, 50));
-          await Promise.all([
-            rm(paseoHomeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
-            rm(staticDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
-          ]);
+          await removeDirs([paseoHomeRoot, staticDir]);
         }
       };
 
@@ -117,10 +137,8 @@ export async function createTestPaseoDaemon(
     } catch (error) {
       lastError = error;
       await daemon.stop().catch(() => undefined);
-      await Promise.all([
-        rm(paseoHomeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
-        rm(staticDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
-      ]);
+      // A failed attempt removes only what it created: a caller-supplied home keeps its serverId.
+      await removeDirs(createdDirs);
 
       if (
         (!isAddressInUseError(error) && !isStartupTimeoutError(error)) ||
@@ -139,20 +157,36 @@ interface PreparedTestDaemonConfig {
   paseoHomeRoot: string;
   paseoHome: string;
   staticDir: string;
+  createdDirs: string[];
+}
+
+async function removeDirs(dirs: string[]): Promise<void> {
+  await Promise.all(
+    dirs.map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })),
+  );
+}
+
+async function createTempDir(prefix: string, createdDirs: string[]): Promise<string> {
+  const dir = await mkdtemp(path.join(os.tmpdir(), prefix));
+  createdDirs.push(dir);
+  return dir;
 }
 
 async function prepareTestDaemonConfig(
   options: TestPaseoDaemonOptions,
 ): Promise<PreparedTestDaemonConfig> {
-  const paseoHomeRoot =
-    options.paseoHomeRoot ?? (await mkdtemp(path.join(os.tmpdir(), "paseo-home-")));
+  const createdDirs: string[] = [];
+  const paseoHomeRoot = options.paseoHomeRoot ?? (await createTempDir("paseo-home-", createdDirs));
   const paseoHome = path.join(paseoHomeRoot, ".paseo");
   await mkdir(paseoHome, { recursive: true });
-  const staticDir = options.staticDir ?? (await mkdtemp(path.join(os.tmpdir(), "paseo-static-")));
+  const staticDir = options.staticDir ?? (await createTempDir("paseo-static-", createdDirs));
   const listenHost = options.listen ?? "127.0.0.1";
+  const listenPort = options.listenPort ?? 0;
   const config: PaseoDaemonConfig = {
-    listen: `${listenHost}:0`,
+    listen: `${listenHost}:${listenPort}`,
     paseoHome,
+    daemonVersion: options.daemonVersion,
+    desktopManaged: options.desktopManaged,
     corsAllowedOrigins: options.corsAllowedOrigins ?? [],
     hostnames: true,
     mcpEnabled: options.mcpEnabled ?? true,
@@ -164,10 +198,14 @@ async function prepareTestDaemonConfig(
     agentStoragePath: path.join(paseoHome, "agents"),
     relayEnabled: options.relayEnabled ?? false,
     relayEndpoint: options.relayEndpoint ?? "relay.paseo.sh:443",
+    relayUseTls: options.relayUseTls,
+    relayPublicUseTls: options.relayPublicUseTls,
     appBaseUrl: "https://app.paseo.sh",
     auth: options.auth,
     pushNotificationSender: options.pushNotificationSender,
     serviceProxy: options.serviceProxy,
+    webUi: options.webUi,
+    trustedProxies: options.trustedProxies,
     openai: options.openai,
     speech: options.speech,
     voiceLlmProvider: options.voiceLlmProvider ?? null,
@@ -175,8 +213,12 @@ async function prepareTestDaemonConfig(
     voiceLlmModel: options.voiceLlmModel ?? null,
     dictationFinalTimeoutMs: options.dictationFinalTimeoutMs,
     downloadTokenTtlMs: options.downloadTokenTtlMs,
+    agentProfiles: options.agentProfiles,
+    autoArchiveAfterMerge: options.autoArchiveAfterMerge,
+    pluginsEnabled: options.pluginsEnabled,
+    plugins: options.plugins,
   };
-  return { config, paseoHomeRoot, paseoHome, staticDir };
+  return { config, paseoHomeRoot, paseoHome, staticDir, createdDirs };
 }
 
 function isAddressInUseError(error: unknown): boolean {

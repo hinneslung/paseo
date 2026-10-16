@@ -1,4 +1,4 @@
-import { page } from "@vitest/browser/context";
+import { page, userEvent } from "@vitest/browser/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TerminalInputModeState } from "@getpaseo/protocol/terminal-input-mode";
 import { encodeTerminalOutput, TerminalEmulatorRuntime } from "./terminal-emulator-runtime";
@@ -15,6 +15,7 @@ interface TerminalSize {
   rows: number;
   cols: number;
   shouldClaim: boolean;
+  forceClaim?: boolean;
 }
 
 interface TerminalKeyRecord {
@@ -26,6 +27,7 @@ interface TerminalKeyRecord {
 }
 
 type BrowserTerminal = TerminalSize & {
+  input: (data: string, wasUserInput?: boolean) => void;
   refresh: (start: number, end: number) => void;
   reset: () => void;
 };
@@ -38,6 +40,7 @@ interface MountedTerminal {
   sizes: TerminalSize[];
   terminalKeys: TerminalKeyRecord[];
   inputModeChanges: TerminalInputModeState[];
+  openedUrls: string[];
 }
 
 const mountedTerminals: MountedTerminal[] = [];
@@ -66,11 +69,18 @@ async function waitFor(input: { predicate: () => boolean; timeoutMs?: number }):
   }
 }
 
-function createTerminalHost(input: {
+function settleMountRefits(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 2_600));
+}
+
+interface CreateTerminalHostInput {
   width: number;
   height: number;
   scrollback?: number;
-}): MountedTerminal {
+  isMac?: boolean;
+}
+
+function createTerminalHost(input: CreateTerminalHostInput): MountedTerminal {
   const root = document.createElement("div");
   root.style.width = `${input.width}px`;
   root.style.height = `${input.height}px`;
@@ -89,7 +99,10 @@ function createTerminalHost(input: {
   const inputs: string[] = [];
   const terminalKeys: TerminalKeyRecord[] = [];
   const inputModeChanges: TerminalInputModeState[] = [];
-  const runtime = new TerminalEmulatorRuntime();
+  const openedUrls: string[] = [];
+  const runtime = new TerminalEmulatorRuntime(
+    input.isMac === undefined ? undefined : { isMac: input.isMac },
+  );
   runtime.setCallbacks({
     callbacks: {
       onInput: (data) => {
@@ -103,6 +116,9 @@ function createTerminalHost(input: {
       },
       onInputModeChange: (state) => {
         inputModeChanges.push(state);
+      },
+      onOpenExternalUrl: (url) => {
+        openedUrls.push(url);
       },
     },
   });
@@ -118,7 +134,16 @@ function createTerminalHost(input: {
     },
   });
 
-  const mounted = { host, root, runtime, inputs, sizes, terminalKeys, inputModeChanges };
+  const mounted = {
+    host,
+    root,
+    runtime,
+    inputs,
+    sizes,
+    terminalKeys,
+    inputModeChanges,
+    openedUrls,
+  };
   mountedTerminals.push(mounted);
   return mounted;
 }
@@ -131,6 +156,23 @@ function latestSize(sizes: TerminalSize[]): TerminalSize {
   return size;
 }
 
+function expectNoForcedSameSizeClaim(input: {
+  sizes: TerminalSize[];
+  startIndex: number;
+  baseline: TerminalSize;
+}): void {
+  const forcedSameSizeClaims = input.sizes
+    .slice(input.startIndex)
+    .filter(
+      (size) =>
+        size.rows === input.baseline.rows &&
+        size.cols === input.baseline.cols &&
+        size.shouldClaim &&
+        size.forceClaim,
+    );
+  expect(forcedSameSizeClaims).toEqual([]);
+}
+
 function getBrowserTerminal(): BrowserTerminal {
   const terminal = window.__paseoTerminal as BrowserTerminal | undefined;
   if (!terminal) {
@@ -139,33 +181,76 @@ function getBrowserTerminal(): BrowserTerminal {
   return terminal;
 }
 
-function dispatchTerminalKey(input: {
+interface DispatchTerminalKeyInput {
   host: HTMLElement;
   key: string;
+  keyCode?: number;
   shiftKey?: boolean;
   ctrlKey?: boolean;
   altKey?: boolean;
   metaKey?: boolean;
-}): boolean {
+}
+
+function dispatchTerminalKey(input: DispatchTerminalKeyInput): boolean {
   const textarea = input.host.querySelector<HTMLTextAreaElement>("textarea");
   if (!textarea) {
     throw new Error("Expected xterm textarea to be mounted");
   }
   textarea.focus();
-  return textarea.dispatchEvent(
-    new KeyboardEvent("keydown", {
-      key: input.key,
-      shiftKey: input.shiftKey ?? false,
-      ctrlKey: input.ctrlKey ?? false,
-      altKey: input.altKey ?? false,
-      metaKey: input.metaKey ?? false,
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
+  const event = new KeyboardEvent("keydown", {
+    key: input.key,
+    shiftKey: input.shiftKey ?? false,
+    ctrlKey: input.ctrlKey ?? false,
+    altKey: input.altKey ?? false,
+    metaKey: input.metaKey ?? false,
+    bubbles: true,
+    cancelable: true,
+  });
+  if (input.keyCode !== undefined) {
+    // Synthetic KeyboardEvents always report keyCode 0; xterm's fallback encoder
+    // switches on keyCode, so hardware-like events need it filled in.
+    Object.defineProperty(event, "keyCode", { value: input.keyCode });
+  }
+  return textarea.dispatchEvent(event);
+}
+
+/** An OSC 8 hyperlink, the escape sequence CLIs such as gh and ls --hyperlink print. */
+function hyperlink(input: { url: string; text: string }): string {
+  return `\x1b]8;;${input.url}\x1b\\${input.text}\x1b]8;;\x1b\\`;
+}
+
+function writeLines(mounted: MountedTerminal, lines: string[]): Promise<void> {
+  return new Promise((resolve) => {
+    mounted.runtime.write({
+      data: terminalOutput(lines.map((line) => `${line}\r\n`).join("")),
+      onCommitted: resolve,
+    });
+  });
+}
+
+async function clickTerminalLink(input: {
+  host: HTMLElement;
+  row: number;
+  col: number;
+}): Promise<void> {
+  const terminal = getBrowserTerminal();
+  const screen = input.host.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen) {
+    throw new Error("Expected xterm screen to be mounted");
+  }
+  const position = {
+    x: (input.col + 0.5) * (screen.clientWidth / terminal.cols),
+    y: (input.row + 0.5) * (screen.clientHeight / terminal.rows),
+  };
+  await userEvent.hover(screen, { position });
+  await waitFor({
+    predicate: () => input.host.querySelector(".xterm-cursor-pointer") !== null,
+  });
+  await userEvent.click(screen, { position });
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const mounted of mountedTerminals.splice(0)) {
     mounted.runtime.unmount();
     mounted.root.remove();
@@ -204,8 +289,17 @@ describe("terminal emulator runtime in a real browser", () => {
     const mounted = createTerminalHost({ width: 720, height: 360 });
 
     await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    await settleMountRefits();
 
-    expect(mounted.sizes[0]?.shouldClaim).toBe(false);
+    expect(mounted.sizes.length).toBeGreaterThan(1);
+    expect(mounted.sizes.filter((size) => size.shouldClaim)).toEqual([]);
+
+    const settledSize = latestSize(mounted.sizes);
+    mounted.runtime.resize({ forceClaim: true, shouldClaim: true });
+
+    expect(mounted.sizes.filter((size) => size.shouldClaim)).toEqual([
+      { ...settledSize, shouldClaim: true, forceClaim: true },
+    ]);
   });
 
   it("reports a larger PTY size when the terminal container grows", async () => {
@@ -218,7 +312,7 @@ describe("terminal emulator runtime in a real browser", () => {
     mounted.root.style.width = "720px";
     mounted.root.style.height = "360px";
     await nextFrame();
-    mounted.runtime.resize({ force: true });
+    mounted.runtime.resize({ forceRefresh: true, shouldClaim: true });
 
     await waitFor({
       predicate: () => {
@@ -231,6 +325,92 @@ describe("terminal emulator runtime in a real browser", () => {
     expect(grownSize.cols).toBeGreaterThan(initialSize.cols);
     expect(grownSize.rows).toBeGreaterThan(initialSize.rows);
     expect(grownSize.shouldClaim).toBe(true);
+  });
+
+  it("keeps passive container measurements local after another client can claim", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 360, height: 180 });
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    await settleMountRefits();
+    const initialSize = latestSize(mounted.sizes);
+    mounted.sizes.length = 0;
+
+    mounted.root.style.width = "720px";
+    mounted.root.style.height = "360px";
+
+    await waitFor({
+      predicate: () =>
+        mounted.sizes.some((size) => size.cols > initialSize.cols && size.rows > initialSize.rows),
+    });
+
+    expect(mounted.sizes.filter((size) => size.shouldClaim)).toEqual([]);
+  });
+
+  it("keeps visual viewport keyboard refits passive", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 360, height: 180 });
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    await settleMountRefits();
+    mounted.sizes.length = 0;
+
+    mounted.root.style.width = "720px";
+    mounted.root.style.height = "360px";
+    expect(window.visualViewport).not.toBeNull();
+    window.visualViewport?.dispatchEvent(new Event("resize"));
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    expect(mounted.sizes.filter((size) => size.shouldClaim)).toEqual([]);
+  });
+
+  it("keeps browser window refits passive", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 360, height: 180 });
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    await settleMountRefits();
+    mounted.sizes.length = 0;
+
+    mounted.root.style.width = "720px";
+    mounted.root.style.height = "360px";
+    window.dispatchEvent(new Event("resize"));
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    expect(mounted.sizes.filter((size) => size.shouldClaim)).toEqual([]);
+  });
+
+  it("does not force-claim a same-size resize while forwarding ordinary terminal input", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 720, height: 360 });
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    const sizeCount = mounted.sizes.length;
+    const sizeBeforeInput = latestSize(mounted.sizes);
+    const terminal = getBrowserTerminal();
+
+    terminal.input("a", true);
+
+    await waitFor({ predicate: () => mounted.inputs.length > 0 });
+
+    expect(mounted.inputs.at(-1)).toBe("a");
+    expectNoForcedSameSizeClaim({
+      sizes: mounted.sizes,
+      startIndex: sizeCount,
+      baseline: sizeBeforeInput,
+    });
+  });
+
+  it("pastes through xterm's input producer", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 720, height: 360 });
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+
+    mounted.runtime.paste("legacy renderer paste");
+
+    await waitFor({ predicate: () => mounted.inputs.length > 0 });
+    expect(mounted.inputs).toEqual(["legacy renderer paste"]);
   });
 
   it("refreshes visible rows on a forced same-size resize", async () => {
@@ -247,7 +427,7 @@ describe("terminal emulator runtime in a real browser", () => {
       originalRefresh(start, end);
     };
 
-    mounted.runtime.resize({ force: true });
+    mounted.runtime.resize({ forceRefresh: true, shouldClaim: false });
 
     await waitFor({ predicate: () => refreshCalls.length > 0 });
     expect(refreshCalls.at(-1)).toEqual([0, terminal.rows - 1]);
@@ -318,6 +498,104 @@ describe("terminal emulator runtime in a real browser", () => {
         meta: false,
       },
     ]);
+
+    const sizeCount = mounted.sizes.length;
+    const sizeBeforeKey = latestSize(mounted.sizes);
+    mounted.terminalKeys.length = 0;
+
+    dispatchTerminalKey({
+      host: mounted.host,
+      key: "Enter",
+      shiftKey: true,
+    });
+    await nextFrame();
+
+    expect(mounted.terminalKeys).toEqual([
+      {
+        key: "Enter",
+        ctrl: false,
+        shift: true,
+        alt: false,
+        meta: false,
+      },
+    ]);
+    expectNoForcedSameSizeClaim({
+      sizes: mounted.sizes,
+      startIndex: sizeCount,
+      baseline: sizeBeforeKey,
+    });
+  });
+
+  it("translates mac editing shortcuts into shell editing sequences", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 720, height: 360, isMac: true });
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowRight", keyCode: 39 });
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowLeft", keyCode: 37, metaKey: true });
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowRight", keyCode: 39, metaKey: true });
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowLeft", keyCode: 37, altKey: true });
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowRight", keyCode: 39, altKey: true });
+    dispatchTerminalKey({ host: mounted.host, key: "Backspace", keyCode: 8, metaKey: true });
+    await nextFrame();
+
+    expect(mounted.inputs).toEqual([
+      "\x1b[C", // plain arrow keeps xterm's default encoding
+      "\x01", // cmd+left -> line start
+      "\x05", // cmd+right -> line end
+      "\x1bb", // option+left -> word back
+      "\x1bf", // option+right -> word forward
+      "\x15", // cmd+backspace -> kill line
+    ]);
+    expect(mounted.terminalKeys).toEqual([]);
+  });
+
+  it.each([true, false])("keeps pending modifier chips authoritative (isMac=%s)", async (isMac) => {
+    const mounted = createTerminalHost({ width: 720, height: 360, isMac });
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+    mounted.runtime.setPendingModifiers({
+      pendingModifiers: { ctrl: true, alt: false, shift: false },
+    });
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowLeft", keyCode: 37, altKey: true });
+    await nextFrame();
+    expect(mounted.inputs).toEqual([]);
+    expect(mounted.terminalKeys).toEqual([
+      { key: "ArrowLeft", ctrl: true, alt: true, shift: false, meta: false },
+    ]);
+  });
+
+  it("keeps cmd+shift+arrow free for app-level shortcuts", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 720, height: 360, isMac: true });
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+
+    dispatchTerminalKey({
+      host: mounted.host,
+      key: "ArrowRight",
+      keyCode: 39,
+      metaKey: true,
+      shiftKey: true,
+    });
+    await nextFrame();
+
+    expect(mounted.inputs).toEqual([]);
+    expect(mounted.terminalKeys).toEqual([]);
+  });
+
+  it("does not remap modified arrows on non-mac platforms", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 720, height: 360, isMac: false });
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowRight", keyCode: 39, metaKey: true });
+    dispatchTerminalKey({ host: mounted.host, key: "ArrowRight", keyCode: 39, altKey: true });
+    await nextFrame();
+
+    // Meta+arrow is ignored by xterm; alt+arrow takes xterm's generic encoding.
+    expect(mounted.inputs).toEqual(["\x1b[1;3C"]);
   });
 
   it.each([
@@ -381,5 +659,24 @@ describe("terminal emulator runtime in a real browser", () => {
     await nextFrame();
 
     expect(reset).not.toHaveBeenCalled();
+  });
+
+  it("opens OSC 8 hyperlinks the same way as plain-text URLs", async () => {
+    await page.viewport(900, 600);
+    const mounted = createTerminalHost({ width: 720, height: 360 });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    await waitFor({ predicate: () => mounted.sizes.length > 0 });
+
+    await writeLines(mounted, [
+      hyperlink({ url: "https://example.com/osc8", text: "example" }),
+      "https://example.com/plain",
+    ]);
+
+    await clickTerminalLink({ host: mounted.host, row: 1, col: 4 });
+    await clickTerminalLink({ host: mounted.host, row: 0, col: 2 });
+
+    expect(mounted.openedUrls).toEqual(["https://example.com/plain", "https://example.com/osc8"]);
+    expect(confirm).not.toHaveBeenCalled();
   });
 });

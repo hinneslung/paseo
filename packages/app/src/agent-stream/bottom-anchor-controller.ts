@@ -10,7 +10,7 @@ export interface BottomAnchorRouteRequest {
 }
 
 export interface BottomAnchorLocalRequest {
-  reason: "jump-to-bottom" | "message-sent";
+  reason: "jump-to-bottom" | "message-sent" | "rewind";
   agentId: string;
 }
 
@@ -68,6 +68,8 @@ interface BottomAnchorControllerDriver {
   resetForAgent: () => void;
   applyRouteRequest: (request: BottomAnchorRouteRequest | null) => void;
   requestLocalAnchor: (request: BottomAnchorLocalRequest) => void;
+  beginUserScroll: () => void;
+  endUserScroll: (params: { isNearBottom: boolean }) => void;
   detachByUser: () => void;
   handleViewportMetricsChange: (params: {
     previousViewportWidth: number;
@@ -243,6 +245,7 @@ function createBottomAnchorControllerDriver(
   let lastRouteRequestKey: string | null = null;
   let stickyMeasurementRevision = 0;
   let lastVerifiedStickyMeasurementRevision = 0;
+  let isUserScrollActive = false;
 
   const setBlockedReason = (nextBlockedReason: BottomAnchorBlockedReason | null) => {
     if (blockedReason === nextBlockedReason) {
@@ -411,10 +414,14 @@ function createBottomAnchorControllerDriver(
       | "viewport_change"
       | "content_size_change"
       | "scroll_near_bottom_change"
+      | "user_scroll_end"
       | "history_readiness_change"
       | "manual_reevaluate"
       | "retry_scroll",
   ) => {
+    if (isUserScrollActive) {
+      return;
+    }
     if (attemptHandle) {
       return;
     }
@@ -481,6 +488,7 @@ function createBottomAnchorControllerDriver(
       cancelPendingAttempt();
       stickyMeasurementRevision = 0;
       lastVerifiedStickyMeasurementRevision = 0;
+      isUserScrollActive = false;
       mode = "sticky-bottom";
       input.onModeChange("sticky-bottom");
     },
@@ -497,6 +505,38 @@ function createBottomAnchorControllerDriver(
     requestLocalAnchor(request) {
       createRequest(request);
     },
+    beginUserScroll() {
+      isUserScrollActive = true;
+      cancelPendingAttempt();
+    },
+    endUserScroll(params) {
+      isUserScrollActive = false;
+      if (params.isNearBottom) {
+        if (mode === "detached") {
+          setModeInternal("sticky-bottom");
+          pendingVerification = { requestId: null, retries: 0 };
+          evaluate(false, "user_scroll_end");
+          return;
+        }
+        if (pendingRequest) {
+          evaluate(false, "user_scroll_end");
+          return;
+        }
+        if (
+          !input.isNearBottom() ||
+          stickyMeasurementRevision !== lastVerifiedStickyMeasurementRevision
+        ) {
+          pendingVerification = { requestId: null, retries: 0 };
+          evaluate(false, "user_scroll_end");
+          return;
+        }
+        markStickyMeasurementVerified();
+        return;
+      }
+      if (mode === "sticky-bottom") {
+        this.detachByUser();
+      }
+    },
     detachByUser() {
       if (mode === "detached") {
         return;
@@ -510,6 +550,9 @@ function createBottomAnchorControllerDriver(
         params.previousViewportHeight !== params.viewportHeight
       ) {
         markStickyMeasurementChanged();
+      }
+      if (isUserScrollActive) {
+        return;
       }
       const shouldRestick = __private__.shouldRestickOnViewportChange({
         mode,
@@ -528,6 +571,9 @@ function createBottomAnchorControllerDriver(
     handleContentSizeChange(params) {
       if (params.previousContentHeight !== params.contentHeight) {
         markStickyMeasurementChanged();
+      }
+      if (isUserScrollActive) {
+        return;
       }
       const shouldRestick = __private__.shouldRestickOnContentChange({
         mode,
@@ -558,6 +604,9 @@ function createBottomAnchorControllerDriver(
         return;
       }
       markStickyMeasurementChanged();
+      if (isUserScrollActive) {
+        return;
+      }
       if (!pendingRequest) {
         pendingVerification = { requestId: null, retries: 0 };
         if (attemptHandle) {
@@ -571,6 +620,9 @@ function createBottomAnchorControllerDriver(
     },
     handleScrollNearBottomChange(params) {
       const { nextIsNearBottom, scrollDelta } = params;
+      if (isUserScrollActive) {
+        return;
+      }
       if (
         nextIsNearBottom &&
         mode === "sticky-bottom" &&
@@ -674,7 +726,7 @@ export function useBottomAnchorController(input: {
   routeRequest: BottomAnchorRouteRequest | null;
   isAuthoritativeHistoryReady: boolean;
   renderStrategy: string;
-  transportBehavior: BottomAnchorTransportBehavior;
+  getTransportBehavior: () => BottomAnchorTransportBehavior;
   getMeasurementState: () => ControllerMeasurementState;
   isNearBottom: () => boolean;
   scrollToBottom: (animated: boolean) => void;
@@ -683,7 +735,7 @@ export function useBottomAnchorController(input: {
   const agentIdRef = useRef(input.agentId);
   const readinessRef = useRef(input.isAuthoritativeHistoryReady);
   const renderStrategyRef = useRef(input.renderStrategy);
-  const transportBehaviorRef = useRef(input.transportBehavior);
+  const getTransportBehaviorRef = useRef(input.getTransportBehavior);
   const getMeasurementStateRef = useRef(input.getMeasurementState);
   const isNearBottomRef = useRef(input.isNearBottom);
   const scrollToBottomRef = useRef(input.scrollToBottom);
@@ -692,7 +744,7 @@ export function useBottomAnchorController(input: {
   agentIdRef.current = input.agentId;
   readinessRef.current = input.isAuthoritativeHistoryReady;
   renderStrategyRef.current = input.renderStrategy;
-  transportBehaviorRef.current = input.transportBehavior;
+  getTransportBehaviorRef.current = input.getTransportBehavior;
   getMeasurementStateRef.current = input.getMeasurementState;
   isNearBottomRef.current = input.isNearBottom;
   scrollToBottomRef.current = input.scrollToBottom;
@@ -702,7 +754,7 @@ export function useBottomAnchorController(input: {
       getAgentId: () => agentIdRef.current,
       getIsAuthoritativeHistoryReady: () => readinessRef.current,
       getRenderStrategy: () => renderStrategyRef.current,
-      getTransportBehavior: () => transportBehaviorRef.current,
+      getTransportBehavior: () => getTransportBehaviorRef.current(),
       getMeasurementState: () => getMeasurementStateRef.current(),
       isNearBottom: () => isNearBottomRef.current(),
       scrollToBottom: (animated) => scrollToBottomRef.current(animated),
@@ -736,6 +788,12 @@ export function useBottomAnchorController(input: {
     mode,
     requestLocalAnchor(request: BottomAnchorLocalRequest) {
       driverRef.current?.requestLocalAnchor(request);
+    },
+    beginUserScroll() {
+      driverRef.current?.beginUserScroll();
+    },
+    endUserScroll(params: { isNearBottom: boolean }) {
+      driverRef.current?.endUserScroll(params);
     },
     detachByUser() {
       driverRef.current?.detachByUser();

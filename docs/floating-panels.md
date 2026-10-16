@@ -11,7 +11,7 @@ canonical files and are trying to add or change one.
 | ---------------------------------------- | ----------------------------------------------------------------- |
 | `components/ui/combobox.tsx`             | Anchored picker with search; mobile falls back to bottom sheet    |
 | `components/ui/tooltip.tsx`              | Non-interactive hover/long-press tooltip                          |
-| `components/workspace-hover-card.tsx`    | Desktop-web hover card with measure + computePosition + Portal    |
+| `components/ui/hover-card.tsx`           | Desktop-web hover card the pointer can move onto; Portal          |
 | `components/ui/autocomplete-popover.tsx` | Slash-command autocomplete anchored to the focused composer input |
 
 Each handles a different mix of concerns: combobox owns input focus, tooltip is
@@ -19,6 +19,29 @@ non-interactive, hover-card is web-only desktop, autocomplete keeps the composer
 input focused while its scrollable list lives in a Portal. There is no shared
 "floating panel" primitive yet — when a fifth use case shows up we can revisit;
 until then prefer copying the closest file and trimming.
+
+## Popover width contract
+
+Combobox desktop popovers are never narrower than their trigger, and they grow
+with content up to a ceiling that is never below the trigger:
+
+```ts
+const floor = Math.max(desktopMinWidth ?? 0, referenceWidth ?? 200);
+const frameStyle = { minWidth: floor, maxWidth: Math.max(400, floor) };
+```
+
+`desktopMinWidth` is an explicit floor-raiser. It does not cap width, and the
+trigger still wins when it is wider. Changing this default requires re-verifying
+every consumer listed here.
+
+Consumers: `composer/agent-controls/mode-control.tsx`,
+`composer/agent-controls/index.tsx`, `composer/index.tsx`,
+`components/combined-model-selector.tsx`, `components/hosts/host-picker.tsx`
+(including `components/hosts/host-filter.tsx`), `components/branch-switcher.tsx`,
+`components/left-sidebar.tsx`, `components/ui/select-field.tsx` (schedule form),
+`screens/new-workspace-screen.tsx` plus `screens/new-workspace/project-picker.ts`,
+`components/import-session-sheet.tsx`, `screens/workspace/workspace-screen.tsx`,
+`screens/settings-screen.tsx`, and `screens/project-settings-screen.tsx`.
 
 ## Gotcha 1 — Android touch hit-test by parent bounds
 
@@ -34,8 +57,11 @@ Android touches sailed straight through to the chat scroll view behind it.
 
 Two escape hatches in the codebase:
 
-- **`Modal`** (combobox, tooltip on native) — opens a new Android window, so
-  hit-testing starts fresh in that window. Side effect: a Modal opening on
+- **`Modal`** (combobox, dropdown menu and tooltip on native) — opens a new Android window, so
+  hit-testing starts fresh in that window. If its children use gesture-handler,
+  the Modal owner must wrap its content in a full-height `GestureHandlerRootView`:
+  the app's root does not span Android windows. React context alone does not
+  establish a native gesture root. Side effect: a Modal opening on
   Android can detach the IME from an underlying TextInput. Fine for combobox
   (it has its own input) and tooltip (no input). **Not** fine for autocomplete
   (the composer's input must stay focused so the user keeps typing).
@@ -47,7 +73,36 @@ Two escape hatches in the codebase:
   overlays can use the current `FloatingPanelPortalHost` so sliding sidebars
   cover them.
 
-Choose Modal vs Portal by whether the underlying input can lose its keyboard.
+  Choose Modal vs Portal by whether the underlying input can lose its keyboard.
+
+On web, dropdown menus render into the shared `overlay-root`, not React Native
+Web's `<Modal>`/`<dialog>`. A browser top-layer dialog always paints above
+ordinary portals regardless of `z-index`, which would hide app toasts and
+tooltips behind the menu. The shared overlay scale keeps menus below toasts and
+lets tooltip portals paint above both.
+
+The shared overlay scale is relative for interactive surfaces: a base floating
+panel is below a base modal, while a floating panel rendered from inside a modal
+inherits that modal's layer and paints above it. Wrap portal content in
+`OverlayLayerProvider`; do not assign one global menu z-index. Desktop web
+comboboxes must use `overlay-root` too. Rendering them through React Native
+Web's `<Modal>` puts them in the browser top layer, where no ordinary modal
+portal can cover them.
+
+Painting and keyboard ownership use the same relative layer model. Register
+desktop modal, combobox, and dropdown focus scopes with `useWebOverlayRegistration`; the
+highest painted scope alone receives overlay keys, traps focus, and restores
+focus when it closes. Hover cards register with `manageFocus={false}`: they claim overlay keys without moving or trapping focus on pointer hover. Do not add component-local global Escape listeners: two
+stacked overlays would both close on one keypress.
+
+If an overlay is rendered by a global host rather than beneath its opener in
+the React tree, carry the opener's current layer through the host store and
+restore it with `OverlayLayerProvider`. Otherwise painting and keyboard
+ownership silently reset at the app root. When the opener is a global keyboard
+action and has no component context to carry, resolve the host layer with
+`useGlobalWebOverlayLayer` on its closed-to-open transition. It captures the
+current top registered layer before the new host joins the stack; do not give a
+global dialog a fixed root-derived modal layer.
 
 ## Gotcha 2 — Portal breaks lifecycle and coordinate-system inheritance
 
@@ -72,37 +127,107 @@ quietly relying on:
   renders inside its host, not necessarily at window origin. Position anchored
   content relative to the host: `anchorRect - hostRect`. This is what
   `measureFloatingPanelPortalHost()` is for.
+- **React context.** `@gorhom/portal` is not a React portal — a real one keeps
+  context, this one does not. It stores the element and the host renders it, so
+  context resolves at the _host's_ position. Everything provided between
+  `PortalProvider` in `app/_layout.tsx` and your sheet is invisible inside it.
+  This is why app-wide providers wrap `PortalProvider` rather than the reverse.
 
-The fix for transforms is Gotcha 3.
+The fix for transforms is Gotcha 3. The fix for context is Gotcha 7.
 
-## Gotcha 3 — Reanimated transforms vs `measureInWindow`
+## Gotcha 3 — Keyboard layout and portal anchors
 
-`measureInWindow` returns the view's _current_ screen position. In theory that
-includes Reanimated-applied transforms (Reanimated updates native view
-properties, and Android's `getLocationInWindow` reads transformed coords). In
-practice it's racy — the measurement may snapshot mid-animation, and on Android
-with Reanimated worklets the result is not always stable.
+`composer/dock` owns the stationary viewport, bottom-anchored surface, composer
+capacity, and keyboard motion for chat, workspace draft tabs, and New workspace.
+Render `<ComposerDock>{contentAbove}{composer}</ComposerDock>` below the header.
+The optional third child is an overlay that moves with the surface. New workspace
+uses `centered` for its existing desktop/tablet form. Hosts never reserve keyboard
+space or translate the composer themselves. Put the dismiss surface behind content
+as a sibling, with `pointerEvents="box-none"` on its content wrapper. A Pressable
+ancestor takes the JS responder on idle Android Fabric and intercepts the stream's
+MOVE events before its native scroll view reaches touch slop. Streaming can hide
+this failure by delaying the responder grant. Native scroll views retain their own
+tap-to-dismiss behavior; unclaimed empty-space taps reach the dismiss sibling.
+On iOS, decorative form containers also need `box-none` (and inert titles/spacers
+need `none`); otherwise their empty padding blocks hit testing of that sibling.
+The shared screen header uses the same dismiss surface. Keep the
+header escape available when a capped draft clips all content above it, since
+iPhone has no system keyboard-dismiss button. Child controls keep their touches,
+and the stream keeps its existing flick-to-dismiss gesture.
 
-If the panel cannot stay inside the transformed ancestor, do not try to track
-the keyboard by re-measuring on every frame. Instead,
-**slave the popover's transform to the same `KeyboardShiftProvider` SharedValue
-the composer uses**:
+The dock's private viewport and capacity model are extracted from chat. The
+app-wide `@/keyboard/shift` module owns shared motion for the dock, portals, streams,
+terminal, explorer, and dialogs. Import only its public entry point: the provider,
+shift hooks, shift style, translate view, settled stream inset, and explorer padding
+policy. Its contexts and reconciliation stay private. Keep `KeyboardShiftProvider`
+at its root mount point outside the portal host when changing dock hosts.
 
-1. Snapshot `openShift = shift.value` at the moment you measure the anchor.
-2. Apply `useAnimatedStyle(() => ({ transform: [{ translateY: openShift.value - shift.value }] }))`
-   to the popover wrapper.
+`KeyboardTranslateView` owns visual keyboard motion inside `@/keyboard/shift`. Android uses the
+controller's Reanimated signal. iOS uses its native-driver `Animated.event`
+signal because the stock iOS Reanimated value changes at move start, while
+writing a replacement Reanimated value every frame interrupts UIKit's hide
+animation. Keep this platform choice inside the keyboard module's private platform-specific translate files.
 
-When `shift` equals `openShift`, the translate is 0 and the popover sits at
-the measured position. When the keyboard moves afterward, the delta translates
-the popover by exactly the amount the composer translates. They move in
-lockstep, no re-measurement needed. Do not call
-`useReanimatedKeyboardAnimation()` directly for app UI offset policy; Android
-can briefly report a stale nonzero height with closed progress, and the shared
-provider is where that is normalized.
+`ComposerDock` always keeps the surface at full height and wraps it in
+`KeyboardTranslateView`. The panel root clips it at the header edge, so rows
+slide under the header on open and out from under it on close. Do not swap the
+dock to keyboard padding at rest. Changing its height creates either a blank
+band or a paused transition when the inverted list updates its viewport.
 
-Re-measure on `Keyboard.addListener('keyboardDidShow'|'keyboardDidHide')` only
-to refresh the snapshot if the keyboard was mid-transition when the popover
-opened.
+Do not animate a layout prop through the keyboard transition. On Android
+Fabric, each animated layout update clones the shadow tree and runs Yoga over
+the dock subtree. This measured about 10 ms per frame on the emulator and the
+mounted layouts arrived in bursts every 2–4 frames. A transform does not dirty
+layout. Preserve the translated dock's history scroll range with a far-end
+content inset on the inverted stream list. Update that inset only when keyboard
+motion settles; never drive it per frame.
+
+The translated dock's height is not the composer's available height. Bound the
+composer against the stationary space below the header inside
+`composer/dock`, including its controls and attachments. Reserve the
+keyboard destination at move start on the UI thread. Waiting for a settled JS
+update lets a long draft disappear behind the header during opening. This is a
+boundary-time layout change, not an animated layout prop. Keep the input's
+native intrinsic sizing and internal scrolling. Keep the editing input's
+`defaultValue` current on every edit: Fabric re-measures the Android input from
+the JS text whenever its frame changed, so a stale prop inflates or collapses
+the input (see `packages/app/src/components/ui/text-input/text-input.native.tsx`).
+
+Closing the keyboard moves the composer; it does not enlarge its capacity. The
+viewport keeps the last keyboard reservation until the next opening replaces
+it, so a capped draft keeps one height through every keyboard transition
+instead of expanding on close and shrinking again on open.
+
+Keep setup fields out of the composer's shrink chain. New workspace supplies its
+setup fields as the first dock child so they move up under the header as the draft
+grows. Putting the fields and composer in one bounded, shrinkable column made
+Yoga split the shortage between them: rows vanished behind the composer while
+the input lost lines at the same time. Keep that separation inside the dock,
+shared by every phone host. The centered tablet form caps the complete block
+for header clearance, but reserves the composer's own capped height before
+shrinking the setup scroll view. The form must not take editing space from the
+composer.
+
+Move the stream and composer together through `ComposerDock`. Do not translate
+them independently.
+
+`KeyboardShiftProvider` owns the normalized shift used for settled insets and
+portal geometry, plus the `isMoving` worklet value. It reconciles native
+animation-end events because the controller can retain a nonzero value after
+the keyboard closes.
+
+Measure portal anchors while the dock is at rest. If a popover opens during
+motion, re-measure when `isMoving` settles. `measureInWindow` includes the
+dock's current layout and transform. Snapshot the shift at measurement time and
+apply only the subsequent shift delta to the animated `bottom`. Adding the full
+shift moves the portal twice and can place it over the composer controls.
+
+The provider also reconciles iOS from the controller's native `onEnd` event.
+The controller's stock iOS shared values update at move start and during an
+interactive move, but not at the terminal event, so JS contention can otherwise
+leave the last height/progress pair stuck in either the open or closed state.
+Keep that terminal reconciliation on the UI thread; a later focus or blur must
+not be required to repair the offset.
 
 ## Gotcha 4 — Host-relative positioning before platform offsets
 
@@ -177,6 +302,44 @@ Do not treat `onChange(-1)` as a close by itself. In a stacked
 another pushed sheet. Close React state from `onDismiss`; use `onChange` only to
 track phase.
 
+All sheets use the app-wide Gorhom modal provider through `IsolatedBottomSheetModal`. This
+includes native centered dialogs: separate React Native Modals cannot present a root-owned
+sibling dialog over an existing iOS presenter.
+
+The wrapper must give Gorhom an object ref. Gorhom accepts a callback ref at the React boundary
+but stores it in the modal queue and later reads `.current`; provider dismissal, replacement,
+and restoration then silently do nothing. Callers may use callback refs on the wrapper, which
+forwards commands to the current Gorhom handle.
+
+Request a backdrop with `backdropOpacity`; do not install a caller-owned backdrop. On web,
+Gorhom's default backdrop closes its own sheet, even when another modal is above it. Its animated
+pointer-event changes can expose a lower backdrop during a transition. The shared web backdrop
+keeps its press target until portal teardown and asks the provider to dismiss the top modal.
+Gorhom's presentation queue remains the authority; backdrop mount order is irrelevant. Native
+retains Gorhom's gesture backdrop and the same push/replace presentation semantics.
+
+## Gotcha 7 — A sheet cannot read context from its call site
+
+React cannot copy contexts reflectively, so the only way across the teleport in
+Gotcha 2 is to render the providers a second time, with values captured on the
+near side where they are still readable. `IsolatedBottomSheetModal` takes a
+`contextBridge` for exactly that:
+
+```tsx
+const contextBridge = useCallback<ContextBridge>(
+  (content) => <ThingContext.Provider value={thing}>{content}</ThingContext.Provider>,
+  [thing],
+);
+```
+
+The prop is **required**, and `null` is a real answer. A sheet whose content
+needs nothing local should have to say so, because the failure mode is silent
+until someone adds a `useContext` deep inside and it throws on device only —
+never on web, where the desktop path uses a real portal. `menu-surface.tsx`
+bridges the menu's two contexts; the rest pass `null`.
+
+Wrapping providers _around_ the modal does nothing. They land on the wrong side.
+
 ## Recipe for a new anchored panel
 
 Before you write a new one, ask:
@@ -199,3 +362,6 @@ Before you write a new one, ask:
    bounded**. Verify before you commit.
 
 Then copy the closest canonical file and trim.
+
+Building a **menu** rather than a bare panel? Don't. Use the menu engine — it already solves
+everything above, plus submenus, sheets, and hover intent. See [menus.md](menus.md).

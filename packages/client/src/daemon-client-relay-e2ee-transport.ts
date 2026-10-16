@@ -8,25 +8,29 @@ import type {
   DaemonTransportFactory,
   TransportLogger,
 } from "./daemon-client-transport-types.js";
-import {
-  extractRelayMessageData,
-  normalizeTransportPayload,
-} from "./daemon-client-transport-utils.js";
+import { extractRelayMessage, normalizeTransportPayload } from "./daemon-client-transport-utils.js";
 
 type OpenHandler = () => void;
 type CloseHandler = (event?: unknown) => void;
 type ErrorHandler = (event?: unknown) => void;
-type MessageHandler = (data: unknown) => void;
+type MessageHandler = (data: unknown, isBinary: boolean) => void;
 
 export function createRelayE2eeTransportFactory(args: {
   baseFactory: DaemonTransportFactory;
   daemonPublicKeyB64: string;
   logger: TransportLogger;
 }): DaemonTransportFactory {
-  return ({ url, headers }) => {
-    const base = args.baseFactory({ url, headers });
+  return ({ url }) => {
+    const base = args.baseFactory({ url });
     return createEncryptedTransport(base, args.daemonPublicKeyB64, args.logger);
   };
+}
+
+export function createRelayTransportFactory(
+  baseFactory: DaemonTransportFactory,
+): DaemonTransportFactory {
+  // The relay upgrade precedes E2EE. Only the encrypted hello may carry daemon credentials.
+  return ({ url }) => baseFactory({ url });
 }
 
 export function createEncryptedTransport(
@@ -70,7 +74,7 @@ export function createEncryptedTransport(
     if (closed) {
       return;
     }
-    emitHandlers(messageHandlers, data);
+    emitHandlers(messageHandlers, data, data instanceof ArrayBuffer);
   };
 
   const relayTransport: RelayTransport = {
@@ -115,8 +119,8 @@ export function createEncryptedTransport(
   base.onOpen(() => {
     void startHandshake();
   });
-  base.onMessage((event) => {
-    relayTransport.onmessage?.(extractRelayMessageData(event));
+  base.onMessage((data, isBinary) => {
+    relayTransport.onmessage?.(extractRelayMessage(data, isBinary));
   });
   base.onClose((event) => {
     const record = event as { code?: number; reason?: string } | undefined;

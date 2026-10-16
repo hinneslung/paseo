@@ -1,5 +1,6 @@
 import type { CreateTerminalResponse, ListTerminalsResponse } from "@getpaseo/protocol/messages";
 import { upsertTerminalListEntry } from "@/utils/terminal-list";
+import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
 
 export const TERMINALS_QUERY_STALE_TIME = 5_000;
 
@@ -76,6 +77,19 @@ export function collectStandaloneTerminalIds(input: {
   return input.terminals
     .filter((terminal) => !input.scriptTerminalIds.has(terminal.id))
     .map((terminal) => terminal.id);
+}
+
+export function terminalBelongsToWorkspace(input: {
+  terminal: TerminalEntry;
+  workspaceId: string | null | undefined;
+}): boolean {
+  const terminalWorkspaceId = normalizeWorkspaceOpaqueId(input.terminal.workspaceId);
+  if (terminalWorkspaceId) {
+    return terminalWorkspaceId === normalizeWorkspaceOpaqueId(input.workspaceId);
+  }
+
+  // COMPAT(legacyTerminalWorkspaceId): added 2026-06-18, remove after 2026-12-18 once daemon floor always stamps terminal workspaceId.
+  return true;
 }
 
 export function removeTerminalFromPayload(terminalId: string) {

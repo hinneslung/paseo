@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { DEFAULT_CONTENT_MAX_WIDTH } from "@/styles/theme";
 import {
   clearAssistantImageMetadataCache,
   estimateAssistantMessageHeightFromCache,
   extractAssistantImageSources,
-  getAssistantImageLoadStateFromMetadata,
   getAssistantImageMetadata,
   setAssistantImageMetadata,
 } from "./assistant-image-metadata";
@@ -21,42 +21,53 @@ describe("assistant image metadata", () => {
     ).toEqual(["/tmp/paseo.png", "https://example.com/test.png"]);
   });
 
-  it("reuses cached metadata across canonical and raw source keys", () => {
+  it("keeps local image metadata scoped to its server and workspace", () => {
+    const image = {
+      source: "screenshot.png",
+      workspaceRoot: "/workspace/one",
+      serverId: "server-1",
+    };
+    setAssistantImageMetadata(image, { width: 1200, height: 800 });
+
+    expect(getAssistantImageMetadata({ ...image, workspaceRoot: "/workspace/two" })).toBeNull();
+    expect(getAssistantImageMetadata({ ...image, serverId: "server-2" })).toBeNull();
+    expect(getAssistantImageMetadata({ source: image.source })).toBeNull();
+    expect(getAssistantImageMetadata(image)).toEqual({
+      width: 1200,
+      height: 800,
+      aspectRatio: 1.5,
+    });
+
     setAssistantImageMetadata(
-      {
-        source: "/tmp/paseo-codex-screenshot.png",
-        workspaceRoot: "/Users/moboudra/dev/paseo",
-        serverId: "server-1",
-      },
+      { ...image, workspaceRoot: "/workspace/two" },
+      { width: 800, height: 1200 },
+    );
+    expect(getAssistantImageMetadata(image)?.aspectRatio).toBe(1.5);
+    expect(
+      getAssistantImageMetadata({ ...image, workspaceRoot: "/workspace/two" })?.aspectRatio,
+    ).toBe(2 / 3);
+  });
+
+  it("reuses direct image metadata without workspace context", () => {
+    const source = "https://example.com/shared.png";
+    setAssistantImageMetadata(
+      { source, workspaceRoot: "/workspace/one", serverId: "server-1" },
       { width: 1200, height: 800 },
     );
-
-    expect(
-      getAssistantImageMetadata({
-        source: "/tmp/paseo-codex-screenshot.png",
-      }),
-    ).toEqual({
+    expect(getAssistantImageMetadata({ source })).toEqual({
       width: 1200,
       height: 800,
       aspectRatio: 1.5,
     });
   });
 
-  it("maps missing metadata to the image loading state", () => {
-    expect(getAssistantImageLoadStateFromMetadata(null)).toEqual({ status: "loading" });
-  });
-
-  it("maps cached metadata to the image ready state", () => {
+  it("reserves the default image aspect ratio before metadata arrives", () => {
     expect(
-      getAssistantImageLoadStateFromMetadata({
-        width: 900,
-        height: 1600,
-        aspectRatio: 9 / 16,
+      estimateAssistantMessageHeightFromCache({
+        markdown: "![Pending](https://example.com/pending.png)",
+        contentMaxWidth: 608,
       }),
-    ).toEqual({
-      status: "ready",
-      aspectRatio: 9 / 16,
-    });
+    ).toBe(464);
   });
 
   it("estimates assistant message height from cached image metadata", () => {
@@ -68,9 +79,10 @@ describe("assistant image metadata", () => {
     );
 
     expect(
-      estimateAssistantMessageHeightFromCache(
-        "Here is the screenshot\n\n![Screenshot](https://example.com/landscape.png)",
-      ),
+      estimateAssistantMessageHeightFromCache({
+        markdown: "Here is the screenshot\n\n![Screenshot](https://example.com/landscape.png)",
+        contentMaxWidth: DEFAULT_CONTENT_MAX_WIDTH,
+      }),
     ).toBeGreaterThan(220);
   });
 
@@ -78,8 +90,14 @@ describe("assistant image metadata", () => {
     const source = `data:image/png;base64,${"a".repeat(512)}`;
     setAssistantImageMetadata({ source }, { width: 1200, height: 800 });
 
-    const imageOnlyHeight = estimateAssistantMessageHeightFromCache(`![Screenshot](${source})`);
-    const mixedHeight = estimateAssistantMessageHeightFromCache(`Text\n\n![Screenshot](${source})`);
+    const imageOnlyHeight = estimateAssistantMessageHeightFromCache({
+      markdown: `![Screenshot](${source})`,
+      contentMaxWidth: DEFAULT_CONTENT_MAX_WIDTH,
+    });
+    const mixedHeight = estimateAssistantMessageHeightFromCache({
+      markdown: `Text\n\n![Screenshot](${source})`,
+      contentMaxWidth: DEFAULT_CONTENT_MAX_WIDTH,
+    });
 
     expect(imageOnlyHeight).toBeGreaterThan(220);
     expect(mixedHeight).toBeGreaterThan(imageOnlyHeight ?? 0);

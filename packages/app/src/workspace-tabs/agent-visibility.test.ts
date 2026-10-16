@@ -23,6 +23,7 @@ function makeAgent(input: {
     id: input.id,
     provider: "codex",
     status: "idle",
+    turn: { phase: "idle", cancellationRequestId: null },
     createdAt,
     updatedAt: createdAt,
     lastUserMessageAt: null,
@@ -60,7 +61,7 @@ function makeAgent(input: {
 const WORKSPACE_ID = "ws-1";
 
 describe("workspace agent visibility", () => {
-  it("keeps subagents active and known while excluding them from auto-open", () => {
+  it("keeps subagents active while excluding them from auto-open", () => {
     const parent = makeAgent({
       id: "parent-agent",
       cwd: "/repo/worktree",
@@ -83,10 +84,9 @@ describe("workspace agent visibility", () => {
 
     expect(result.activeAgentIds).toEqual(new Set(["parent-agent", "child-agent"]));
     expect(result.autoOpenAgentIds).toEqual(new Set(["parent-agent"]));
-    expect(result.knownAgentIds).toEqual(new Set(["parent-agent", "child-agent"]));
   });
 
-  it("keeps archived subagents known but excludes them from active and auto-open", () => {
+  it("excludes archived subagents from active and auto-open", () => {
     const archivedChild = makeAgent({
       id: "archived-child",
       cwd: "/repo/worktree",
@@ -102,7 +102,6 @@ describe("workspace agent visibility", () => {
 
     expect(result.activeAgentIds).toEqual(new Set<string>());
     expect(result.autoOpenAgentIds).toEqual(new Set<string>());
-    expect(result.knownAgentIds).toEqual(new Set(["archived-child"]));
   });
 
   it("excludes a child from auto-open even when its snapshot arrives before the parent", () => {
@@ -128,10 +127,34 @@ describe("workspace agent visibility", () => {
 
     expect(result.activeAgentIds).toEqual(new Set(["child-agent", "parent-agent"]));
     expect(result.autoOpenAgentIds).toEqual(new Set(["parent-agent"]));
-    expect(result.knownAgentIds).toEqual(new Set(["child-agent", "parent-agent"]));
   });
 
-  it("keeps archived agents out of activeAgentIds but present in knownAgentIds", () => {
+  it("auto-opens a subagent whose parent belongs to another workspace", () => {
+    const parent = makeAgent({
+      id: "parent-agent",
+      cwd: "/repo",
+      workspaceId: "ws-parent",
+    });
+    const child = makeAgent({
+      id: "child-agent",
+      cwd: "/repo/worktree",
+      workspaceId: WORKSPACE_ID,
+      parentAgentId: parent.id,
+    });
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents: new Map<string, Agent>([
+        [parent.id, parent],
+        [child.id, child],
+      ]),
+      workspaceId: WORKSPACE_ID,
+    });
+
+    expect(result.activeAgentIds).toEqual(new Set(["child-agent"]));
+    expect(result.autoOpenAgentIds).toEqual(new Set(["child-agent"]));
+  });
+
+  it("excludes archived agents from the active directory", () => {
     const visible = makeAgent({
       id: "visible-agent",
       cwd: "/repo/worktree",
@@ -164,12 +187,9 @@ describe("workspace agent visibility", () => {
 
     expect(result.activeAgentIds).toEqual(new Set(["visible-agent"]));
     expect(result.autoOpenAgentIds).toEqual(new Set(["visible-agent"]));
-    expect(result.knownAgentIds.has("visible-agent")).toBe(true);
-    expect(result.knownAgentIds.has("archived-agent")).toBe(true);
-    expect(result.knownAgentIds.has("other-workspace-agent")).toBe(false);
   });
 
-  it("treats lazy historical details as known without making them active", () => {
+  it("does not make historical details active", () => {
     const active = makeAgent({
       id: "active-agent",
       cwd: "/repo/worktree",
@@ -189,7 +209,6 @@ describe("workspace agent visibility", () => {
     });
 
     expect(result.activeAgentIds).toEqual(new Set(["active-agent"]));
-    expect(result.knownAgentIds).toEqual(new Set(["active-agent", "historical-agent"]));
   });
 
   it("prunes archived agent tabs so archiving on one client closes tabs on all clients", () => {
@@ -254,7 +273,6 @@ describe("workspace agent visibility", () => {
     });
 
     expect(result.activeAgentIds).toEqual(new Set(["stamped-agent"]));
-    expect(result.knownAgentIds).toEqual(new Set(["stamped-agent"]));
   });
 
   it("excludes a stamped agent whose workspaceId belongs to another workspace sharing the cwd", () => {
@@ -275,7 +293,6 @@ describe("workspace agent visibility", () => {
     });
 
     expect(result.activeAgentIds).toEqual(new Set<string>());
-    expect(result.knownAgentIds).toEqual(new Set<string>());
   });
 
   it("excludes agents without a workspaceId", () => {
@@ -289,14 +306,12 @@ describe("workspace agent visibility", () => {
     });
 
     expect(result.activeAgentIds).toEqual(new Set<string>());
-    expect(result.knownAgentIds).toEqual(new Set<string>());
   });
 
   it("builds the tab reconciliation snapshot without callers unpacking agent visibility", () => {
     const agentVisibility = {
       activeAgentIds: new Set(["active-agent"]),
       autoOpenAgentIds: new Set(["root-agent"]),
-      knownAgentIds: new Set(["active-agent", "archived-agent"]),
     };
 
     expect(
@@ -306,6 +321,7 @@ describe("workspace agent visibility", () => {
         terminalsHydrated: true,
         knownTerminalIds: ["terminal-1", "script-terminal"],
         standaloneTerminalIds: ["terminal-1"],
+        hasActivePendingTerminalCreate: false,
         hasActivePendingDraftCreate: false,
       }),
     ).toEqual({
@@ -313,9 +329,9 @@ describe("workspace agent visibility", () => {
       terminalsHydrated: true,
       activeAgentIds: agentVisibility.activeAgentIds,
       autoOpenAgentIds: agentVisibility.autoOpenAgentIds,
-      knownAgentIds: agentVisibility.knownAgentIds,
       knownTerminalIds: ["terminal-1", "script-terminal"],
       standaloneTerminalIds: ["terminal-1"],
+      hasActivePendingTerminalCreate: false,
       hasActivePendingDraftCreate: false,
     });
   });
@@ -325,12 +341,10 @@ describe("workspace agent visibility", () => {
       const a = {
         activeAgentIds: new Set(["a", "b"]),
         autoOpenAgentIds: new Set(["a"]),
-        knownAgentIds: new Set(["a", "b", "c"]),
       };
       const b = {
         activeAgentIds: new Set(["a", "b"]),
         autoOpenAgentIds: new Set(["a"]),
-        knownAgentIds: new Set(["a", "b", "c"]),
       };
       expect(workspaceAgentVisibilityEqual(a, b)).toBe(true);
     });
@@ -339,12 +353,10 @@ describe("workspace agent visibility", () => {
       const a = {
         activeAgentIds: new Set(["a"]),
         autoOpenAgentIds: new Set(["a"]),
-        knownAgentIds: new Set(["a"]),
       };
       const b = {
         activeAgentIds: new Set(["b"]),
         autoOpenAgentIds: new Set(["a"]),
-        knownAgentIds: new Set(["a"]),
       };
       expect(workspaceAgentVisibilityEqual(a, b)).toBe(false);
     });
@@ -353,26 +365,10 @@ describe("workspace agent visibility", () => {
       const a = {
         activeAgentIds: new Set(["a", "b"]),
         autoOpenAgentIds: new Set(["a"]),
-        knownAgentIds: new Set(["a", "b"]),
       };
       const b = {
         activeAgentIds: new Set(["a", "b"]),
         autoOpenAgentIds: new Set(["b"]),
-        knownAgentIds: new Set(["a", "b"]),
-      };
-      expect(workspaceAgentVisibilityEqual(a, b)).toBe(false);
-    });
-
-    it("returns false when knownAgentIds differ", () => {
-      const a = {
-        activeAgentIds: new Set(["a"]),
-        autoOpenAgentIds: new Set(["a"]),
-        knownAgentIds: new Set(["a"]),
-      };
-      const b = {
-        activeAgentIds: new Set(["a"]),
-        autoOpenAgentIds: new Set(["a"]),
-        knownAgentIds: new Set(["a", "b"]),
       };
       expect(workspaceAgentVisibilityEqual(a, b)).toBe(false);
     });
@@ -381,12 +377,10 @@ describe("workspace agent visibility", () => {
       const a = {
         activeAgentIds: new Set<string>(),
         autoOpenAgentIds: new Set<string>(),
-        knownAgentIds: new Set<string>(),
       };
       const b = {
         activeAgentIds: new Set<string>(),
         autoOpenAgentIds: new Set<string>(),
-        knownAgentIds: new Set<string>(),
       };
       expect(workspaceAgentVisibilityEqual(a, b)).toBe(true);
     });

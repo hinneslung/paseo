@@ -2,7 +2,10 @@ import * as Linking from "expo-linking";
 import { getDesktopHost } from "@/desktop/host";
 import { isWeb } from "@/constants/platform";
 
+import { isHttpUrl } from "./http-url";
+
 export async function openExternalUrl(url: string): Promise<void> {
+  if (!isHttpUrl(url)) return;
   if (isWeb) {
     const opener = getDesktopHost()?.opener?.openUrl;
     if (typeof opener === "function") {

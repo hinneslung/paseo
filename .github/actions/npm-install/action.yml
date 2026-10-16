@@ -1,0 +1,41 @@
+name: npm install
+description: Install npm dependencies with setup-node and Electron CDN retry handling.
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+        cache: "npm"
+
+    - name: Install dependencies with Electron retry
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        for attempt in 1 2 3; do
+          if npm ci; then
+            exit 0
+          else
+            exit_code=$?
+          fi
+          if [ "$attempt" -eq 3 ]; then
+            exit $exit_code
+          fi
+          sleep $((attempt * 20))
+        done
+
+    - name: Install dependencies with Electron retry
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+          npm ci
+          if ($LASTEXITCODE -eq 0) {
+            exit 0
+          }
+          if ($attempt -eq 3) {
+            exit $LASTEXITCODE
+          }
+          Start-Sleep -Seconds (20 * $attempt)
+        }

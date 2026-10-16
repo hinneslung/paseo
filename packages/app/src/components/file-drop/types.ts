@@ -1,0 +1,27 @@
+import type { ImageAttachment } from "@/composer/types";
+import type { WorkspaceFileDragPayload } from "@/attachments/workspace-file-drag";
+
+export interface DroppedFileItem {
+  kind: "web-file";
+  file: File;
+}
+export interface DroppedPathItem {
+  kind: "desktop-path";
+  path: string;
+}
+export interface DroppedFileUriItem {
+  kind: "file-uri";
+  path: string;
+}
+export type DroppedItem = DroppedFileItem | DroppedPathItem | DroppedFileUriItem;
+
+/**
+ * What a consumer (e.g. a composer) registers to receive files dropped onto the
+ * surrounding FileDropZone. Raster images arrive already persisted via `onFiles`;
+ * everything else arrives raw via `onGenericFiles`.
+ */
+export interface FileDropSink {
+  onFiles: (images: ImageAttachment[]) => void;
+  onGenericFiles?: (items: DroppedItem[]) => void;
+  onWorkspaceFile?: (payload: WorkspaceFileDragPayload) => void;
+}
