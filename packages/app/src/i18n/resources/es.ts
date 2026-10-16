@@ -1001,6 +1001,7 @@ export const es: TranslationResources = {
         openIn: "Abrir espacio de trabajo en{{target}}",
         openFileIn: "Open {{fileName}} in {{target}}",
         failedOpen: "No se pudo abrir el espacio de trabajo",
+        failedOpenFile: "No se pudo abrir el archivo",
       },
       pr: {
         actions: {
@@ -1569,6 +1570,11 @@ export const es: TranslationResources = {
     errorTitle: "algo salió mal",
     errorDescription:
       "El servidor local no pudo iniciarse. Si esto continúa sucediendo, informe el problema enGitHube incluya los registros a continuación.",
+    status: {
+      connecting: "Conectando con el demonio de Paseo…",
+      loadingWorkspaces: "Cargando tus espacios de trabajo…",
+      opening: "Abriendo esta carpeta en Paseo…",
+    },
     logs: {
       loading: "Cargando registros de demonio...",
       unavailable: "No hay registros de demonios disponibles.",

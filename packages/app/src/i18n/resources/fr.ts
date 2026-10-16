@@ -992,6 +992,7 @@ export const fr: TranslationResources = {
         openIn: "Ouvrir l’espace de travail dans {{target}}",
         openFileIn: "Ouvrir {{fileName}} dans {{target}}",
         failedOpen: "Impossible d’ouvrir l’espace de travail",
+        failedOpenFile: "Impossible d’ouvrir le fichier",
       },
       pr: {
         actions: {
@@ -1563,6 +1564,11 @@ export const fr: TranslationResources = {
     errorTitle: "Une erreur s’est produite",
     errorDescription:
       "Le serveur local n’a pas pu démarrer. Si le problème persiste, signalez-le sur GitHub en joignant les journaux ci-dessous.",
+    status: {
+      connecting: "Connexion au démon Paseo…",
+      loadingWorkspaces: "Chargement de vos espaces de travail…",
+      opening: "Ouverture de ce dossier dans Paseo…",
+    },
     logs: {
       loading: "Chargement des journaux du daemon…",
       unavailable: "Aucun journal du daemon disponible.",
