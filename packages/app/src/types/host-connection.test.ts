@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { defaultHostAppearance } from "@/hosts/appearance";
 import {
   createRemoteSshHostConnection,
+  moveHostConnectionToServer,
   normalizeStoredHostProfile,
   orderHostsLocalFirst,
   resolveActiveHostServerId,
@@ -309,6 +310,104 @@ describe("upsertHostConnectionInProfiles", () => {
     expect("password" in profile.connections[0]!).toBe(false);
     expect(profile.password).toBe("new-secret");
     expect(profile.preferredConnectionId).toBe(replacement.id);
+  });
+});
+
+describe("moveHostConnectionToServer", () => {
+  const direct: HostConnection = {
+    id: "direct:machine-a:6767",
+    type: "directTcp",
+    endpoint: "machine-a:6767",
+  };
+  const bridge: HostConnection = {
+    id: "bridge:127.0.0.1:6767",
+    type: "directTcpBridge",
+    endpoint: "127.0.0.1:6767",
+  };
+
+  it("leaves the other connections of the source profile alone", () => {
+    const source: HostProfile = {
+      ...makeHost("srv_machine_a"),
+      label: "machine-a",
+      connections: [direct, bridge],
+      preferredConnectionId: direct.id,
+    };
+
+    const profiles = moveHostConnectionToServer({
+      profiles: [source],
+      fromServerId: "srv_machine_a",
+      serverId: "srv_machine_b",
+      label: "machine-b",
+      connection: bridge,
+    });
+
+    expect(profiles).toHaveLength(2);
+    expect(profiles[0]).toMatchObject({
+      serverId: "srv_machine_a",
+      label: "machine-a",
+      connections: [direct],
+      preferredConnectionId: direct.id,
+    });
+    expect(profiles[1]).toMatchObject({
+      serverId: "srv_machine_b",
+      label: "machine-b",
+      connections: [bridge],
+      preferredConnectionId: bridge.id,
+    });
+  });
+
+  it("drops a source profile that had nothing but the moved connection", () => {
+    const source: HostProfile = {
+      ...makeHost("srv_machine_a"),
+      connections: [bridge],
+      preferredConnectionId: bridge.id,
+    };
+
+    const profiles = moveHostConnectionToServer({
+      profiles: [source, makeHost("srv_other")],
+      fromServerId: "srv_machine_a",
+      serverId: "srv_machine_b",
+      label: "machine-b",
+      connection: bridge,
+    });
+
+    expect(profiles.map((profile) => profile.serverId)).toEqual(["srv_machine_b", "srv_other"]);
+  });
+
+  it("keeps a target label the user chose", () => {
+    const source: HostProfile = {
+      ...makeHost("srv_machine_a"),
+      connections: [direct, bridge],
+      preferredConnectionId: direct.id,
+    };
+    const target: HostProfile = {
+      ...makeHost("srv_machine_b"),
+      label: "my mac",
+    };
+
+    const profiles = moveHostConnectionToServer({
+      profiles: [source, target],
+      fromServerId: "srv_machine_a",
+      serverId: "srv_machine_b",
+      label: "machine-b",
+      connection: bridge,
+    });
+
+    expect(profiles[1].label).toBe("my mac");
+    expect(profiles[1].connections).toEqual([bridge]);
+  });
+
+  it("does nothing when the source profile never held the connection", () => {
+    const profiles = [makeHost("srv_machine_a")];
+
+    expect(
+      moveHostConnectionToServer({
+        profiles,
+        fromServerId: "srv_machine_a",
+        serverId: "srv_machine_b",
+        connection: bridge,
+      }),
+    ).toBe(profiles);
   });
 });
 

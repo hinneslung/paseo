@@ -682,6 +682,20 @@ function onceHostListMatches(store: HostRuntimeStore, predicate: () => boolean):
   });
 }
 
+function onceFirstHostIs(store: HostRuntimeStore, serverId: string): Promise<void> {
+  return onceHostListMatches(store, () => store.getHosts()[0]?.serverId === serverId);
+}
+
+function onceOnlyHostHasConnection(store: HostRuntimeStore, connectionId: string): Promise<void> {
+  return onceHostListMatches(store, () => {
+    const hosts = store.getHosts();
+    return (
+      hosts.length === 1 &&
+      hosts[0]?.connections.some((connection) => connection.id === connectionId) === true
+    );
+  });
+}
+
 function onceHostSnapshotMatches(
   store: HostRuntimeStore,
   serverId: string,
@@ -1138,6 +1152,42 @@ describe("HostRuntimeController", () => {
     expect(controller.getSnapshot().connectionStatus).toBe("connecting");
     expect(controller.getSnapshot().activeConnectionId).toBeNull();
     expect(controller.getSnapshot().probeByConnectionId.get("direct:localhost:6767")).toEqual({
+      status: "unavailable",
+      latencyMs: null,
+    });
+    expect(mismatchedClient.isDisposed()).toBe(true);
+  });
+
+  it("rejects a mismatched bridge probe when reconciliation does not re-key the host", async () => {
+    const bridge: HostConnection = {
+      id: "bridge:127.0.0.1:6767",
+      type: "directTcpBridge",
+      endpoint: "127.0.0.1:6767",
+    };
+    const mismatchedClient = makeConnectedProbeClient(8);
+    const controller = new HostRuntimeController({
+      host: makeHost({
+        serverId: "srv_stale",
+        connections: [bridge],
+        preferredConnectionId: bridge.id,
+      }),
+      deps: {
+        createClient: () => {
+          throw new Error("should not create active client");
+        },
+        connectToDaemon: async () => ({
+          client: mismatchedClient as unknown as DaemonClient,
+          serverId: "srv_current",
+          hostname: "current host",
+        }),
+        getClientId: async () => "cid_test_runtime",
+      },
+      onAdoptServerId: () => "rejected",
+    });
+
+    await controller.start({ autoProbe: false });
+
+    expect(controller.getSnapshot().probeByConnectionId.get(bridge.id)).toEqual({
       status: "unavailable",
       latencyMs: null,
     });
@@ -1782,6 +1832,286 @@ describe("HostRuntimeStore", () => {
       },
     );
   });
+
+  it("re-keys a stale stored VS Code bridge host to the daemon-reported server id", async () => {
+    await withGlobalWindow(
+      {
+        paseoVscode: {
+          endpoint: "127.0.0.1:6767",
+          hasPassword: true,
+          bridgeProtocol: 1,
+          workspaceFolders: [],
+        },
+        paseoDesktop: {},
+      },
+      async () => {
+        const bridge: HostConnection = {
+          id: "bridge:127.0.0.1:6767",
+          type: "directTcpBridge",
+          endpoint: "127.0.0.1:6767",
+        };
+        const store = new HostRuntimeStore({
+          deps: {
+            createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+            connectToDaemon: async () => ({
+              client: makeConnectedProbeClient(5) as unknown as DaemonClient,
+              serverId: "srv_machine_b",
+              hostname: "machine-b",
+            }),
+            getClientId: async () => "cid_test_runtime",
+          },
+          storage: createMemoryHostRuntimeStorage({
+            "@paseo:daemon-registry": JSON.stringify([
+              makeHost({
+                serverId: "srv_machine_a",
+                label: "machine-a",
+                connections: [bridge],
+                preferredConnectionId: bridge.id,
+              }),
+            ]),
+          }),
+        });
+
+        await store.boot();
+        await onceFirstHostIs(store, "srv_machine_b");
+
+        try {
+          await store.runProbeCycleNow("srv_machine_b");
+          expect(store.getHosts()).toHaveLength(1);
+          expect(store.getHosts()).toMatchObject([
+            { serverId: "srv_machine_b", label: "machine-b" },
+          ]);
+          expect(store.getSnapshot("srv_machine_a")).toBeNull();
+          expect(store.getSnapshot("srv_machine_b")?.connectionStatus).toBe("online");
+        } finally {
+          store.syncHosts([]);
+        }
+      },
+    );
+  });
+
+  it("moves a bridge-only stale host into an existing destination profile", async () => {
+    await withGlobalWindow(
+      {
+        paseoVscode: {
+          endpoint: "127.0.0.1:6767",
+          hasPassword: true,
+          bridgeProtocol: 1,
+          workspaceFolders: [],
+        },
+        paseoDesktop: {},
+      },
+      async () => {
+        const bridge: HostConnection = {
+          id: "bridge:127.0.0.1:6767",
+          type: "directTcpBridge",
+          endpoint: "127.0.0.1:6767",
+        };
+        const targetDirect: HostConnection = {
+          id: "direct:machine-b:6767",
+          type: "directTcp",
+          endpoint: "machine-b:6767",
+        };
+        const store = new HostRuntimeStore({
+          deps: {
+            createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+            connectToDaemon: async ({ connection }) => ({
+              client: makeConnectedProbeClient(
+                connection.id === bridge.id ? 5 : 10,
+              ) as unknown as DaemonClient,
+              serverId: "srv_machine_b",
+              hostname: "machine-b",
+            }),
+            getClientId: async () => "cid_test_runtime",
+          },
+          storage: createMemoryHostRuntimeStorage({
+            "@paseo:daemon-registry": JSON.stringify([
+              makeHost({
+                serverId: "srv_machine_a",
+                label: "machine-a",
+                connections: [bridge],
+                preferredConnectionId: bridge.id,
+              }),
+              makeHost({
+                serverId: "srv_machine_b",
+                label: "custom machine-b",
+                connections: [targetDirect],
+                preferredConnectionId: targetDirect.id,
+              }),
+            ]),
+          }),
+        });
+
+        try {
+          await store.boot();
+          await onceOnlyHostHasConnection(store, bridge.id);
+
+          expect(store.getHosts()).toMatchObject([
+            {
+              serverId: "srv_machine_b",
+              label: "custom machine-b",
+              connections: [targetDirect, bridge],
+              preferredConnectionId: targetDirect.id,
+            },
+          ]);
+          expect(store.getSnapshot("srv_machine_a")).toBeNull();
+          expect(store.getSnapshot("srv_machine_b")?.connectionStatus).toBe("online");
+        } finally {
+          store.syncHosts([]);
+        }
+      },
+    );
+  });
+
+  it.each([
+    { first: "direct", existingTarget: false },
+    { first: "bridge", existingTarget: false },
+    { first: "direct", existingTarget: true },
+    { first: "bridge", existingTarget: true },
+  ])(
+    "moves only the bridge with $first connecting first and existing target $existingTarget",
+    async ({ first, existingTarget }) => {
+      useHostRuntimeClock();
+      const direct: HostConnection = {
+        id: "direct:machine-a:6767",
+        type: "directTcp",
+        endpoint: "machine-a:6767",
+      };
+      const bridge: HostConnection = {
+        id: "bridge:127.0.0.1:6767",
+        type: "directTcpBridge",
+        endpoint: "127.0.0.1:6767",
+      };
+      const targetDirect: HostConnection = {
+        id: "direct:machine-b:6767",
+        type: "directTcp",
+        endpoint: "machine-b:6767",
+      };
+      const clientA = makeConnectedProbeClient(5);
+      const clientB = makeConnectedProbeClient(10);
+      const directReply =
+        createDeferred<Awaited<ReturnType<HostRuntimeControllerDeps["connectToDaemon"]>>>();
+      const bridgeReply =
+        createDeferred<Awaited<ReturnType<HostRuntimeControllerDeps["connectToDaemon"]>>>();
+      const responseA = {
+        client: clientA as unknown as DaemonClient,
+        serverId: "srv_machine_a",
+        hostname: "machine-a",
+      };
+      const responseB = {
+        client: clientB as unknown as DaemonClient,
+        serverId: "srv_machine_b",
+        hostname: "machine-b",
+      };
+      const targetLabel = existingTarget ? "custom machine-b" : "machine-b";
+      const targetConnections = existingTarget ? [targetDirect, bridge] : [bridge];
+      const targetPreferredConnectionId = existingTarget ? targetDirect.id : bridge.id;
+      const hosts = [
+        makeHost({
+          serverId: "srv_machine_a",
+          label: "machine-a",
+          connections: [direct, bridge],
+          preferredConnectionId: bridge.id,
+        }),
+      ];
+      if (existingTarget) {
+        hosts.push(
+          makeHost({
+            serverId: "srv_machine_b",
+            label: targetLabel,
+            connections: [targetDirect],
+            preferredConnectionId: targetDirect.id,
+          }),
+        );
+      }
+      const storage = createMemoryHostRuntimeStorage({
+        "@paseo:e2e": "1",
+        "@paseo:daemon-registry": JSON.stringify(hosts),
+      });
+      const store = new HostRuntimeStore({
+        storage,
+        deps: {
+          createClient: () => {
+            throw new Error("The already connected probe client should be reused");
+          },
+          connectToDaemon: async ({ connection }) => {
+            if (connection.id === direct.id) {
+              return directReply.promise;
+            }
+            if (connection.id === bridge.id) {
+              return bridgeReply.promise;
+            }
+            return {
+              client: makeConnectedProbeClient(15) as unknown as DaemonClient,
+              serverId: "srv_machine_b",
+              hostname: "machine-b",
+            };
+          },
+          getClientId: async () => "cid_test_runtime",
+        },
+      });
+
+      try {
+        await store.boot();
+        if (existingTarget) {
+          await onceHostSnapshotMatches(
+            store,
+            "srv_machine_b",
+            (snapshot) => snapshot?.connectionStatus === "online",
+          );
+        }
+        const cycle = store.runProbeCycleNow("srv_machine_a");
+        if (first === "direct") {
+          directReply.resolve(responseA);
+          await onceHostSnapshotMatches(
+            store,
+            "srv_machine_a",
+            (snapshot) => snapshot?.connectionStatus === "online",
+          );
+          bridgeReply.resolve(responseB);
+        } else {
+          bridgeReply.resolve(responseB);
+          await onceHostListMatches(store, () => store.getHosts()[0]?.connections.length === 1);
+          directReply.resolve(responseA);
+        }
+        await cycle;
+        expect(store.getHosts().map((host) => host.serverId)).toEqual([
+          "srv_machine_a",
+          "srv_machine_b",
+        ]);
+        await onceHostSnapshotMatches(
+          store,
+          "srv_machine_a",
+          (snapshot) => snapshot?.connectionStatus === "online",
+        );
+        await onceHostSnapshotMatches(
+          store,
+          "srv_machine_b",
+          (snapshot) => snapshot?.connectionStatus === "online",
+        );
+        await store.runProbeCycleNow("srv_machine_b");
+
+        const adoptedHosts = store.getHosts();
+        expect(adoptedHosts[0]?.label).toBe("machine-a");
+        expect(adoptedHosts[0]?.connections).toEqual([{ ...direct, useTls: false }]);
+        expect(adoptedHosts[0]?.preferredConnectionId).toBe(direct.id);
+        expect(adoptedHosts[1]?.label).toBe(targetLabel);
+        expect(adoptedHosts[1]?.connections.map((connection) => connection.id)).toEqual(
+          targetConnections.map((connection) => connection.id),
+        );
+        expect(adoptedHosts[1]?.preferredConnectionId).toBe(targetPreferredConnectionId);
+        expect(store.getClient("srv_machine_a")).toBe(clientA);
+        expect(store.getClient("srv_machine_b")).toBe(clientB);
+        expect(clientA.isDisposed()).toBe(false);
+        expect(clientB.isDisposed()).toBe(false);
+        expect(await storage.getItem("@paseo:daemon-registry")).toBe(JSON.stringify(adoptedHosts));
+      } finally {
+        directReply.resolve(responseA);
+        bridgeReply.resolve(responseB);
+        store.syncHosts([]);
+      }
+    },
+  );
 
   it.each(["active", "inactive", "background"] as const)(
     "keeps reconnect enabled through inactive/background and resumes immediately (mounted %s)",

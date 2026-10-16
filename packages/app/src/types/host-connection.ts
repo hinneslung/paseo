@@ -322,6 +322,83 @@ export function upsertHostConnectionInProfiles(input: {
   return next;
 }
 
+/** Moves one connection onto the daemon that answered on it. */
+export function moveHostConnectionToServer(input: {
+  profiles: HostProfile[];
+  fromServerId: string;
+  serverId: string;
+  label?: string;
+  connection: HostConnection;
+  now?: string;
+}): HostProfile[] {
+  const serverId = input.serverId.trim();
+  if (!serverId) {
+    throw new Error("serverId is required");
+  }
+  if (serverId === input.fromServerId) {
+    return input.profiles;
+  }
+
+  const sourceIndex = input.profiles.findIndex(
+    (profile) => profile.serverId === input.fromServerId,
+  );
+  const source = sourceIndex === -1 ? null : input.profiles[sourceIndex];
+  if (!source || !source.connections.some((connection) => connection.id === input.connection.id)) {
+    return input.profiles;
+  }
+
+  const now = input.now ?? new Date().toISOString();
+  const label = input.label?.trim() ?? "";
+  const remaining = source.connections.filter(
+    (connection) => connection.id !== input.connection.id,
+  );
+
+  const next = input.profiles.flatMap((profile) => {
+    if (profile.serverId !== input.fromServerId) {
+      return [profile];
+    }
+    if (remaining.length === 0) {
+      return [];
+    }
+    return [
+      {
+        ...profile,
+        connections: remaining,
+        preferredConnectionId: remaining.some(
+          (connection) => connection.id === profile.preferredConnectionId,
+        )
+          ? profile.preferredConnectionId
+          : remaining[0].id,
+        updatedAt: now,
+      } satisfies HostProfile,
+    ];
+  });
+
+  const targetIndex = next.findIndex((profile) => profile.serverId === serverId);
+  if (targetIndex === -1) {
+    next.splice(remaining.length === 0 ? sourceIndex : next.length, 0, {
+      serverId,
+      label: label || serverId,
+      appearance: defaultHostAppearance(),
+      lifecycle: defaultLifecycle(),
+      connections: [input.connection],
+      preferredConnectionId: input.connection.id,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return next;
+  }
+
+  const target = next[targetIndex];
+  next[targetIndex] = {
+    ...target,
+    label: target.label === target.serverId && label ? label : target.label,
+    connections: upsertHostConnectionById(target.connections, input.connection),
+    updatedAt: now,
+  };
+  return next;
+}
+
 export function connectionFromListen(listen: string): HostConnection | null {
   const normalizedListen = listen.trim();
   if (!normalizedListen) {

@@ -11,6 +11,7 @@ import {
 import {
   connectionFromListen,
   createRemoteSshHostConnection,
+  moveHostConnectionToServer,
   normalizeStoredHostProfile,
   upsertHostConnectionInProfiles,
   registryHasConnection,
@@ -651,10 +652,20 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
   };
 }
 
+export interface AdoptServerIdInput {
+  previousServerId: string;
+  serverId: string;
+  hostname: string | null;
+  connection: HostConnection;
+  client: DaemonClient;
+}
+
+export type AdoptServerIdResult = "rekeyed" | "moved" | "rejected";
+
 export class HostRuntimeController {
   private host: HostProfile;
   private deps: HostRuntimeControllerDeps;
-  private onReconcileServerId: ((oldId: string, newId: string) => void) | null;
+  private onAdoptServerId: ((input: AdoptServerIdInput) => AdoptServerIdResult) | null;
   private connectionMachineState: HostRuntimeConnectionMachineState;
   private connectionEpoch = 0;
   private snapshot: HostRuntimeSnapshot;
@@ -678,11 +689,11 @@ export class HostRuntimeController {
   constructor(input: {
     host: HostProfile;
     deps?: HostRuntimeControllerDeps;
-    onReconcileServerId?: (oldId: string, newId: string) => void;
+    onAdoptServerId?: (input: AdoptServerIdInput) => AdoptServerIdResult;
   }) {
     this.host = input.host;
     this.deps = input.deps ?? createDefaultDeps();
-    this.onReconcileServerId = input.onReconcileServerId ?? null;
+    this.onAdoptServerId = input.onAdoptServerId ?? null;
     this.connectionMachineState = {
       tag: "booting",
     };
@@ -768,7 +779,10 @@ export class HostRuntimeController {
     });
   }
 
-  async updateHost(host: HostProfile): Promise<void> {
+  async updateHost(
+    host: HostProfile,
+    initialConnection?: { connectionId: string; existingClient: DaemonClient },
+  ): Promise<void> {
     const passwordChanged = this.host.password !== host.password;
     if (passwordChanged) {
       this.probeRequestVersion += 1;
@@ -779,6 +793,11 @@ export class HostRuntimeController {
     const previousActiveConnection = findConnectionById(this.host, activeConnectionId);
     this.host = host;
     this.trackConnectionFirstSeen();
+    if (initialConnection) {
+      this.probeRequestVersion += 1;
+      await this.switchToConnection(initialConnection);
+      return;
+    }
     const nextActiveConnection = findConnectionById(this.host, activeConnectionId);
     if (
       activeConnectionId &&
@@ -1061,19 +1080,12 @@ export class HostRuntimeController {
             if (activeClient) {
               connectedClient = activeClient;
             } else {
-              const { client, serverId } = await this.deps.connectToDaemon({
+              const { client, serverId, hostname } = await this.deps.connectToDaemon({
                 host: this.host,
                 connection,
               });
               if (serverId !== this.host.serverId) {
-                if (isPlaceholderServerId(this.host.serverId) && this.onReconcileServerId) {
-                  this.onReconcileServerId(this.host.serverId, serverId);
-                } else {
-                  await client.close().catch(() => undefined);
-                  throw new Error(
-                    `Connection resolved to ${serverId}, expected ${this.host.serverId}.`,
-                  );
-                }
+                await this.settleServerIdMismatch({ serverId, hostname, connection, client });
               }
               connectedClient = client;
               shouldCloseClient = true;
@@ -1409,8 +1421,35 @@ export class HostRuntimeController {
     }
   }
 
-  adoptReconciledServerId(newServerId: string): void {
-    this.host = { ...this.host, serverId: newServerId };
+  private async settleServerIdMismatch(input: {
+    serverId: string;
+    hostname: string | null;
+    connection: HostConnection;
+    client: DaemonClient;
+  }): Promise<void> {
+    const canAdoptServerId =
+      isPlaceholderServerId(this.host.serverId) || input.connection.type === "directTcpBridge";
+    const adoption =
+      canAdoptServerId && this.onAdoptServerId
+        ? this.onAdoptServerId({
+            previousServerId: this.host.serverId,
+            serverId: input.serverId,
+            hostname: input.hostname,
+            connection: input.connection,
+            client: input.client,
+          })
+        : "rejected";
+    if (input.serverId === this.host.serverId) {
+      return;
+    }
+    if (adoption !== "moved") {
+      await input.client.close().catch(() => undefined);
+    }
+    throw new Error(`Connection resolved to ${input.serverId}, expected ${this.host.serverId}.`);
+  }
+
+  adoptReconciledServerId(newServerId: string, label?: string): void {
+    this.host = { ...this.host, serverId: newServerId, label: label ?? this.host.label };
     this.snapshot = { ...this.snapshot, serverId: newServerId };
     for (const listener of this.listeners) {
       listener();
@@ -1824,16 +1863,54 @@ export class HostRuntimeStore {
     }
   }
 
-  reconcileServerId(oldServerId: string, newServerId: string): void {
+  private adoptServerId(adoption: AdoptServerIdInput): AdoptServerIdResult {
+    const profile = this.hosts.find((host) => host.serverId === adoption.previousServerId);
+    if (!profile) {
+      return "rejected";
+    }
+    const destinationExists = this.hosts.some((host) => host.serverId === adoption.serverId);
+    if (profile.connections.length <= 1 && !destinationExists) {
+      const rekeyed = this.reconcileServerId(
+        adoption.previousServerId,
+        adoption.serverId,
+        adoption.hostname ?? undefined,
+      );
+      return rekeyed ? "rekeyed" : "rejected";
+    }
+    const next = moveHostConnectionToServer({
+      profiles: this.hosts,
+      fromServerId: adoption.previousServerId,
+      serverId: adoption.serverId,
+      label: adoption.hostname ?? undefined,
+      connection: adoption.connection,
+    });
+    if (next === this.hosts) {
+      return "rejected";
+    }
+    this.setHostsAndSync(next, {
+      initialConnectionByServerId: new Map([
+        [
+          adoption.serverId,
+          { connectionId: adoption.connection.id, existingClient: adoption.client },
+        ],
+      ]),
+    });
+    void this.persistHosts().catch((error) =>
+      console.error("[HostRuntime] Failed to persist host registry", error),
+    );
+    return "moved";
+  }
+
+  reconcileServerId(oldServerId: string, newServerId: string, reportedLabel?: string): boolean {
     if (oldServerId === newServerId) {
-      return;
+      return false;
     }
     const controller = this.controllers.get(oldServerId);
     if (!controller) {
-      return;
+      return false;
     }
     if (this.controllers.has(newServerId)) {
-      return;
+      return false;
     }
 
     rekeyMap(this.controllers, oldServerId, newServerId);
@@ -1863,7 +1940,7 @@ export class HostRuntimeStore {
         prepareAgent: (agentId) => directory.prepareAgentRoute(agentId),
       }),
     );
-    controller.adoptReconciledServerId(newServerId);
+    controller.adoptReconciledServerId(newServerId, reportedLabel?.trim() || undefined);
     const snapshot = controller.getSnapshot();
     this.clearHostReplica(oldServerId);
     this.syncSessionReplica(newServerId, snapshot);
@@ -1888,7 +1965,12 @@ export class HostRuntimeStore {
 
     this.hosts = this.hosts.map((host) =>
       host.serverId === oldServerId
-        ? { ...host, serverId: newServerId, updatedAt: new Date().toISOString() }
+        ? {
+            ...host,
+            serverId: newServerId,
+            label: reportedLabel?.trim() || host.label,
+            updatedAt: new Date().toISOString(),
+          }
         : host,
     );
     this.emitHostList();
@@ -1896,6 +1978,7 @@ export class HostRuntimeStore {
     void this.persistHosts().catch((error) =>
       console.error("[HostRuntime] Failed to persist host registry", error),
     );
+    return true;
   }
 
   async upsertDirectConnection(input: {
@@ -2338,18 +2421,15 @@ export class HostRuntimeStore {
       const initialConnection = options?.initialConnectionByServerId?.get(host.serverId);
       const existing = this.controllers.get(host.serverId);
       if (existing) {
-        void existing.updateHost(host);
-        if (initialConnection) {
-          void existing.activateConnection(initialConnection).catch(() => {
-            void initialConnection.existingClient.close().catch(() => undefined);
-          });
-        }
+        void existing.updateHost(host, initialConnection).catch(() => {
+          void initialConnection?.existingClient.close().catch(() => undefined);
+        });
         continue;
       }
       const controller = new HostRuntimeController({
         host,
         deps: this.deps,
-        onReconcileServerId: (oldId, newId) => this.reconcileServerId(oldId, newId),
+        onAdoptServerId: (adoption) => this.adoptServerId(adoption),
       });
       this.controllers.set(host.serverId, controller);
       useSessionStore.getState().initializeSession(host.serverId, null);
