@@ -5,6 +5,8 @@ function connectionListen(connection: HostConnection): string | null {
   switch (connection.type) {
     case "directTcp":
       return connection.endpoint;
+    case "directTcpBridge":
+      return null;
     case "directSocket":
       return `unix://${connection.path}`;
     case "directPipe":

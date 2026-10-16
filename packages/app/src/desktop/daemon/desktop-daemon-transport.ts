@@ -32,7 +32,9 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
 
 export function buildDesktopDaemonTransportUrl(target: DesktopDaemonTransportTarget): string {
   const url = new URL(`${DESKTOP_TRANSPORT_SCHEME}//${target.transportType}`);
-  if (target.transportType === "ssh") {
+  if (target.transportType === "tcp") {
+    url.searchParams.set("endpoint", target.endpoint);
+  } else if (target.transportType === "ssh") {
     url.searchParams.set("host", target.host);
     if (target.sshPort !== undefined) {
       url.searchParams.set("port", String(target.sshPort));
@@ -46,12 +48,19 @@ export function buildDesktopDaemonTransportUrl(target: DesktopDaemonTransportTar
   return url.toString();
 }
 
-function parseDesktopDaemonTransportUrl(url: string): DesktopDaemonTransportTarget {
+export function parseDesktopDaemonTransportUrl(url: string): DesktopDaemonTransportTarget {
   const parsed = new URL(url);
   if (parsed.protocol !== DESKTOP_TRANSPORT_SCHEME) {
     throw new Error(`Unsupported desktop transport URL: ${url}`);
   }
   const transportType = parsed.hostname;
+  if (transportType === "tcp") {
+    const endpoint = parsed.searchParams.get("endpoint")?.trim() ?? "";
+    if (!endpoint) {
+      throw new Error(`Invalid desktop transport target: ${url}`);
+    }
+    return { transportType, endpoint };
+  }
   if (transportType === "ssh") return parseSshDesktopTransportUrl(parsed, url);
   const transportPath = parsed.searchParams.get("path")?.trim() ?? "";
   if ((transportType !== "socket" && transportType !== "pipe") || !transportPath) {
@@ -87,8 +96,12 @@ function parseOptionalUrlPort(parsed: URL, key: string, label: string): number |
 export function createDesktopDaemonTransportFactory(
   rpc: LocalDaemonTransportRpc = defaultLocalDaemonTransportRpc,
 ): DaemonTransportFactory | null {
-  return ({ url }) => {
-    const target = parseDesktopDaemonTransportUrl(url);
+  return ({ url, protocols }) => {
+    const parsedTarget = parseDesktopDaemonTransportUrl(url);
+    const target =
+      parsedTarget.transportType === "tcp" && protocols && protocols.length > 0
+        ? { ...parsedTarget, protocols }
+        : parsedTarget;
     const sessionId = `local-session-${globalThis.crypto.randomUUID()}`;
     let unlisten: (() => void) | null = null;
     let disposed = false;

@@ -2,12 +2,27 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildDesktopDaemonTransportUrl,
   createDesktopDaemonTransportFactory,
+  parseDesktopDaemonTransportUrl,
 } from "./desktop-daemon-transport";
 import { createFakeLocalDaemonTransportRpc } from "./test-local-daemon-transport-rpc";
 
 const LOCAL_URL = "paseo+desktop://socket?path=%2Ftmp%2Fpaseo.sock";
 
 describe("desktop-daemon-transport", () => {
+  it.each([
+    { transportType: "socket" as const, transportPath: "/tmp/paseo.sock" },
+    { transportType: "pipe" as const, transportPath: String.raw`\\.\pipe\paseo` },
+    { transportType: "tcp" as const, endpoint: "127.0.0.1:6767" },
+    {
+      transportType: "ssh" as const,
+      host: "deploy@example.com",
+      sshPort: 2222,
+      daemonPort: 7777,
+    },
+  ])("round-trips a $transportType target through its URL", (target) => {
+    expect(parseDesktopDaemonTransportUrl(buildDesktopDaemonTransportUrl(target))).toEqual(target);
+  });
+
   it("uses the main-process event as readiness when it races registration", async () => {
     const rpc = createFakeLocalDaemonTransportRpc();
     const cleanup = vi.fn();
@@ -91,6 +106,27 @@ describe("desktop-daemon-transport", () => {
       host: "deploy@example.com",
       sshPort: 2222,
       daemonPort: 7777,
+    });
+  });
+
+  it("passes the pinned TCP target and requested protocols to the VS Code bridge", async () => {
+    const rpc = createFakeLocalDaemonTransportRpc();
+    const transportFactory = createDesktopDaemonTransportFactory(rpc);
+    expect(transportFactory).not.toBeNull();
+
+    const url = buildDesktopDaemonTransportUrl({
+      transportType: "tcp",
+      endpoint: "127.0.0.1:6767",
+    });
+    transportFactory!({ url, protocols: ["paseo.extra"] });
+    rpc.resolveListen(vi.fn());
+    await Promise.resolve();
+
+    expect(rpc.openCalls).toHaveLength(1);
+    expect(rpc.openCalls[0]?.target).toEqual({
+      transportType: "tcp",
+      endpoint: "127.0.0.1:6767",
+      protocols: ["paseo.extra"],
     });
   });
 

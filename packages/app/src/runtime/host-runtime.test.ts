@@ -31,6 +31,7 @@ import type { ReplicaRow, ReplicaRowStore } from "./replica-cache/row-store";
 
 import { subscriptionFixture } from "./subscription-fixture";
 import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-credential";
+import { resolveConnectionCredentials } from "@/utils/test-daemon-connection";
 import type { HostConfirmationRequest } from "./host-confirmation";
 
 it("requests the managed connection credential through desktop main without a web hint", async () => {
@@ -49,6 +50,34 @@ it("requests the managed connection credential through desktop main without a we
   token = "rotated-token";
   expect(await readDesktopManagedLocalCredential(connection, invoke)).toBe("rotated-token");
   expect(requests).toEqual(["localhost:6767", "localhost:6767"]);
+});
+
+it("never requests desktop credentials for a VS Code bridge", async () => {
+  const invoke = vi.fn();
+  const connection: HostConnection = {
+    id: "bridge:127.0.0.1:6767",
+    type: "directTcpBridge",
+    endpoint: "127.0.0.1:6767",
+  };
+
+  expect(await readDesktopManagedLocalCredential(connection, invoke)).toBeUndefined();
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("does not give a VS Code bridge its host profile password", () => {
+  const connection: HostConnection = {
+    id: "bridge:127.0.0.1:6767",
+    type: "directTcpBridge",
+    endpoint: "127.0.0.1:6767",
+  };
+  const host = makeHost({ password: "renderer-owned-secret", connections: [connection] });
+
+  expect(
+    resolveConnectionCredentials(connection, {
+      password: host.password,
+      localCredential: () => undefined,
+    }),
+  ).not.toHaveProperty("password");
 });
 
 class FakeDaemonClient {
@@ -668,6 +697,24 @@ function onceHostSnapshotMatches(
   });
 }
 
+async function withGlobalWindow<T>(value: unknown, run: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    writable: true,
+    value,
+  });
+  try {
+    return await run();
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(globalThis, "window", descriptor);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+}
+
 class BrowserClientLifecycle {
   public active: Array<{ serverId: string; connectionId: string }> = [];
 
@@ -681,6 +728,30 @@ class BrowserClientLifecycle {
 }
 
 describe("HostRuntimeController", () => {
+  it("exposes direct TCP bridge connections as the active connection", async () => {
+    const bridge: HostConnection = {
+      id: "bridge:127.0.0.1:6767",
+      type: "directTcpBridge",
+      endpoint: "127.0.0.1:6767",
+    };
+    const clients: FakeDaemonClient[] = [];
+    const controller = new HostRuntimeController({
+      host: makeHost({
+        connections: [bridge],
+        preferredConnectionId: bridge.id,
+      }),
+      deps: makeDeps({ [bridge.id]: 12 }, clients),
+    });
+
+    await controller.start({ autoProbe: false });
+
+    expect(controller.getSnapshot().activeConnection).toEqual({
+      type: "directTcpBridge",
+      endpoint: "127.0.0.1:6767",
+      display: "127.0.0.1:6767",
+    });
+    expect(controller.getSnapshot().connectionStatus).toBe("online");
+  });
   it("publishes an old host and mounts observations through the client interface", async () => {
     const host = makeHost();
     const client = new FakeDaemonClient();
@@ -1655,6 +1726,63 @@ describe("HostRuntimeController", () => {
 });
 
 describe("HostRuntimeStore", () => {
+  it("bootstraps a passwordless VS Code bridge connection from runtime config", async () => {
+    await withGlobalWindow(
+      {
+        paseoVscode: {
+          endpoint: "127.0.0.1:6767",
+          hasPassword: true,
+          bridgeProtocol: 1,
+          workspaceFolders: [],
+        },
+        paseoDesktop: {},
+      },
+      async () => {
+        const seenConnections: HostConnection[] = [];
+        const store = new HostRuntimeStore({
+          deps: {
+            createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+            connectToDaemon: async ({ connection }) => {
+              seenConnections.push(connection);
+              return {
+                client: makeConnectedProbeClient(5) as unknown as DaemonClient,
+                serverId: "srv_vscode",
+                hostname: "vscode-host",
+              };
+            },
+            getClientId: async () => "cid_test_runtime",
+          },
+        });
+
+        await store.boot();
+
+        expect(seenConnections).toEqual([
+          {
+            id: "bridge:127.0.0.1:6767",
+            type: "directTcpBridge",
+            endpoint: "127.0.0.1:6767",
+          },
+        ]);
+        expect(store.getHosts()).toMatchObject([
+          {
+            serverId: "srv_vscode",
+            label: "vscode-host",
+            connections: [
+              {
+                id: "bridge:127.0.0.1:6767",
+                type: "directTcpBridge",
+                endpoint: "127.0.0.1:6767",
+              },
+            ],
+          },
+        ]);
+        expect(store.getHosts()[0]?.connections[0]).not.toHaveProperty("password");
+
+        store.syncHosts([]);
+      },
+    );
+  });
+
   it.each(["active", "inactive", "background"] as const)(
     "keeps reconnect enabled through inactive/background and resumes immediately (mounted %s)",
     async (currentState) => {

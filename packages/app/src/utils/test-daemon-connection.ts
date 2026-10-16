@@ -116,13 +116,13 @@ export function getConnectionAuthFailureReason(error: unknown): DaemonAuthFailur
   return getDaemonAuthFailureReason(error);
 }
 
-function resolveConnectionCredentials(
+export function resolveConnectionCredentials(
   connection: HostConnection,
   options:
     | { password?: string; localCredential?: DaemonClientConfig["localCredential"] }
     | undefined,
 ): Pick<DaemonClientConfig, "password" | "localCredential"> {
-  const password = options?.password;
+  const password = connection.type === "directTcpBridge" ? undefined : options?.password;
   return {
     ...(password ? { password } : {}),
     ...(options?.localCredential ? { localCredential: options.localCredential } : {}),
@@ -157,8 +157,7 @@ export async function buildClientConfig(
     ...resolveConnectionCredentials(connection, options),
     ...(options?.capabilities ? { capabilities: options.capabilities } : {}),
     ...(options?.trace ? { trace: options.trace } : {}),
-    ...((connection.type === "directSocket" || connection.type === "directPipe") &&
-    desktopTransportFactory
+    ...(usesDesktopTransport(connection) && desktopTransportFactory
       ? { transportFactory: desktopTransportFactory }
       : {}),
   };
@@ -169,6 +168,16 @@ export async function buildClientConfig(
       url: deps.buildDesktopTransportUrl({
         transportType: connection.type === "directSocket" ? "socket" : "pipe",
         transportPath: connection.path,
+      }),
+    };
+  }
+
+  if (connection.type === "directTcpBridge") {
+    return {
+      ...base,
+      url: deps.buildDesktopTransportUrl({
+        transportType: "tcp",
+        endpoint: connection.endpoint,
       }),
     };
   }
@@ -202,6 +211,10 @@ export async function buildClientConfig(
     }),
     e2ee: { enabled: true, daemonPublicKeyB64: connection.daemonPublicKeyB64 },
   };
+}
+
+function usesDesktopTransport(connection: HostConnection): boolean {
+  return ["directSocket", "directPipe", "directTcpBridge"].includes(connection.type);
 }
 
 export function connectAndProbe(

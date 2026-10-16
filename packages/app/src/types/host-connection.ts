@@ -35,6 +35,12 @@ export interface DirectPipeHostConnection {
   path: string;
 }
 
+export interface DirectTcpBridgeHostConnection {
+  id: string;
+  type: "directTcpBridge";
+  endpoint: string;
+}
+
 export interface RemoteSshHostConnection {
   id: string;
   type: "remoteSsh";
@@ -53,6 +59,7 @@ export interface RelayHostConnection {
 
 export type HostConnection =
   | DirectTcpHostConnection
+  | DirectTcpBridgeHostConnection
   | DirectSocketHostConnection
   | DirectPipeHostConnection
   | RemoteSshHostConnection
@@ -130,6 +137,9 @@ function hostConnectionEquals(left: HostConnection, right: HostConnection): bool
 
   if (left.type === "directTcp" && right.type === "directTcp") {
     return left.endpoint === right.endpoint && (left.useTls ?? false) === (right.useTls ?? false);
+  }
+  if (left.type === "directTcpBridge" && right.type === "directTcpBridge") {
+    return left.endpoint === right.endpoint;
   }
   if (left.type === "directSocket" && right.type === "directSocket") {
     return left.path === right.path;
@@ -413,6 +423,11 @@ const StoredHostConnectionSchema = z.discriminatedUnion("type", [
   }),
   z.strictObject({
     id: z.string().optional(),
+    type: z.literal("directTcpBridge"),
+    endpoint: z.string(),
+  }),
+  z.strictObject({
+    id: z.string().optional(),
     type: z.literal("directPipe"),
     path: z.string(),
   }),
@@ -463,6 +478,18 @@ function normalizeStoredConnection(connection: StoredHostConnection): HostConnec
   if (connection.type === "directSocket") {
     const path = connection.path.trim();
     return path ? { id: `socket:${path}`, type: "directSocket", path } : null;
+  }
+  if (connection.type === "directTcpBridge") {
+    try {
+      const endpoint = normalizeHostPort(connection.endpoint);
+      return {
+        id: `bridge:${endpoint}`,
+        type: "directTcpBridge",
+        endpoint,
+      };
+    } catch {
+      return null;
+    }
   }
   if (connection.type === "directPipe") {
     const path = connection.path.trim();

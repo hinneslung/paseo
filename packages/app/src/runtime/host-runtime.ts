@@ -31,9 +31,13 @@ import {
 import { resolveAppVersion } from "@/utils/app-version";
 import { ConnectionOfferSchema, type ConnectionOffer } from "@getpaseo/protocol/connection-offer";
 import { HostConfirmations, type HostConfirmationRequest } from "./host-confirmation";
-import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
+import { shouldUseDesktopDaemon, shouldUseVscodeDaemon } from "@/desktop/daemon/desktop-daemon";
 import { isWeb } from "@/constants/platform";
-import { connectToDaemon, getConnectionAuthFailureReason } from "@/utils/test-daemon-connection";
+import {
+  connectToDaemon,
+  getConnectionAuthFailureReason,
+  resolveConnectionCredentials,
+} from "@/utils/test-daemon-connection";
 import { getOrCreateClientId } from "@/utils/client-id";
 import { z } from "zod";
 import { readValidatedJson, readValidatedString } from "@/storage/validated-storage";
@@ -47,6 +51,7 @@ import {
   createDesktopDaemonTransportFactory,
 } from "@/desktop/daemon/desktop-daemon-transport";
 import { getDesktopHost } from "@/desktop/host";
+import { getVscodeRuntimeConfig } from "@/desktop/vscode/host";
 import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-credential";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import { BROWSER_AUTOMATION_COMMAND_NAMES } from "@getpaseo/protocol/browser-automation/rpc-schemas";
@@ -114,6 +119,7 @@ export type ConnectionLinkImport =
 
 export type ActiveConnection =
   | { type: "directTcp"; endpoint: string; display: string }
+  | { type: "directTcpBridge"; endpoint: string; display: string }
   | { type: "directSocket"; endpoint: string; display: "socket" }
   | { type: "directPipe"; endpoint: string; display: "pipe" }
   | { type: "remoteSsh"; endpoint: string; display: string }
@@ -258,6 +264,13 @@ function toActiveConnection(connection: HostConnection): ActiveConnection {
   if (connection.type === "directTcp") {
     return {
       type: "directTcp",
+      endpoint: connection.endpoint,
+      display: connection.endpoint,
+    };
+  }
+  if (connection.type === "directTcpBridge") {
+    return {
+      type: "directTcpBridge",
       endpoint: connection.endpoint,
       display: connection.endpoint,
     };
@@ -546,17 +559,28 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
         capabilities: appCapabilities,
         trace: nativePerformanceTrace,
         providerSnapshots: "wire",
-        ...(host.password ? { password: host.password } : {}),
-        localCredential: () => readDesktopManagedLocalCredential(connection),
+        ...resolveConnectionCredentials(connection, {
+          password: host.password,
+          localCredential: () => readDesktopManagedLocalCredential(connection),
+        }),
       } satisfies Omit<DaemonClientConfig, "url">;
-      if (connection.type === "directSocket" || connection.type === "directPipe") {
+      if (
+        connection.type === "directSocket" ||
+        connection.type === "directPipe" ||
+        connection.type === "directTcpBridge"
+      ) {
+        const target =
+          connection.type === "directTcpBridge"
+            ? { transportType: "tcp" as const, endpoint: connection.endpoint }
+            : {
+                transportType:
+                  connection.type === "directSocket" ? ("socket" as const) : ("pipe" as const),
+                transportPath: connection.path,
+              };
         return new DaemonClient({
           ...base,
           ...(desktopTransportFactory ? { transportFactory: desktopTransportFactory } : {}),
-          url: buildDesktopDaemonTransportUrl({
-            transportType: connection.type === "directSocket" ? "socket" : "pipe",
-            transportPath: connection.path,
-          }),
+          url: buildDesktopDaemonTransportUrl(target),
         });
       }
       if (connection.type === "remoteSsh") {
@@ -600,7 +624,7 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
     connectToDaemon: ({ host, connection, timeoutMs }) =>
       connectToDaemon(connection, {
         ...(host.serverId ? { serverId: host.serverId } : {}),
-        ...(host.password ? { password: host.password } : {}),
+        ...resolveConnectionCredentials(connection, { password: host.password }),
         localCredential: () => readDesktopManagedLocalCredential(connection),
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
         capabilities: appCapabilities,
@@ -1574,6 +1598,11 @@ export class HostRuntimeStore {
       return;
     }
 
+    if (shouldUseVscodeDaemon()) {
+      await this.bootstrapVscodeDaemon();
+      return;
+    }
+
     const initialHint = this.deps.readInitialConnectionHint
       ? this.deps.readInitialConnectionHint()
       : readInitialDaemonConnectionHint();
@@ -1677,6 +1706,42 @@ export class HostRuntimeStore {
     } catch (error) {
       console.warn("[HostRuntime] bootstrap probe failed", {
         endpoint: LOCALHOST_FALLBACK_ENDPOINT,
+        error,
+      });
+    }
+  }
+
+  private async bootstrapVscodeDaemon(): Promise<void> {
+    const endpoint = getVscodeRuntimeConfig()?.endpoint?.trim();
+    if (!endpoint) {
+      return;
+    }
+
+    let normalizedEndpoint: string;
+    try {
+      normalizedEndpoint = normalizeHostPort(endpoint);
+    } catch (error) {
+      console.warn("[HostRuntime] VS Code daemon endpoint is invalid", { endpoint, error });
+      return;
+    }
+
+    const connection: HostConnection = {
+      id: `bridge:${normalizedEndpoint}`,
+      type: "directTcpBridge",
+      endpoint: normalizedEndpoint,
+    };
+    if (registryHasConnection(this.hosts, connection)) {
+      return;
+    }
+
+    try {
+      await this.probeAndUpsertConnection({
+        connection,
+        timeoutMs: DEFAULT_LOCALHOST_BOOTSTRAP_TIMEOUT_MS,
+      });
+    } catch (error) {
+      console.warn("[HostRuntime] VS Code bootstrap probe failed", {
+        endpoint: normalizedEndpoint,
         error,
       });
     }

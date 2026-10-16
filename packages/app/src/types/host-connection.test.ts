@@ -85,6 +85,55 @@ describe("normalizeStoredHostProfile", () => {
     expect(profile?.connections[0]).not.toHaveProperty("password");
   });
 
+  it("loads direct TCP bridge connections without loopback rewriting", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_vscode",
+      connections: [
+        {
+          id: "bridge:localhost:6767",
+          type: "directTcpBridge",
+          endpoint: "127.0.0.1:6767",
+        },
+      ],
+    });
+
+    expect(profile?.connections[0]).toEqual({
+      id: "bridge:127.0.0.1:6767",
+      type: "directTcpBridge",
+      endpoint: "127.0.0.1:6767",
+    });
+  });
+
+  it("rejects passwords in renderer-owned bridge connections", () => {
+    expect(
+      normalizeStoredHostProfile({
+        serverId: "srv_vscode",
+        connections: [
+          {
+            type: "directTcpBridge",
+            endpoint: "127.0.0.1:6767",
+            password: "must-stay-in-extension-host",
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("drops invalid direct TCP bridge connections", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_vscode",
+      connections: [
+        {
+          id: "bridge:missing-port",
+          type: "directTcpBridge",
+          endpoint: "missing-port",
+        },
+      ],
+    });
+
+    expect(profile).toBeNull();
+  });
+
   it("preserves legacy relay ids when TLS is absent", () => {
     const profile = normalizeStoredHostProfile({
       serverId: "srv_relay",

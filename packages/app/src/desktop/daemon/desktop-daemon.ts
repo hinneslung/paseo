@@ -64,6 +64,13 @@ export interface LocalTransportTarget {
   transportPath: string;
 }
 
+export interface TcpBridgeTransportTarget {
+  [key: string]: unknown;
+  transportType: "tcp";
+  endpoint: string;
+  protocols?: string[];
+}
+
 export interface RemoteSshTransportTarget {
   [key: string]: unknown;
   transportType: "ssh";
@@ -72,7 +79,10 @@ export interface RemoteSshTransportTarget {
   daemonPort?: number;
 }
 
-export type DesktopDaemonTransportTarget = LocalTransportTarget | RemoteSshTransportTarget;
+export type DesktopDaemonTransportTarget =
+  | LocalTransportTarget
+  | TcpBridgeTransportTarget
+  | RemoteSshTransportTarget;
 
 export interface OpenLocalTransportSessionInput {
   [key: string]: unknown;

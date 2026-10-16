@@ -46,6 +46,9 @@ class FakeDaemonProbe {
     resolveAppVersion: () => null,
     createDesktopTransportFactory: () => null,
     buildDesktopTransportUrl: (target) => {
+      if (target.transportType === "tcp") {
+        return `paseo+desktop://tcp?endpoint=${encodeURIComponent(target.endpoint)}`;
+      }
       if (target.transportType === "ssh") {
         return `paseo+desktop://ssh?host=${encodeURIComponent(target.host)}`;
       }
@@ -170,6 +173,29 @@ describe("test-daemon-connection connectToDaemon", () => {
     });
   });
 
+  it("uses the extension-host transport for VS Code TCP bridge connections", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const transportFactory = vi.fn();
+    const result = await connectToDaemon(
+      {
+        id: "bridge:127.0.0.1:6767",
+        type: "directTcpBridge",
+        endpoint: "127.0.0.1:6767",
+      },
+      undefined,
+      {
+        ...probe.deps,
+        createDesktopTransportFactory: () => transportFactory,
+      },
+    );
+    await result.client.close();
+
+    expect(probe.createdConfigs()[0]).toMatchObject({
+      url: "paseo+desktop://tcp?endpoint=127.0.0.1%3A6767",
+      transportFactory,
+    });
+  });
+
   it("passes the host password into the client config", async () => {
     const { connectToDaemon } = await import("./test-daemon-connection");
     const result = await connectToDaemon(
@@ -184,6 +210,22 @@ describe("test-daemon-connection connectToDaemon", () => {
     await result.client.close();
 
     expect(probe.createdConfigs()[0]?.password).toBe("shared-secret");
+  });
+
+  it("does not pass a stored host password to a VS Code bridge", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const result = await connectToDaemon(
+      {
+        id: "bridge:127.0.0.1:6767",
+        type: "directTcpBridge",
+        endpoint: "127.0.0.1:6767",
+      },
+      { password: "renderer-owned-secret" },
+      probe.deps,
+    );
+    await result.client.close();
+
+    expect(probe.createdConfigs()[0]).not.toHaveProperty("password");
   });
 
   it("passes performance tracing into the connected client", async () => {
