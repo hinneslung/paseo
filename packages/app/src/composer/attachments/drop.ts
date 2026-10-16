@@ -5,6 +5,8 @@ import {
 } from "@/attachments/file-types";
 import { readDesktopFileBytes, type SelectedFile } from "@/attachments/selected-file";
 import type { DroppedItem } from "@/components/file-drop/types";
+import { appendFileMentionPaths } from "@/utils/file-mention-autocomplete";
+import { splitDroppedItemsForMentions } from "@/workspace/file-drop-mentions";
 
 interface DroppedAttachmentsRuntime {
   readDesktopFileBytes(path: string): Promise<Uint8Array>;
@@ -57,4 +59,25 @@ export function droppedItemsToSelectedFiles(
   }
 
   return files;
+}
+
+export function prepareComposerDroppedItems(
+  input: {
+    items: DroppedItem[];
+    cwd: string;
+    getLiveText(): string | undefined;
+    getPublishedText(): string;
+  },
+  runtime: DroppedAttachmentsRuntime = defaultRuntime,
+): { currentInput: string; nextInput: string; files: SelectedFile[] } {
+  const { mentionPaths, uploadItems } = splitDroppedItemsForMentions({
+    items: input.items,
+    cwd: input.cwd,
+  });
+  const currentInput = input.getLiveText() ?? input.getPublishedText();
+  return {
+    currentInput,
+    nextInput: appendFileMentionPaths({ text: currentInput, relativePaths: mentionPaths }),
+    files: droppedItemsToSelectedFiles(uploadItems, runtime),
+  };
 }

@@ -130,7 +130,7 @@ import type { SelectedFile } from "@/attachments/selected-file";
 import { resolveComposerAttachmentSubmitFormat } from "@/composer/attachments/submit";
 import { composerWorkspaceAttachment } from "@/composer/attachments/workspace";
 import { useWorkspaceAttachmentsForScopes } from "@/attachments/workspace-attachments-store";
-import { droppedItemsToSelectedFiles } from "@/composer/attachments/drop";
+import { prepareComposerDroppedItems } from "@/composer/attachments/drop";
 import { getFileTypeLabel } from "@/attachments/file-types";
 import { Combobox, ComboboxItem, type ComboboxOption } from "@/components/ui/combobox";
 import {
@@ -1806,7 +1806,16 @@ function ComposerContentImpl({
   const handleGenericFilesDropped = useCallback(
     async (items: DroppedItem[]) => {
       try {
-        const files = droppedItemsToSelectedFiles(items);
+        const { currentInput, nextInput, files } = prepareComposerDroppedItems({
+          items,
+          cwd,
+          getLiveText: () => messageInputRef.current?.getText(),
+          getPublishedText: () => textSource.getSnapshot(),
+        });
+        if (nextInput !== currentInput) {
+          replaceUserInput(nextInput, { start: nextInput.length, end: nextInput.length });
+          messageInputRef.current?.focus();
+        }
         if (files.length === 0) return;
         if (!client || !isConnected) {
           toastErrorRef.current(t("composer.errors.daemonClientDisconnected"));
@@ -1820,7 +1829,7 @@ function ComposerContentImpl({
         );
       }
     },
-    [client, isConnected, t, uploadSelectedFiles],
+    [client, cwd, isConnected, replaceUserInput, t, textSource, uploadSelectedFiles],
   );
 
   const handleRemoveAttachment = useCallback(

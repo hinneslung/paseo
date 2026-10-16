@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { droppedItemsToSelectedFiles } from "./drop";
+import { describe, expect, it, vi } from "vitest";
+import { droppedItemsToSelectedFiles, prepareComposerDroppedItems } from "./drop";
 
 describe("composer dropped attachments", () => {
   it("turns non-image browser files into selected files and leaves raster images for image handling", async () => {
@@ -56,5 +56,23 @@ describe("composer dropped attachments", () => {
     expect(await files[0]?.readBytes()).toEqual(new Uint8Array([1, 2, 3]));
     expect(await files[1]?.readBytes()).toEqual(new Uint8Array([4, 5]));
     expect(readPaths).toEqual([windowsPath, posixPath]);
+  });
+
+  it("adds a VS Code file URI to unpublished live text without uploading it", () => {
+    const getPublishedText = vi.fn(() => "published draft");
+
+    const result = prepareComposerDroppedItems({
+      cwd: "/home/dev/repo",
+      items: [{ kind: "file-uri", path: "/home/dev/repo/src/index.ts" }],
+      getLiveText: () => "unpublished edit",
+      getPublishedText,
+    });
+
+    expect(result).toMatchObject({
+      currentInput: "unpublished edit",
+      nextInput: 'unpublished edit "src/index.ts"',
+      files: [],
+    });
+    expect(getPublishedText).not.toHaveBeenCalled();
   });
 });
